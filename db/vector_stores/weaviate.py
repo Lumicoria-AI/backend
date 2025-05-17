@@ -1,0 +1,1 @@
+// Weaviate connection and models 
