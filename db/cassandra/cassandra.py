@@ -2,7 +2,7 @@ from cassandra.cluster import Cluster, Session
 from cassandra.auth import PlainTextAuthProvider
 from cassandra.cqlengine.connection import register_connection, set_default_connection
 from typing import Optional, List
-from core.config import settings
+from ...core.config import settings
 import structlog
 
 logger = structlog.get_logger()

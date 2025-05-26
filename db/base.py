@@ -1,13 +1,21 @@
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base, sessionmaker
-from core.config import settings
+from ..core.config import settings
+import structlog
 
-engine = create_async_engine(
-    settings.SQLALCHEMY_DATABASE_URI,
-    pool_pre_ping=True,
-    echo=False,
-    future=True
-)
+logger = structlog.get_logger()
+
+try:
+    engine = create_async_engine(
+        settings.DATABASE_URL,
+        pool_pre_ping=True,
+        echo=False,
+        future=True
+    )
+    logger.info("PostgreSQL engine created successfully")
+except Exception as e:
+    logger.error("Failed to create PostgreSQL engine", error=str(e))
+    raise
 
 AsyncSessionLocal = sessionmaker(
     engine,
@@ -24,7 +32,8 @@ async def get_db() -> AsyncSession:
         try:
             yield session
             await session.commit()
-        except Exception:
+        except Exception as e:
+            logger.error("Database session error", error=str(e))
             await session.rollback()
             raise
         finally:

@@ -6,11 +6,13 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 import sentry_sdk
 import structlog
 from contextlib import asynccontextmanager
-from api.v1.endpoints import auth
+from api.v1.api import api_router
 from core.config import settings
 import time
 import prometheus_client
 from prometheus_client import Counter, Histogram
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
 
 # Initialize Sentry
 if settings.SENTRY_DSN:
@@ -45,25 +47,50 @@ REQUEST_LATENCY = Histogram(
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting up application")
+    # Create upload directory if it doesn't exist
+    settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     yield
     # Shutdown
     logger.info("Shutting down application")
 
 app = FastAPI(
     title="Lumicoria AI API",
-    description="Production-grade API for Lumicoria AI Platform",
+    description="""
+    Backend API for Lumicoria AI - Your AI-powered productivity assistant.
+    
+    ## Features
+    * User authentication with JWT tokens
+    * User profile management
+    * User settings management
+    * Avatar upload and management
+    
+    ## Authentication
+    All endpoints except `/auth/login` and `/auth/signup` require authentication.
+    Include the JWT token in the Authorization header:
+    ```
+    Authorization: Bearer <your_token>
+    ```
+    """,
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url=f"{settings.API_V1_STR}/openapi.json",
 )
 
-# CORS middleware
+# Set up CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[str(origin) for origin in settings.BACKEND_CORS_ORIGINS],
+    allow_origins=settings.BACKEND_CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Range", "X-Content-Range"],
+    max_age=3600,
 )
+
+# Mount static files for user uploads
+app.mount("/uploads", StaticFiles(directory=str(settings.UPLOAD_DIR)), name="uploads")
 
 # Request logging middleware
 @app.middleware("http")
@@ -96,7 +123,9 @@ async def log_requests(request: Request, call_next):
             method=request.method,
             path=request.url.path,
             status_code=status_code,
-            duration=duration
+            duration=duration,
+            client_ip=request.client.host,
+            user_agent=request.headers.get("user-agent")
         )
     
     return response
@@ -130,19 +159,29 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # Health check endpoint
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    return {
+        "status": "healthy",
+        "version": "1.0.0",
+        "environment": settings.ENVIRONMENT
+    }
 
 # Metrics endpoint
 @app.get("/metrics")
 async def metrics():
     return prometheus_client.generate_latest()
 
-# Include routers
-app.include_router(
-    auth.router,
-    prefix=f"{settings.API_V1_STR}/auth",
-    tags=["authentication"]
-)
+# Include API router
+app.include_router(api_router, prefix=settings.API_V1_STR)
+
+@app.get("/")
+async def root():
+    return {
+        "message": "Welcome to Lumicoria AI API",
+        "version": "1.0.0",
+        "docs_url": "/docs",
+        "redoc_url": "/redoc",
+        "openapi_url": f"{settings.API_V1_STR}/openapi.json",
+    }
 
 if __name__ == "__main__":
     import uvicorn
@@ -151,5 +190,6 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000,
         reload=True,
-        workers=4
+        workers=4,
+        log_level=settings.LOG_LEVEL.lower()
     ) 

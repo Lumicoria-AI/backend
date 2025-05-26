@@ -1,10 +1,9 @@
-
 from typing import Optional, Protocol, Dict, Any
 from abc import ABC, abstractmethod
 import weaviate
 from qdrant_client import QdrantClient
 import chromadb
-from core.config import settings
+from ...core.config import settings
 import structlog
 
 logger = structlog.get_logger()

@@ -1,6 +1,6 @@
 from redis.asyncio import Redis, ConnectionPool
 from typing import Optional
-from core.config import settings
+from ...core.config import settings
 import structlog
 
 logger = structlog.get_logger()
