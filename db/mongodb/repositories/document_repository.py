@@ -9,6 +9,8 @@ from ...models.mongodb_models import (
     DocumentType,
 )
 import structlog
+from agents.agent_service import AgentService
+from agents.document_agent import DocumentAgent
 
 logger = structlog.get_logger()
 
@@ -159,15 +161,14 @@ class DocumentRepository(BaseRepository[Document]):
                 "total_count": {"$sum": "$count"},
                 "summary_by_status": {"$push": {"status": "$_id.status", "count": "$count"}},
                 "summary_by_type": {"$push": {"type": "$_id.type", "count": "$count"}}
-            }},
-            {"$project": {
+            }},            {"$project": {
                 "_id": 0,
                 "total_count": 1,
                 "summary_by_status": 1,
                 "summary_by_type": 1
             }}
         ]
-
+        
         results = await self.aggregate(pipeline)
         if results:
             return results[0]
@@ -176,7 +177,7 @@ class DocumentRepository(BaseRepository[Document]):
             "summary_by_status": [],
             "summary_by_type": []
         }
-
+        
     async def get_recent_documents_with_counts(
         self,
         organization_id: str,
@@ -212,6 +213,313 @@ class DocumentRepository(BaseRepository[Document]):
 
         results = await self.aggregate(pipeline)
         return results
+        
+    async def extract_document_data(
+        self,
+        document_id: str,
+        organization_id: str,
+        extraction_config: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Extract data from a document using Perplexity AI.
+        
+        Args:
+            document_id: Document ID
+            organization_id: Organization ID
+            extraction_config: Optional extraction configuration
+            
+        Returns:
+            Extraction results
+        """
+        # Get the document
+        document = await self.get_document_by_id(document_id, organization_id)
+        if not document:
+            raise ValueError(f"Document not found: {document_id}")
+            
+        # Get document content - in a real implementation, this would retrieve the actual content
+        # For this example, we'll assume document.file_url points to the content or that we can retrieve it
+        document_content = await self._get_document_content(document)
+        
+        # Default extraction targets if not provided in config
+        if extraction_config is None:
+            extraction_config = {}
+            
+        extraction_targets = extraction_config.get("extraction_targets", [
+            "tasks", "dates", "names", "organizations", 
+            "monetary amounts", "action items", "key points"
+        ])
+        
+        # Create document agent config
+        agent_config = {
+            "type": "document",
+            "extraction_targets": extraction_targets,
+            "model_config": {
+                "model": "sonar-large-online"  # Use Perplexity's Sonar model
+            }
+        }
+        
+        try:
+            # Create document agent
+            document_agent = DocumentAgent(agent_config)
+            
+            # Process document asynchronously for better performance
+            document_data = {
+                "text": document_content,
+                "metadata": {
+                    "id": str(document.id),
+                    "name": document.name,
+                    "document_type": document.document_type
+                }
+            }
+            
+            # Extract data
+            extraction_result = await document_agent.process_async(document_data)
+            
+            # Update document with extraction results
+            update_data = {
+                "$set": {
+                    "extraction_status": "completed",
+                    "extraction_result": extraction_result,
+                    "updated_at": datetime.utcnow()
+                }
+            }
+            
+            await self.update_one({"_id": ObjectId(document_id)}, update_data)
+            
+            return extraction_result
+            
+        except Exception as e:
+            # Update document with extraction error
+            update_data = {
+                "$set": {
+                    "extraction_status": "failed",
+                    "extraction_error": str(e),
+                    "updated_at": datetime.utcnow()
+                }
+            }
+            
+            await self.update_one({"_id": ObjectId(document_id)}, update_data)
+            
+            # Re-raise exception
+            raise
+    
+    async def _get_document_content(self, document: Document) -> str:
+        """
+        Get the content of a document.
+        
+        In a real implementation, this would retrieve the actual document content
+        from storage (e.g., S3, file system).
+        
+        Args:
+            document: Document model
+            
+        Returns:
+            Document content as text
+        """
+        # TODO: Implement actual document content retrieval
+        # This is a placeholder - in a real implementation, you would:
+        # 1. Get the file from storage using document.file_url
+        # 2. Extract the text content (using appropriate parser for the file type)
+        # 3. Return the text content
+        
+        # For now, return a placeholder
+        return f"This is the content of document '{document.name}' of type {document.document_type}."
+        
+    async def create_tasks_from_document(
+        self,
+        document_id: str,
+        organization_id: str,
+        created_by: str,
+        task_config: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Create tasks from a document using Perplexity AI.
+        
+        Args:
+            document_id: Document ID
+            organization_id: Organization ID
+            created_by: User ID of task creator
+            task_config: Optional task generation configuration
+            
+        Returns:
+            List of created tasks
+        """
+        # Get the document
+        document = await self.get_document_by_id(document_id, organization_id)
+        if not document:
+            raise ValueError(f"Document not found: {document_id}")
+            
+        # Get document content
+        document_content = await self._get_document_content(document)
+        
+        # Configure document agent
+        agent_config = {
+            "type": "document",
+            "model_config": {
+                "model": "sonar-large-online"  # Use Perplexity's Sonar model
+            }
+        }
+        
+        try:
+            # Create document agent
+            document_agent = DocumentAgent(agent_config)
+            
+            # Process document to extract tasks
+            document_data = {
+                "text": document_content,
+                "metadata": {
+                    "id": str(document.id),
+                    "name": document.name,
+                    "document_type": document.document_type
+                },
+                "user_context": task_config or {}  # Pass any task configuration as user context
+            }
+            
+            # Extract tasks
+            result = await document_agent.process_async(document_data)
+            
+            # Extract tasks from result
+            tasks = result.get("tasks", [])
+            
+            # Create tasks in database
+            created_tasks = []
+            for task in tasks:
+                # Map extracted task properties to task model
+                task_data = {
+                    "title": task.get("title", "Untitled Task"),
+                    "description": task.get("description", ""),
+                    "priority": task.get("priority", "medium"),
+                    "status": "open",
+                    "organization_id": ObjectId(organization_id),
+                    "created_by": ObjectId(created_by),
+                    "document_id": ObjectId(document_id),
+                    "created_at": datetime.utcnow(),
+                    "updated_at": datetime.utcnow()
+                }
+                
+                # Add deadline if present
+                if "deadline" in task:
+                    # In a real implementation, parse the deadline string to a datetime
+                    task_data["due_date"] = task["deadline"]
+                
+                # Add assignee if present
+                if "assignee" in task:
+                    # In a real implementation, look up the user ID for this assignee name
+                    # For now, just store the name
+                    task_data["assignee_name"] = task["assignee"]
+                
+                # Create task in database
+                # In a real implementation, use a task repository
+                # For now, just append to our result list
+                created_tasks.append(task_data)
+            
+            return created_tasks
+            
+        except Exception as e:
+            logger.error(f"Error creating tasks from document: {str(e)}")
+            raise
+    
+    async def query_document(
+        self,
+        document_id: str,
+        organization_id: str,
+        query: str,
+        filters: Optional[Dict[str, Any]] = None,
+        include_extracted_data: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Query document content using natural language.
+        
+        Args:
+            document_id: Document ID
+            organization_id: Organization ID
+            query: Natural language query
+            filters: Optional query filters
+            include_extracted_data: Whether to include full extracted data
+            
+        Returns:
+            Query results
+        """
+        # Get the document
+        document = await self.get_document_by_id(document_id, organization_id)
+        if not document:
+            raise ValueError(f"Document not found: {document_id}")
+            
+        # Get document content
+        document_content = await self._get_document_content(document)
+        
+        # Configure document agent
+        agent_config = {
+            "type": "document",
+            "model_config": {
+                "model": "sonar-large-online"  # Use Perplexity's Sonar model
+            }
+        }
+        
+        try:
+            # Create document agent
+            document_agent = DocumentAgent(agent_config)
+            
+            # Get existing extraction if available
+            extraction_result = getattr(document, "extraction_result", None)
+            
+            # Process query
+            document_data = {
+                "text": document_content,
+                "metadata": {
+                    "id": str(document.id),
+                    "name": document.name,
+                    "document_type": document.document_type
+                },
+                "extracted_data": extraction_result
+            }
+            
+            # Use Perplexity client directly for querying
+            perplexity_client = document_agent.perplexity_client
+            if not perplexity_client:
+                document_agent.initialize_models()
+                perplexity_client = document_agent.perplexity_client
+            
+            if not perplexity_client:
+                raise ValueError("Failed to initialize Perplexity client")
+            
+            # Query document
+            response = await perplexity_client.query_document(
+                document=document_content,
+                query=query
+            )
+            
+            # Format response
+            result = {
+                "query": query,
+                "response": response.content,
+                "document_id": str(document.id),
+                "document_name": document.name
+            }
+            
+            # Add citations if available
+            if hasattr(response, "citations") and response.citations:
+                result["citations"] = [
+                    {
+                        "text": citation.text,
+                        "metadata": {
+                            "url": citation.metadata.url,
+                            "title": citation.metadata.title,
+                            "snippet": citation.metadata.snippet
+                        }
+                    }
+                    for citation in response.citations
+                ]
+            
+            # Add extracted data if requested
+            if include_extracted_data and extraction_result:
+                result["extracted_data"] = extraction_result
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error querying document: {str(e)}")
+            raise
 
 # Create a singleton instance
 document_repository = DocumentRepository() 

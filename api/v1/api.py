@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from api.v1.endpoints import auth, users, agents, documents, wellbeing, live_interaction, tasks, activity, integrations
+from api.v1.endpoints import auth, users, agents, documents, live_interaction, tasks, activity, integrations, notifications, vision, student, creative, research, projects, meeting, wellbeing, customer_service, translation, data_analysis, social_media, legal_document, learning_coach, rag, lumicoria_chat, agent_studio, workflow_execution
 
 api_router = APIRouter()
 
@@ -54,6 +54,238 @@ api_router.include_router(activity.router, prefix="/activity", tags=["activity"]
 
 # Integrations endpoints
 api_router.include_router(integrations.router, prefix="/integrations", tags=["integrations"])
+
+# Notifications endpoints
+api_router.include_router(
+    notifications.router,
+    prefix="/notifications",
+    tags=["notifications"]
+)
+
+# Vision endpoints
+api_router.include_router(
+    vision.router,
+    prefix="/vision",
+    tags=["vision"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Meeting endpoints
+api_router.include_router(
+    meeting.router,
+    prefix="/meeting",
+    tags=["meeting"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# RAG endpoints
+api_router.include_router(
+    rag.router,
+    prefix="/rag",
+    tags=["rag"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Project management endpoints
+api_router.include_router(
+    projects.router,
+    prefix="/projects",
+    tags=["projects"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Student endpoints
+api_router.include_router(
+    student.router,
+    prefix="/student",
+    tags=["student"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Creative endpoints
+api_router.include_router(
+    creative.router,
+    prefix="/creative",
+    tags=["creative"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Customer Service endpoints
+api_router.include_router(
+    customer_service.router,
+    prefix="/customer-service",
+    tags=["customer service"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        403: {"description": "Forbidden"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Translation endpoints
+api_router.include_router(
+    translation.router,
+    prefix="/translation",
+    tags=["translation"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Data Analysis endpoints
+api_router.include_router(
+    data_analysis.router,
+    prefix="/data-analysis",
+    tags=["data-analysis"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        403: {"description": "Forbidden"},
+        404: {"description": "Not Found"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Social Media endpoints
+api_router.include_router(
+    social_media.router,
+    prefix="/social-media",
+    tags=["social-media"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        403: {"description": "Forbidden"},
+        404: {"description": "Not Found"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Legal Document endpoints
+api_router.include_router(
+    legal_document.router,
+    prefix="/legal-document",
+    tags=["legal-document"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        403: {"description": "Forbidden"},
+        404: {"description": "Not Found"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Learning Coach endpoints
+api_router.include_router(
+    learning_coach.router,
+    prefix="/learning-coach",
+    tags=["learning-coach"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        403: {"description": "Forbidden"},
+        404: {"description": "Not Found"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Lumicoria Chat endpoints - the main assistant interface
+api_router.include_router(
+    lumicoria_chat.router,
+    prefix="/lumicoria",
+    tags=["lumicoria-ai"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        403: {"description": "Forbidden"},
+        404: {"description": "Not Found"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Agent Studio endpoints
+api_router.include_router(
+    agent_studio.router,
+    prefix="/agent-studio",
+    tags=["agent-studio"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        403: {"description": "Forbidden"},
+        404: {"description": "Not Found"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Workflow Execution endpoints
+api_router.include_router(
+    workflow_execution.router,
+    prefix="/workflow-execution",
+    tags=["workflow-execution"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        403: {"description": "Forbidden"},
+        404: {"description": "Not Found"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
 
 # API Documentation
 """
@@ -172,3 +404,16 @@ Error Response:
   "detail": string | object[]
 }
 """ 
+
+# Add response codes to all routers
+for route in api_router.routes:
+    if hasattr(route, "responses"):
+        route.responses.update({
+            200: {"description": "Success"},
+            400: {"description": "Bad Request"},
+            401: {"description": "Unauthorized"},
+            403: {"description": "Forbidden"},
+            404: {"description": "Not Found"},
+            422: {"description": "Validation Error"},
+            500: {"description": "Internal Server Error"}
+        }) 

@@ -1,0 +1,45 @@
+ai_models:
+  perplexity:
+    api_key: YOUR_PERPLEXITY_API_KEY
+    model: "sonar-large-online"
+
+
+agents:
+  document_agent:
+    type: "document"
+    model: "perplexity"
+  wellbeing_agent:
+    type: "wellbeing"
+    model: "perplexity"
+  vision_agent:
+    type: "vision"
+    model: "perplexity"
+    vision_tasks: ["text_extraction", "object_detection", "scene_analysis", "content_description"]
+    model_config:
+      model: "sonar-large-online"
+  meeting_agent:
+    type: "meeting"
+    model: "perplexity"
+  creative_agent:
+    type: "creative"
+    model: "mistral"  student_agent:
+    type: "student"
+    model: "perplexity"
+  rag:
+    type: "rag"
+    model: "perplexity"
+    model_config:
+      model: "sonar-medium-online"
+      temperature: 0.7
+      max_tokens: 1024
+    context_settings:
+      max_chunks: 8
+      max_tokens: 8000
+    system_prompt_template: |
+      You are Lumicoria.ai, an AI assistant with access to the user's documents and knowledge. 
+      Use the following context to help answer the user's question. 
+      If the context doesn't contain relevant information, draw on your general knowledge 
+      but prioritize what's in the user's documents. 
+      Be clear when you're using information from their documents vs. your general knowledge.
+
+      {context}

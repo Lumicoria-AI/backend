@@ -8,81 +8,146 @@ from models.integration import Integration, IntegrationType
 # from services.google_calendar_client import GoogleCalendarClient
 # from services.slack_client import SlackClient
 # from services.salesforce_client import SalesforceClient
+from integrations.notion import NotionIntegration
+from integrations.google_workspace import GoogleWorkspaceIntegration
+from integrations.slack import SlackIntegration
+from ..core.config import settings
 
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 class IntegrationService:
+    """Service for managing external integrations."""
+    
     def __init__(self):
-        # Initialize any specific integration clients here
-        # self.google_calendar_client = GoogleCalendarClient()
-        # self.slack_client = SlackClient()
-        # self.salesforce_client = SalesforceClient()
-        pass
-
-    async def execute_integration_action(
-        self,
-        integration_id: str,
-        organization_id: str,
-        action: str, # e.g., 'create_event', 'send_message', 'create_record'
-        action_data: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Executes a specific action using a configured integration.
-        Called by agents or other backend components.
-        """
-        await logger.info("Executing integration action", integration_id=integration_id, action=action, organization_id=organization_id)
-
-        # Retrieve integration details from the repository (credentials will be decrypted)
-        integration = await integration_repository.get_integration_by_id(
-            integration_id=integration_id,
-            decrypt_credentials=True
-        )
-
-        if not integration or str(integration.organization_id) != organization_id:
-            await logger.error("Integration not found or organization mismatch", integration_id=integration_id, organization_id=organization_id)
-            raise ValueError("Integration not found or access denied")
-
-        if integration.status != 'active': # Assuming 'active' status indicates ready to use
-             await logger.warning("Attempted to use inactive integration", integration_id=integration_id, status=integration.status)
-             raise ValueError(f"Integration is not active: {integration.status}")
-
-        integration_type = integration.type
-
+        """Initialize integration service."""
+        self.integrations: Dict[str, Any] = {}
+        self._initialize_integrations()
+        
+    def _initialize_integrations(self) -> None:
+        """Initialize available integrations."""
         try:
-            result = {}
-            # --- Route action to the appropriate integration client ---
-            if integration_type == IntegrationType.GOOGLE_WORKSPACE:
-                # TODO: Call Google Calendar, Gmail, or Drive client based on 'action'
-                # result = await self.google_calendar_client.perform_action(integration, action, action_data)
-                result = {"status": "success", "message": f"Dummy Google Workspace action '{action}' executed"}
-
-            elif integration_type == IntegrationType.SLACK:
-                 # TODO: Call Slack client based on 'action'
-                 # result = await self.slack_client.perform_action(integration, action, action_data)
-                 result = {"status": "success", "message": f"Dummy Slack action '{action}' executed"}
-
-            elif integration_type == IntegrationType.SALESFORCE:
-                 # TODO: Call Salesforce client based on 'action'
-                 # result = await self.salesforce_client.perform_action(integration, action, action_data)
-                 result = {"status": "success", "message": f"Dummy Salesforce action '{action}' executed"}
-
-            # Add more integration types here
-
-            else:
-                await logger.warning("Unknown integration type for action", integration_id=integration_id, integration_type=integration_type)
-                raise ValueError(f"Unsupported integration type: {integration_type}")
-
-            # TODO: Log successful action or update sync status if applicable
-            # await integration_repository.update_sync_status(integration_id, datetime.utcnow(), "success")
-
-            return result
-
+            # Initialize Notion integration
+            if settings.NOTION_API_KEY:
+                self.integrations["notion"] = NotionIntegration()
+                logger.info("Notion integration initialized")
+                
+            # Initialize Google Workspace integration
+            if settings.GOOGLE_CREDENTIALS_FILE:
+                self.integrations["google_workspace"] = GoogleWorkspaceIntegration()
+                logger.info("Google Workspace integration initialized")
+                
+            # Initialize Slack integration
+            if settings.SLACK_BOT_TOKEN:
+                self.integrations["slack"] = SlackIntegration()
+                logger.info("Slack integration initialized")
+                
         except Exception as e:
-            error_message = str(e)
-            await logger.error("Error executing integration action", integration_id=integration_id, action=action, error=error_message)
-            # TODO: Add error log to the integration
-            # await integration_repository.add_error_log(integration_id, error_message)
-            raise e # Re-raise the exception after logging
+            logger.error(f"Error initializing integrations: {str(e)}")
+            raise
+            
+    async def execute_integration_action(self,
+                                       integration_type: str,
+                                       action: str,
+                                       data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Execute an action on an integration.
+        
+        Args:
+            integration_type: Type of integration (notion, google_workspace, slack)
+            action: Action to execute
+            data: Action parameters
+            
+        Returns:
+            Dict containing action result
+        """
+        try:
+            integration = self.integrations.get(integration_type)
+            if not integration:
+                raise ValueError(f"Integration type '{integration_type}' not found")
+                
+            # Map action to integration method
+            if integration_type == "notion":
+                if action == "create_project":
+                    return await integration.create_project(**data)
+                elif action == "add_task":
+                    return await integration.add_task(**data)
+                elif action == "export_meeting_notes":
+                    return await integration.export_meeting_notes(**data)
+                    
+            elif integration_type == "google_workspace":
+                if action == "create_calendar_event":
+                    return await integration.create_calendar_event(**data)
+                elif action == "create_document":
+                    return await integration.create_document(**data)
+                elif action == "send_email":
+                    return await integration.send_email(**data)
+                    
+            elif integration_type == "slack":
+                if action == "create_project_channel":
+                    return await integration.create_project_channel(**data)
+                elif action == "add_project_task":
+                    return await integration.add_project_task(**data)
+                elif action == "export_meeting_notes":
+                    return await integration.export_meeting_notes(**data)
+                elif action == "create_reminder":
+                    return await integration.create_reminder(**data)
+                elif action == "search_project_content":
+                    return await integration.search_project_content(**data)
+                elif action == "upload_project_file":
+                    return await integration.upload_project_file(**data)
+                elif action == "get_channel_members":
+                    return await integration.get_channel_members(**data)
+                elif action == "archive_project_channel":
+                    return await integration.archive_project_channel(**data)
+                    
+            raise ValueError(f"Action '{action}' not supported for integration type '{integration_type}'")
+            
+        except Exception as e:
+            logger.error(
+                f"Error executing integration action: {str(e)}",
+                integration_type=integration_type,
+                action=action
+            )
+            raise
+            
+    def get_available_integrations(self) -> Dict[str, Any]:
+        """
+        Get list of available integrations.
+        
+        Returns:
+            Dict containing integration information
+        """
+        return {
+            "notion": {
+                "available": "notion" in self.integrations,
+                "actions": [
+                    "create_project",
+                    "add_task",
+                    "export_meeting_notes"
+                ]
+            },
+            "google_workspace": {
+                "available": "google_workspace" in self.integrations,
+                "actions": [
+                    "create_calendar_event",
+                    "create_document",
+                    "send_email"
+                ]
+            },
+            "slack": {
+                "available": "slack" in self.integrations,
+                "actions": [
+                    "create_project_channel",
+                    "add_project_task",
+                    "export_meeting_notes",
+                    "create_reminder",
+                    "search_project_content",
+                    "upload_project_file",
+                    "get_channel_members",
+                    "archive_project_channel"
+                ]
+            }
+        }
 
 # Create a singleton instance
 integration_service = IntegrationService() 

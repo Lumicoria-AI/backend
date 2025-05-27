@@ -1,6 +1,6 @@
 from typing import List, Optional, Dict, Any, Union
 from pydantic_settings import BaseSettings
-from pydantic import AnyHttpUrl, validator, Field, HttpUrl, ConfigDict, PostgresDsn
+from pydantic import AnyHttpUrl, validator, Field, HttpUrl, ConfigDict
 import secrets
 from functools import lru_cache
 from pathlib import Path
@@ -9,18 +9,9 @@ from pathlib import Path
 class DatabaseSettings(BaseSettings):
     model_config = ConfigDict(extra='allow', case_sensitive=True)
 
-    # PostgreSQL Settings
-    POSTGRES_SERVER: str = "localhost"
-    POSTGRES_USER: str = "postgres"
-    POSTGRES_PASSWORD: str = "postgres"
-    POSTGRES_DB: str = "lumicoria"
-    POSTGRES_PORT: int = 5432
-    POSTGRES_POOL_SIZE: int = 20
-    POSTGRES_MAX_OVERFLOW: int = 10
-
-    # MongoDB Settings (Optional for now)
-    MONGODB_URI: Optional[str] = "mongodb://localhost:27017"
-    MONGODB_DB: Optional[str] = "lumicoria"
+    # MongoDB Settings
+    MONGODB_URI: str = "mongodb://localhost:27017"
+    MONGODB_DB: str = "lumicoria"
     MONGODB_MAX_POOL_SIZE: int = 100
     MONGODB_MIN_POOL_SIZE: int = 10
 
@@ -31,46 +22,52 @@ class DatabaseSettings(BaseSettings):
     REDIS_DB: int = 0
     REDIS_POOL_SIZE: int = 10
 
-    # Cassandra Settings (Optional for now)
-    CASSANDRA_HOSTS: Optional[List[str]] = ["localhost"]
-    CASSANDRA_PORT: int = 9042
-    CASSANDRA_USERNAME: Optional[str] = None
-    CASSANDRA_PASSWORD: Optional[str] = None
-    CASSANDRA_KEYSPACE: Optional[str] = "lumicoria"
-    CASSANDRA_REPLICATION_FACTOR: int = 1
-
-    # Vector Store Settings (Optional for now)
+    # Vector Store Settings
     VECTOR_STORE_TYPE: str = "weaviate"  # weaviate, qdrant, or chroma
     VECTOR_STORE_URL: Optional[str] = "http://localhost:8080"
     VECTOR_STORE_API_KEY: Optional[str] = None
     VECTOR_STORE_COLLECTION: str = "documents"
     VECTOR_STORE_DIMENSION: int = 1536  # Default for OpenAI embeddings
 
-    @property
-    def DATABASE_URL(self) -> str:
-        """Construct the database URL from individual components."""
-        return f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}@{self.POSTGRES_SERVER}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
-
-    @validator("CASSANDRA_HOSTS", pre=True)
-    def assemble_cassandra_hosts(cls, v: Union[str, List[str]]) -> List[str]:
-        if isinstance(v, str):
-            if v.startswith("["):
-                import json
-                try:
-                    return json.loads(v)
-                except json.JSONDecodeError:
-                    return [i.strip() for i in v.split(",")]
-            return [i.strip() for i in v.split(",")]
-        return v or ["localhost"]
-
 
 class Settings(BaseSettings):
-    model_config = ConfigDict(extra='allow', case_sensitive=True, env_file='.env', env_nested_delimiter='__')
-
-    API_V1_STR: str = "/api/v1"
-    SECRET_KEY: str = secrets.token_urlsafe(32)
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 8  # 8 days
+    """Application settings."""
     
+    # API Settings
+    API_V1_STR: str = "/api/v1"
+    PROJECT_NAME: str = "Lumicoria.ai"
+    
+    # Security
+    SECRET_KEY: str
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
+    
+    # Database
+    MONGODB_URL: str
+    DATABASE_NAME: str = "lumicoria"
+    
+    # OpenAI
+    OPENAI_API_KEY: str
+    OPENAI_MODEL: str = "gpt-4-turbo-preview"
+    
+    # Notion
+    NOTION_API_KEY: Optional[str] = None
+    
+    # Google Workspace
+    GOOGLE_CREDENTIALS_FILE: Optional[str] = None
+    GOOGLE_TOKEN_FILE: Optional[str] = None
+    
+    # Slack
+    SLACK_BOT_TOKEN: Optional[str] = None
+    SLACK_APP_TOKEN: Optional[str] = None
+    SLACK_SIGNING_SECRET: Optional[str] = None
+    
+    # Logging
+    LOG_LEVEL: str = "INFO"
+    
+    class Config:
+        env_file = ".env"
+        case_sensitive = True
+
     # CORS Configuration
     BACKEND_CORS_ORIGINS: List[str] = [
         "http://localhost:8080",  # Frontend development server
@@ -102,12 +99,6 @@ class Settings(BaseSettings):
     # Database Configuration
     db: DatabaseSettings = Field(default_factory=DatabaseSettings)
 
-    # Expose database URL at top level for Alembic
-    @property
-    def DATABASE_URL(self) -> str:
-        """Get the database URL from the database settings."""
-        return self.db.DATABASE_URL
-
     # Rate Limiting
     RATE_LIMIT_PER_MINUTE: int = 60
 
@@ -116,31 +107,29 @@ class Settings(BaseSettings):
 
     # Environment
     ENVIRONMENT: str = "development"
-    DEBUG: bool = Field(default_factory=lambda: True if ENVIRONMENT == "development" else False)
+    DEBUG: bool = True  # Will be overridden by environment variable if set
+
+    @validator("DEBUG", pre=True)
+    def set_debug(cls, v: Optional[bool], values: Dict[str, Any]) -> bool:
+        if v is not None:
+            return v
+        return values.get("ENVIRONMENT", "development") == "development"
 
     # Logging
-    LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-
-    # Database
-    SQLALCHEMY_DATABASE_URI: Optional[PostgresDsn] = None
-
-    @validator("SQLALCHEMY_DATABASE_URI", pre=True)
-    def assemble_db_connection(cls, v: Optional[str], values: Dict[str, Any]) -> Any:
-        if isinstance(v, str):
-            return v
-        
-        # Use the existing DATABASE_URL property
-        db = values.get("db")
-        if db:
-            return db.DATABASE_URL
-        
-        return None
 
     # File Upload
     UPLOAD_DIR: Path = Path("uploads")
     MAX_UPLOAD_SIZE: int = 2 * 1024 * 1024  # 2MB
     ALLOWED_EXTENSIONS: set[str] = {"jpg", "jpeg", "png", "gif"}
+
+    # Email Settings
+    SMTP_SERVER: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str = "jacobasuquo199@gmail.com"
+    SMTP_PASSWORD: str = "yesrqkhohhivjdkp"
+    SMTP_FROM_EMAIL: str = "noreply@lumicoria.ai"
+    SMTP_FROM_NAME: str = "Lumicoria.ai"
 
 
 @lru_cache()

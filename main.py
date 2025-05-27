@@ -49,6 +49,16 @@ async def lifespan(app: FastAPI):
     logger.info("Starting up application")
     # Create upload directory if it doesn't exist
     settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # Initialize services
+    from services.context_service import initialize_context_service
+    from services.document_processor import document_processor
+    
+    logger.info("Initializing context service and document processor")
+    await initialize_context_service()
+    await document_processor.initialize()
+    logger.info("Services initialized successfully")
+    
     yield
     # Shutdown
     logger.info("Shutting down application")

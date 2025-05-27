@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 from enum import Enum
 import json
+import structlog
 
 from api.deps import get_current_active_user
 from db.mongodb.repositories.document_repository import document_repository
@@ -19,6 +20,9 @@ from models.document import (
     DocumentStatus,
     ExtractionResult
 )
+
+# Configure logger
+logger = structlog.get_logger(__name__)
 from models.task import TaskCreate
 
 router = APIRouter()
@@ -175,11 +179,15 @@ async def update_document(
 @router.post("/{document_id}/extract")
 async def extract_document_data(
     document_id: str,
-    extraction_config: Optional[Dict[str, Any]] = None,
+    extraction_config: Optional[Dict[str, Any]] = Body(None),
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
     """
-    Extract data from a document.
+    Extract data from a document using Perplexity AI.
+    
+    This endpoint uses the Perplexity-powered document agent to analyze documents
+    and extract key information, including dates, names, organizations, monetary amounts,
+    action items, and key points.
     """
     has_permission = await permission_repository.check_permission(
         user_id=current_user.id,
@@ -195,26 +203,83 @@ async def extract_document_data(
         )
 
     try:
+        # Get document to check its status first
+        document = await document_repository.get_document_by_id(
+            document_id=document_id,
+            organization_id=current_user.organization_id
+        )
+        
+        if not document:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found"
+            )
+        
+        # Check if document is in a state that can be processed
+        if document.status not in [DocumentStatus.UPLOADED, DocumentStatus.PROCESSING_FAILED]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Document cannot be processed in its current state: {document.status}"
+            )
+        
+        # Update document status to PROCESSING
+        await document_repository.update_document(
+            document_id=document_id,
+            organization_id=current_user.organization_id,
+            update_data={"$set": {"status": DocumentStatus.PROCESSING}}
+        )
+        
+        # Extract data using Perplexity-powered document agent
         result = await document_repository.extract_document_data(
             document_id=document_id,
             organization_id=current_user.organization_id,
             extraction_config=extraction_config
         )
+        
+        # Update document status to PROCESSED
+        await document_repository.update_document(
+            document_id=document_id,
+            organization_id=current_user.organization_id,
+            update_data={"$set": {"status": DocumentStatus.PROCESSED}}
+        )
+        
         return result
     except Exception as e:
+        # Update document status to PROCESSING_FAILED
+        await document_repository.update_document(
+            document_id=document_id,
+            organization_id=current_user.organization_id,
+            update_data={"$set": {"status": DocumentStatus.PROCESSING_FAILED}}
+        )
+        
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
+            detail=f"Document processing failed: {str(e)}"
         )
 
-@router.post("/{document_id}/query")
+class DocumentQueryResponse(BaseModel):
+    """Response model for document queries."""
+    query: str
+    response: str
+    document_id: str
+    document_name: str
+    citations: Optional[List[Dict[str, Any]]] = None
+    extracted_data: Optional[Dict[str, Any]] = None
+    search_queries: Optional[List[str]] = None
+
+@router.post("/{document_id}/query", response_model=DocumentQueryResponse)
 async def query_document(
     document_id: str,
     query: DocumentQuery,
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
     """
-    Query document content using natural language.
+    Query document content using natural language with Perplexity AI.
+    
+    This endpoint uses Perplexity's powerful search and document analysis capabilities
+    to answer questions about documents using natural language. Results include
+    citations to relevant parts of the document and additional context from online
+    sources when using online-enabled models.
     """
     has_permission = await permission_repository.check_permission(
         user_id=current_user.id,
@@ -230,6 +295,19 @@ async def query_document(
         )
 
     try:
+        # Get document to check its status first
+        document = await document_repository.get_document_by_id(
+            document_id=document_id,
+            organization_id=current_user.organization_id
+        )
+        
+        if not document:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found"
+            )
+        
+        # Query document using Perplexity-powered document agent
         result = await document_repository.query_document(
             document_id=document_id,
             organization_id=current_user.organization_id,
@@ -237,21 +315,45 @@ async def query_document(
             filters=query.filters,
             include_extracted_data=query.include_extracted_data
         )
+        
+        # Log the query for analytics
+        await logger.info(
+            "Document queried", 
+            document_id=document_id,
+            user_id=current_user.id,
+            query=query.query,
+            filters=query.filters
+        )
+        
         return result
     except Exception as e:
+        await logger.error("Error querying document", error=str(e), document_id=document_id)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
+            detail=f"Document query failed: {str(e)}"
         )
+
+class TaskConfig(BaseModel):
+    """Task generation configuration options."""
+    max_tasks: Optional[int] = Field(None, description="Maximum number of tasks to generate")
+    focus_areas: Optional[List[str]] = Field(None, description="Specific areas to focus on when generating tasks")
+    priority_threshold: Optional[str] = Field(None, description="Minimum priority level for tasks (e.g., 'medium')")
+    due_date_required: Optional[bool] = Field(None, description="Whether tasks must have due dates")
+    assignees: Optional[List[str]] = Field(None, description="List of potential assignees to consider")
+    user_context: Optional[Dict[str, Any]] = Field(None, description="Additional context about the user/organization")
 
 @router.post("/{document_id}/create-tasks")
 async def create_tasks_from_document(
     document_id: str,
-    task_config: Optional[Dict[str, Any]] = None,
+    task_config: Optional[TaskConfig] = Body(None),
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
     """
-    Create tasks from document content.
+    Create tasks from document content using Perplexity AI.
+    
+    This endpoint uses Perplexity's powerful document analysis capabilities to identify
+    actionable items in documents and convert them to tasks. Tasks include title,
+    priority, deadlines (when available), and suggested assignees.
     """
     has_permission = await permission_repository.check_permission(
         user_id=current_user.id,
@@ -267,17 +369,43 @@ async def create_tasks_from_document(
         )
 
     try:
+        # Get document to check its status first
+        document = await document_repository.get_document_by_id(
+            document_id=document_id,
+            organization_id=current_user.organization_id
+        )
+        
+        if not document:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found"
+            )
+        
+        # Convert task config to dict if provided
+        config_dict = task_config.dict() if task_config else {}
+        
+        # Create tasks using Perplexity-powered document agent
         tasks = await document_repository.create_tasks_from_document(
             document_id=document_id,
             organization_id=current_user.organization_id,
             created_by=current_user.id,
-            task_config=task_config
+            task_config=config_dict
         )
-        return tasks
+        
+        # In a real implementation, save tasks to task repository
+        # For now, just return the tasks
+        # TODO: Save tasks to task_repository
+        
+        # Return created tasks
+        return {
+            "document_id": document_id,
+            "tasks_created": len(tasks),
+            "tasks": tasks
+        }
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
+            detail=f"Failed to create tasks: {str(e)}"
         )
 
 @router.get("/search", response_model=List[DocumentResponse])
