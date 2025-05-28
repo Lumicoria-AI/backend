@@ -314,7 +314,7 @@ async def create_custom_agent_prompt(
     # Check if user has permission to customize agents
     has_permission = await permission_repository.check_permission(
         user_id=current_user.id,
-        organization_id=current_user.organization_id,
+            organization_id=current_user.organization_id,
         resource_type="AGENT",
         resource_id="*",
         permission_type="CREATE"

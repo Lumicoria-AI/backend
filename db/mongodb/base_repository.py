@@ -2,7 +2,7 @@ from typing import TypeVar, Generic, Optional, List, Dict, Any, Type
 from motor.motor_asyncio import AsyncIOMotorCollection
 from bson import ObjectId
 from datetime import datetime
-from ..models.mongodb_models import MongoBaseModel
+from backend.models.mongodb_models import MongoBaseModel
 from .mongodb import MongoDB
 import structlog
 

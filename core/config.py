@@ -38,15 +38,15 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "Lumicoria.ai"
     
     # Security
-    SECRET_KEY: str
+    SECRET_KEY: str = "your-secret-key-here"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
     
     # Database
-    MONGODB_URL: str
+    MONGODB_URL: str = "mongodb://localhost:27017/lumicoria"
     DATABASE_NAME: str = "lumicoria"
     
     # OpenAI
-    OPENAI_API_KEY: str
+    OPENAI_API_KEY: str = "your-openai-api-key-here"
     OPENAI_MODEL: str = "gpt-4-turbo-preview"
     
     # Notion
@@ -60,13 +60,10 @@ class Settings(BaseSettings):
     SLACK_BOT_TOKEN: Optional[str] = None
     SLACK_APP_TOKEN: Optional[str] = None
     SLACK_SIGNING_SECRET: Optional[str] = None
-    
-    # Logging
+      # Logging
     LOG_LEVEL: str = "INFO"
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = True
+    model_config = ConfigDict(extra='allow', env_file=".env", case_sensitive=True)
 
     # CORS Configuration
     BACKEND_CORS_ORIGINS: List[str] = [
