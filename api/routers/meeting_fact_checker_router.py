@@ -4,13 +4,13 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 import logging
 
-from agents.meeting_fact_checker_agent import (
+from backend.agents.meeting_fact_checker_agent import (
     MeetingFactCheckerAgent,
     ClaimType,
     VerificationStatus,
     ClaimSeverity
 )
-from api.dependencies import get_agent_service
+from backend.api.dependencies import get_agent_service
 
 logger = logging.getLogger(__name__)
 

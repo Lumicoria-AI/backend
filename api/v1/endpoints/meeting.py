@@ -5,10 +5,11 @@ from datetime import datetime
 import structlog
 import json
 
-from api.deps import get_current_active_user
-from agents.agent_service import AgentService
-from agents.meeting_agent import MeetingAgent
-from models.user import User
+from backend.api.deps import get_current_active_user
+from backend.agents.agent_service import AgentService
+from backend.agents.meeting_agent import MeetingAgent
+from backend.models.user import User
+from backend.services.project_manager import project_manager
 
 # Configure logger
 logger = structlog.get_logger(__name__)

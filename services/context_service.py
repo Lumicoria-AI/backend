@@ -21,7 +21,7 @@ class ContextService:
     """
     Service for retrieving and managing context for RAG from multiple sources.
     """
-      def __init__(self, perplexity_client: Optional[PerplexityClient] = None):
+    def __init__(self, perplexity_client: Optional[PerplexityClient] = None):
         """Initialize the context service."""
         self.perplexity_client = perplexity_client
         
@@ -279,8 +279,7 @@ class ContextService:
             
             return {
                 "success": success,
-                "filters": filters
-            }
+                "filters": filters            }
             
         except Exception as e:
             logger.error("Error deleting user context", error=str(e), user_id=user_id)
@@ -288,7 +287,8 @@ class ContextService:
                 "success": False,
                 "error": str(e)
             }
-      async def add_document_from_file(
+    
+    async def add_document_from_file(
         self,
         file_path: str,
         user_id: str,
@@ -386,11 +386,11 @@ class ContextService:
         
         return {
             "document_id": result.document_id,
-            "status": result.status,
-            "chunk_count": result.chunk_count,
+            "status": result.status,            "chunk_count": result.chunk_count,
             "error": result.error
         }
-      async def get_user_documents(
+    
+    async def get_user_documents(
         self,
         user_id: str,
         organization_id: Optional[str] = None,

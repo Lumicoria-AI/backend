@@ -1,22 +1,26 @@
 from typing import Optional, List, Dict, Any
 from pymongo import ASCENDING
-from ..base_repository import BaseRepository
-from ...models.mongodb_models import User, UserCreate, UserUpdate
+from backend.db.mongodb.base_repository import BaseRepository
+from backend.db.mongodb.models.user import UserInDB, UserCreate, UserUpdate, UserProfile, UserSettings
 import structlog
 from datetime import datetime
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from db.mongodb.mongodb import get_mongodb
-from db.mongodb.models.user import UserInDB, UserProfile, UserSettings
+from backend.db.mongodb.mongodb import get_mongodb
 
 logger = structlog.get_logger()
 
-class UserRepository(BaseRepository[User]):
+class UserRepository(BaseRepository[UserInDB]):
     def __init__(self, db: AsyncIOMotorDatabase):
-        super().__init__("users", User)
+        super().__init__("users", UserInDB)
         self.db = db
         self.profile_collection = db.user_profiles
         self.settings_collection = db.user_settings
+
+    @classmethod
+    async def create(cls) -> 'UserRepository':
+        db = await get_mongodb()
+        return cls(db)
 
     async def _create_indexes(self):
         collection = await self.collection
@@ -95,7 +99,7 @@ class UserRepository(BaseRepository[User]):
             return UserSettings(**settings_dict)
         return None
 
-    async def get_users_by_organization(self, organization_id: str, skip: int = 0, limit: int = 100) -> List[User]:
+    async def get_users_by_organization(self, organization_id: str, skip: int = 0, limit: int = 100) -> List[UserInDB]:
         return await self.find_many(
             {"organization_ids": organization_id},
             skip=skip,
@@ -103,7 +107,7 @@ class UserRepository(BaseRepository[User]):
             sort=[("created_at", ASCENDING)]
         )
 
-    async def get_users_by_role(self, role_id: str, skip: int = 0, limit: int = 100) -> List[User]:
+    async def get_users_by_role(self, role_id: str, skip: int = 0, limit: int = 100) -> List[UserInDB]:
         return await self.find_many(
             {"role_ids": role_id},
             skip=skip,
@@ -111,25 +115,25 @@ class UserRepository(BaseRepository[User]):
             sort=[("created_at", ASCENDING)]
         )
 
-    async def add_to_organization(self, user_id: str, organization_id: str) -> Optional[User]:
+    async def add_to_organization(self, user_id: str, organization_id: str) -> Optional[UserInDB]:
         return await self.update(
             user_id,
             {"$addToSet": {"organization_ids": organization_id}}
         )
 
-    async def remove_from_organization(self, user_id: str, organization_id: str) -> Optional[User]:
+    async def remove_from_organization(self, user_id: str, organization_id: str) -> Optional[UserInDB]:
         return await self.update(
             user_id,
             {"$pull": {"organization_ids": organization_id}}
         )
 
-    async def add_role(self, user_id: str, role_id: str) -> Optional[User]:
+    async def add_role(self, user_id: str, role_id: str) -> Optional[UserInDB]:
         return await self.update(
             user_id,
             {"$addToSet": {"role_ids": role_id}}
         )
 
-    async def remove_role(self, user_id: str, role_id: str) -> Optional[User]:
+    async def remove_role(self, user_id: str, role_id: str) -> Optional[UserInDB]:
         return await self.update(
             user_id,
             {"$pull": {"role_ids": role_id}}
@@ -141,7 +145,7 @@ class UserRepository(BaseRepository[User]):
         organization_id: Optional[str] = None,
         skip: int = 0,
         limit: int = 100
-    ) -> List[User]:
+    ) -> List[UserInDB]:
         search_filter = {
             "$or": [
                 {"full_name": {"$regex": query, "$options": "i"}},
@@ -161,7 +165,7 @@ class UserRepository(BaseRepository[User]):
             sort=[("created_at", ASCENDING)]
         )
 
-    async def get_active_users(self, skip: int = 0, limit: int = 100) -> List[User]:
+    async def get_active_users(self, skip: int = 0, limit: int = 100) -> List[UserInDB]:
         return await self.find_many(
             {"is_active": True},
             skip=skip,
@@ -169,7 +173,7 @@ class UserRepository(BaseRepository[User]):
             sort=[("created_at", ASCENDING)]
         )
 
-    async def get_superusers(self, skip: int = 0, limit: int = 100) -> List[User]:
+    async def get_superusers(self, skip: int = 0, limit: int = 100) -> List[UserInDB]:
         return await self.find_many(
             {"is_superuser": True},
             skip=skip,
@@ -178,4 +182,10 @@ class UserRepository(BaseRepository[User]):
         )
 
 # Create a singleton instance
-user_repository = UserRepository(get_mongodb()) 
+user_repository: Optional[UserRepository] = None
+
+async def get_user_repository() -> UserRepository:
+    global user_repository
+    if user_repository is None:
+        user_repository = await UserRepository.create()
+    return user_repository 

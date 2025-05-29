@@ -3,9 +3,9 @@ from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field
 from datetime import datetime
 
-from api.dependencies import get_current_user, get_agent_service
-from agents.agent_service import AgentService
-from agents.research_mentor_agent import ResearchMode
+from backend.api.dependencies import get_current_user, get_agent_service
+from backend.agents.agent_service import AgentService
+from backend.agents.research_mentor_agent import ResearchMode
 
 router = APIRouter(
     prefix="/research-mentor",

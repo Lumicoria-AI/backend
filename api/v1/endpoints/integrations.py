@@ -3,11 +3,11 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from pydantic import BaseModel
 from datetime import datetime
 
-from api.deps import get_current_active_user
-from models.user import User
-from models.integration import Integration, IntegrationCreate, IntegrationUpdate, IntegrationType
-from db.mongodb.repositories.integration_repository import integration_repository
-from db.mongodb.repositories.permission_repository import permission_repository
+from backend.api.deps import get_current_active_user
+from backend.models.user import User
+from backend.models.integration import Integration, IntegrationCreate, IntegrationUpdate, IntegrationType
+from backend.db.mongodb.repositories.integration_repository import integration_repository
+from backend.db.mongodb.repositories.permission_repository import permission_repository
 
 router = APIRouter()
 
@@ -134,7 +134,7 @@ async def update_integration(
 async def delete_integration(
     integration_id: str,
     current_user: User = Depends(get_current_active_user)
-) -> Any:
+) -> None:
     """
     Delete an integration configuration.
     """
@@ -146,22 +146,21 @@ async def delete_integration(
         resource_id=integration_id,
         permission_type="DELETE"
     )
-    if not has_permission:
-        raise HTTPException(
+    if not has_permission:        raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not enough permissions to delete this integration"
         )
-
+    
     success = await integration_repository.delete_integration(
         integration_id=integration_id,
         organization_id=current_user.organization_id
     )
+    
     if not success:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Integration not found"
         )
-    return
 
 @router.get("/", response_model=List[IntegrationResponse])
 async def list_integrations(

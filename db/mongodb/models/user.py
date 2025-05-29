@@ -18,11 +18,10 @@ class PyObjectId(ObjectId):
     @classmethod
     def __get_pydantic_json_schema__(
         cls,
-        _schema_generator: GetJsonSchemaHandler,
-        _property_schema: JsonSchemaValue,
-    ) -> JsonSchemaValue:
-        _property_schema.update(type="string")
-        return _property_schema
+        schema_generator: Any,
+        property_schema: Any,
+    ) -> Any:
+        return { "type": "string" }
 
 class UserBase(BaseModel):
     email: EmailStr
@@ -31,12 +30,11 @@ class UserBase(BaseModel):
     avatar_url: Optional[str] = None
     is_active: bool = True
     is_superuser: bool = False
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    updated_at: Optional[datetime] = None
 
-    class Config:
-        json_encoders = {ObjectId: str}
-        populate_by_name = True
+    model_config = {
+        "json_encoders": {ObjectId: str},
+        "populate_by_name": True
+    }
 
 class UserCreate(UserBase):
     password: str = Field(..., min_length=8)
@@ -55,9 +53,10 @@ class UserProfile(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: Optional[datetime] = None
 
-    class Config:
-        json_encoders = {ObjectId: str}
-        populate_by_name = True
+    model_config = {
+        "json_encoders": {ObjectId: str},
+        "populate_by_name": True
+    }
 
 class UserSettings(BaseModel):
     user_id: PyObjectId = Field(alias="_id")
@@ -73,21 +72,30 @@ class UserSettings(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: Optional[datetime] = None
 
-    class Config:
-        json_encoders = {ObjectId: str}
-        populate_by_name = True
+    model_config = {
+        "json_encoders": {ObjectId: str},
+        "populate_by_name": True
+    }
 
-class UserInDB(UserBase):
-    id: PyObjectId = Field(alias="_id")
+class User(UserBase):
+    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = None
+    profile: Optional[UserProfile] = None
+    settings: Optional[UserSettings] = None
 
-    class Config:
-        json_encoders = {ObjectId: str}
-        populate_by_name = True
+    model_config = {
+        "json_encoders": {ObjectId: str},
+        "populate_by_name": True
+    }
+
+class UserInDB(User):
+    hashed_password: str
 
 class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
-    user: Optional[UserInDB] = None
+    user: Optional[User] = None
 
 class TokenData(BaseModel):
     user_id: Optional[str] = None 

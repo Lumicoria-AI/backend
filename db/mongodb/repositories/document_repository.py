@@ -1,22 +1,37 @@
 from typing import Optional, List, Dict, Any
-from motor.motor_asyncio import ASCENDING, DESCENDING
+from pymongo import ASCENDING, DESCENDING
+from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 from datetime import datetime
-from ..base_repository import BaseRepository
-from ...models.mongodb_models import (
+from backend.db.mongodb.base_repository import BaseRepository
+from backend.db.mongodb.models.document import (
     Document,
     DocumentStatus,
     DocumentType,
 )
 import structlog
-from agents.agent_service import AgentService
-from agents.document_agent import DocumentAgent
+from backend.db.mongodb.mongodb import get_mongodb
 
 logger = structlog.get_logger()
 
 class DocumentRepository(BaseRepository[Document]):
-    def __init__(self):
+    def __init__(self, db: AsyncIOMotorDatabase):
         super().__init__("documents", Document)
+        self.db = db
+        self._agent_service = None
+
+    @property
+    async def agent_service(self):
+        """Lazy load the agent service to avoid circular imports."""
+        if self._agent_service is None:
+            from backend.agents.agent_service import AgentService
+            self._agent_service = AgentService()
+        return self._agent_service
+
+    @classmethod
+    async def create(cls) -> 'DocumentRepository':
+        db = await get_mongodb()
+        return cls(db)
 
     async def _create_indexes(self):
         collection = await self.collection
@@ -220,87 +235,60 @@ class DocumentRepository(BaseRepository[Document]):
         organization_id: str,
         extraction_config: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """
-        Extract data from a document using Perplexity AI.
-        
-        Args:
-            document_id: Document ID
-            organization_id: Organization ID
-            extraction_config: Optional extraction configuration
-            
-        Returns:
-            Extraction results
-        """
-        # Get the document
-        document = await self.get_document_by_id(document_id, organization_id)
-        if not document:
-            raise ValueError(f"Document not found: {document_id}")
-            
-        # Get document content - in a real implementation, this would retrieve the actual content
-        # For this example, we'll assume document.file_url points to the content or that we can retrieve it
-        document_content = await self._get_document_content(document)
-        
-        # Default extraction targets if not provided in config
-        if extraction_config is None:
-            extraction_config = {}
-            
-        extraction_targets = extraction_config.get("extraction_targets", [
-            "tasks", "dates", "names", "organizations", 
-            "monetary amounts", "action items", "key points"
-        ])
-        
-        # Create document agent config
-        agent_config = {
-            "type": "document",
-            "extraction_targets": extraction_targets,
-            "model_config": {
-                "model": "sonar-large-online"  # Use Perplexity's Sonar model
-            }
-        }
-        
+        """Extract data from a document using AI agents."""
         try:
-            # Create document agent
-            document_agent = DocumentAgent(agent_config)
-            
-            # Process document asynchronously for better performance
-            document_data = {
-                "text": document_content,
-                "metadata": {
-                    "id": str(document.id),
-                    "name": document.name,
-                    "document_type": document.document_type
-                }
-            }
-            
-            # Extract data
-            extraction_result = await document_agent.process_async(document_data)
-            
+            document = await self.get_document_by_id(document_id, organization_id)
+            if not document:
+                raise ValueError(f"Document not found: {document_id}")
+
+            # Update document status to processing
+            await self.update_document(
+                document_id=document_id,
+                update_data={"$set": {"status": DocumentStatus.PROCESSING.value}}
+            )
+
+            # Get agent service lazily
+            agent_service = await self.agent_service
+            document_agent = await agent_service.get_agent("document")
+
+            # Extract content from document
+            content = await self._get_document_content(document)
+
+            # Process with document agent
+            extraction_result = await document_agent.process_async({
+                "document_id": document_id,
+                "content": content,
+                "config": extraction_config or {}
+            })
+
             # Update document with extraction results
-            update_data = {
-                "$set": {
-                    "extraction_status": "completed",
-                    "extraction_result": extraction_result,
-                    "updated_at": datetime.utcnow()
+            await self.update_document(
+                document_id=document_id,
+                update_data={
+                    "$set": {
+                        "status": DocumentStatus.PROCESSED.value,
+                        "extraction_result": extraction_result,
+                        "extraction_status": "completed",
+                        "updated_at": datetime.utcnow()
+                    }
                 }
-            }
-            
-            await self.update_one({"_id": ObjectId(document_id)}, update_data)
-            
+            )
+
             return extraction_result
-            
+
         except Exception as e:
-            # Update document with extraction error
-            update_data = {
-                "$set": {
-                    "extraction_status": "failed",
-                    "extraction_error": str(e),
-                    "updated_at": datetime.utcnow()
+            logger.error(f"Error extracting document data: {str(e)}")
+            # Update document status to failed
+            await self.update_document(
+                document_id=document_id,
+                update_data={
+                    "$set": {
+                        "status": DocumentStatus.FAILED.value,
+                        "extraction_error": str(e),
+                        "updated_at": datetime.utcnow()
+                    }
                 }
-            }
-            
-            await self.update_one({"_id": ObjectId(document_id)}, update_data)
-            
-            # Re-raise exception
+            )
             raise
     
     async def _get_document_content(self, document: Document) -> str:
@@ -522,4 +510,10 @@ class DocumentRepository(BaseRepository[Document]):
             raise
 
 # Create a singleton instance
-document_repository = DocumentRepository() 
+document_repository: Optional[DocumentRepository] = None
+
+async def get_document_repository() -> DocumentRepository:
+    global document_repository
+    if document_repository is None:
+        document_repository = await DocumentRepository.create()
+    return document_repository 

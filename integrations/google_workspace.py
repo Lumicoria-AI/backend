@@ -2,7 +2,7 @@ from typing import Dict, Any, List, Optional
 import structlog
 from datetime import datetime
 import json
-from services.ai_clients.google_workspace_client import GoogleWorkspaceClient
+from backend.services.ai_clients.google_workspace_client import GoogleWorkspaceClient
 
 logger = structlog.get_logger(__name__)
 

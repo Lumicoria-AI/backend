@@ -4,15 +4,18 @@ from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import sentry_sdk
-import structlog
 from contextlib import asynccontextmanager
-from api.v1.api import api_router
-from core.config import settings
+from backend.api.v1.api import api_router
+from backend.core.config import settings
+from backend.core.logging import get_logger
 import time
 import prometheus_client
 from prometheus_client import Counter, Histogram
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
+from pydantic import ValidationError
+from backend.db.mongodb.mongodb import init_mongodb, close_mongodb
+from backend.agents.agent_service import init_agent_service, close_agent_service
 
 # Initialize Sentry
 if settings.SENTRY_DSN:
@@ -23,13 +26,7 @@ if settings.SENTRY_DSN:
     )
 
 # Initialize logging
-structlog.configure(
-    processors=[
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.JSONRenderer()
-    ]
-)
-logger = structlog.get_logger()
+logger = get_logger("lumicoria.main")
 
 # Initialize Prometheus metrics
 REQUEST_COUNT = Counter(
@@ -45,23 +42,52 @@ REQUEST_LATENCY = Histogram(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Lifespan context manager for FastAPI application startup and shutdown."""
     # Startup
     logger.info("Starting up application")
-    # Create upload directory if it doesn't exist
-    settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     
-    # Initialize services
-    from services.context_service import initialize_context_service
-    from services.document_processor import document_processor
-    
-    logger.info("Initializing context service and document processor")
-    await initialize_context_service()
-    await document_processor.initialize()
-    logger.info("Services initialized successfully")
+    try:
+        # Create upload directory if it doesn't exist
+        upload_dir = Path(settings.UPLOAD_DIR)
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize MongoDB
+        await init_mongodb()
+        logger.info("MongoDB initialized successfully")
+        
+        # Initialize agent service
+        await init_agent_service()
+        logger.info("Agent service initialized successfully")
+        
+        # Initialize other services
+        from backend.services.context_service import initialize_context_service
+        from backend.services.document_processor import document_processor
+        
+        logger.info("Initializing context service and document processor")
+        await initialize_context_service()
+        await document_processor.initialize()
+        logger.info("Services initialized successfully")
+        
+    except Exception as e:
+        logger.error(f"Error during startup: {str(e)}")
+        raise
     
     yield
+    
     # Shutdown
     logger.info("Shutting down application")
+    try:
+        # Close MongoDB connection
+        await close_mongodb()
+        logger.info("MongoDB connection closed")
+        
+        # Close agent service
+        await close_agent_service()
+        logger.info("Agent service closed")
+        
+    except Exception as e:
+        logger.error(f"Error during shutdown: {str(e)}")
+        raise
 
 app = FastAPI(
     title="Lumicoria AI API",
@@ -100,7 +126,7 @@ app.add_middleware(
 )
 
 # Mount static files for user uploads
-app.mount("/uploads", StaticFiles(directory=str(settings.UPLOAD_DIR)), name="uploads")
+app.mount("/uploads", StaticFiles(directory=str(Path(settings.UPLOAD_DIR))), name="uploads")
 
 # Request logging middleware
 @app.middleware("http")
@@ -164,6 +190,24 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     return JSONResponse(
         status_code=422,
         content={"detail": exc.errors()},
+    )
+
+@app.exception_handler(ValidationError)
+async def pydantic_validation_exception_handler(request, exc):
+    """Handle Pydantic validation errors."""
+    logger.error(f"Pydantic validation error: {str(exc)}")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": str(exc)},
+    )
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request, exc):
+    """Handle general exceptions."""
+    logger.error(f"Unhandled exception: {str(exc)}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
     )
 
 # Health check endpoint

@@ -1,13 +1,12 @@
 from typing import Optional, List, Dict, Any, Union
-from motor.motor_asyncio import ASCENDING, DESCENDING
+from pymongo import ASCENDING, DESCENDING
 from bson import ObjectId
 from datetime import datetime, timedelta
 from ..base_repository import BaseRepository
-from ...models.mongodb_models import (
-    Integration,
-    IntegrationCreate,
-    IntegrationConfig,
-    IntegrationType
+from backend.models.integration import Integration, IntegrationCreate, IntegrationConfig, IntegrationType
+from backend.models.mongodb_models import (
+    MongoBaseModel,
+    PyObjectId
 )
 import structlog
 import json

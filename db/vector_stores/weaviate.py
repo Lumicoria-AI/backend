@@ -567,7 +567,8 @@ class WeaviateDocumentStore:
         except Exception as e:
             logger.error("Error deleting documents", error=str(e))
             return False
-      async def get_document_count(
+    
+    async def get_document_count(
         self,
         filters: Optional[Dict[str, Any]] = None
     ) -> int:

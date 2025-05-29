@@ -3,9 +3,9 @@ from fastapi.security import HTTPBearer, OAuth2PasswordRequestForm
 from typing import Any, Optional
 import firebase_admin
 from firebase_admin import auth
-from core.security import verify_token, rate_limit, create_access_token, get_password_hash, verify_password
-from db.mongodb.repositories.user_repository import user_repository
-from db.mongodb.models.user import UserCreate, Token, UserInDB, TokenResponse, GoogleSignInRequest, UserResponse
+from backend.core.security import verify_token, rate_limit, create_access_token, get_password_hash, verify_password
+from backend.db.mongodb.repositories.user_repository import user_repository
+from backend.models.user import UserCreate, Token, UserInDB, TokenResponse, GoogleSignInRequest, UserResponse
 from pydantic import BaseModel, EmailStr, Field
 import structlog
 from datetime import datetime, timedelta

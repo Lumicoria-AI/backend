@@ -2,17 +2,17 @@ from datetime import datetime, timedelta
 from typing import Any, Optional, Union
 from jose import jwt
 from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import firebase_admin
 from firebase_admin import auth, credentials
-from core.config import settings
+from backend.core.config import settings
 import structlog
 # Rate limiting decorator
 from functools import wraps
-from fastapi import Request
 import redis
 import time
+from backend.db.mongodb.repositories.user_repository import user_repository
 
 logger = structlog.get_logger()
 security = HTTPBearer()
@@ -84,12 +84,14 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
-
+# Initialize Redis client with settings from DatabaseSettings
 redis_client = redis.Redis(
-    host=settings.REDIS_HOST,
-    port=settings.REDIS_PORT,
-    password=settings.REDIS_PASSWORD,
-    decode_responses=True
+    host=settings.db.REDIS_HOST,
+    port=settings.db.REDIS_PORT,
+    password=settings.db.REDIS_PASSWORD,
+    db=settings.db.REDIS_DB,
+    decode_responses=True,
+    max_connections=settings.db.REDIS_POOL_SIZE
 )
 
 def rate_limit(limit: int = settings.RATE_LIMIT_PER_MINUTE):

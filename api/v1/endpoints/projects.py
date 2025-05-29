@@ -3,9 +3,9 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, Body
 from pydantic import BaseModel, Field
 from datetime import datetime
 
-from api.deps import get_current_active_user
-from models.user import User
-from services.project_manager import project_manager
+from backend.api.deps import get_current_active_user
+from backend.models.user import User
+from backend.services.project_manager import project_manager
 
 router = APIRouter()
 

@@ -7,8 +7,8 @@ import networkx as nx
 from dataclasses import dataclass
 from uuid import uuid4
 
-from agents.base_agent import BaseAgent
-from agents.agent_service import AgentService
+from .base_agent import BaseAgent
+# Removing circular import - agent_service already imports knowledge_graph_agent
 
 logger = logging.getLogger(__name__)
 

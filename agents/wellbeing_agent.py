@@ -249,3 +249,69 @@ class WellbeingAgent(BaseAgent):
                 return match.group(1).strip()
         
         return None
+
+    async def query_async(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Query the wellbeing agent asynchronously.
+        
+        Args:
+            query: The query string about wellbeing
+            context: Optional context dictionary containing user data and preferences
+            
+        Returns:
+            Dictionary containing wellbeing advice and recommendations
+        """
+        try:
+            # Ensure Perplexity client is initialized
+            if not self.perplexity_client:
+                self.initialize_models()
+                
+            if not self.perplexity_client:
+                return {"error": "Perplexity client not initialized"}
+            
+            # Create system prompt for wellbeing advisor
+            system_prompt = (
+                "You are a compassionate wellbeing coach specializing in helping knowledge workers "
+                "maintain balance and health. Provide personalized, evidence-based advice tailored to "
+                "the user's specific situation. Focus on practical, actionable suggestions for breaks, "
+                "physical activity, mental health, focus techniques, and healthy habits. Be encouraging "
+                "and thoughtful, but respect the user's autonomy."
+            )
+            
+            # Format user prompt with context
+            user_prompt = query
+            if context:
+                user_context = []
+                for key, value in context.items():
+                    if isinstance(value, (list, dict)):
+                        user_context.append(f"{key}: {json.dumps(value)}")
+                    else:
+                        user_context.append(f"{key}: {value}")
+                if user_context:
+                    user_prompt = f"Context:\n{chr(10).join(user_context)}\n\nQuery: {query}"
+            
+            # Format messages for Perplexity API
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+            
+            # Call Perplexity API
+            response = await self.perplexity_client.chat_completion(
+                messages=messages,
+                model=self.model_config.get("model"),
+                temperature=0.7
+            )
+            
+            # Parse the response into structured recommendations
+            wellbeing_suggestions = self._parse_wellbeing_advice(response.content)
+            
+            return {
+                "wellbeing_advice": wellbeing_suggestions,
+                "processed_at": datetime.utcnow().isoformat(),
+                "model_used": self.model_config.get("model"),
+                "raw_response": response.content
+            }
+            
+        except Exception as e:
+            logger.error(f"Error querying wellbeing agent: {str(e)}")
+            return {"error": f"Wellbeing advice generation failed: {str(e)}"}

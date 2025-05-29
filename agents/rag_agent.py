@@ -234,3 +234,81 @@ class RAGAgent(BaseAgent):
             sources.append(source_info)
             
         return sources
+
+    async def query_async(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Query the RAG agent asynchronously.
+        
+        Args:
+            query: The query string to search and retrieve information for
+            context: Optional context dictionary containing user and organization IDs
+            
+        Returns:
+            Dictionary containing retrieved information and response
+        """
+        try:
+            # Ensure Perplexity client is initialized
+            if not self.perplexity_client:
+                self.initialize_models()
+                
+            if not self.perplexity_client:
+                return {"error": "Perplexity client not initialized"}
+            
+            # Get user and organization IDs from context
+            user_id = context.get("user_id") if context else None
+            organization_id = context.get("organization_id") if context else None
+            
+            if not user_id:
+                return {"error": "User ID is required in context"}
+            
+            # Retrieve relevant context from the context service
+            context_result = await context_service.get_context_for_query(
+                query=query,
+                user_id=user_id,
+                organization_id=organization_id,
+                k=self.max_context_chunks,
+            )
+            
+            context_chunks = context_result.get("context", [])
+            
+            # Format context for the prompt
+            formatted_context = self._format_context_for_prompt(context_chunks)
+            
+            # Create system prompt with context
+            system_prompt = self.system_prompt_template.format(context=formatted_context)
+            
+            # Create messages for Perplexity API
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": query}
+            ]
+            
+            # Call Perplexity API
+            response = await self.perplexity_client.chat_completion(
+                messages=messages,
+                model=self.model_config.get("model", "sonar-medium-online"),
+                temperature=self.model_config.get("temperature", 0.7),
+                max_tokens=self.model_config.get("max_tokens", 1024),
+            )
+            
+            # Extract response text
+            ai_response = response.content
+            
+            # Create comprehensive response
+            result = {
+                "response": ai_response,
+                "context_chunks": context_chunks,
+                "processed_at": datetime.utcnow().isoformat(),
+                "model_used": self.model_config.get("model"),
+                "metadata": {
+                    "user_id": user_id,
+                    "organization_id": organization_id,
+                    "query": query,
+                    "context_sources": [chunk.get("source", "") for chunk in context_chunks]
+                }
+            }
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error querying RAG agent: {str(e)}")
+            return {"error": f"Information retrieval failed: {str(e)}"}

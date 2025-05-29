@@ -458,3 +458,73 @@ class MeetingAgent(BaseAgent):
                 "raw_response": response_text,
                 "parsing_error": str(e)
             }
+    
+    async def query_async(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Query the meeting agent asynchronously.
+        
+        Args:
+            query: The query string about a meeting
+            context: Optional context dictionary containing meeting data and metadata
+            
+        Returns:
+            Dictionary containing meeting analysis results
+        """
+        try:
+            if not context or not context.get("transcript"):
+                return {"error": "No meeting transcript provided in context"}
+            
+            # Ensure Perplexity client is initialized
+            if not self.perplexity_client:
+                self.initialize_models()
+                
+            if not self.perplexity_client:
+                return {"error": "Perplexity client not initialized"}
+            
+            # Get meeting data from context
+            transcript = context.get("transcript", "")
+            meeting_type = context.get("meeting_type", "general")
+            participants = context.get("participants", [])
+            meeting_context = context.get("meeting_context", {})
+            
+            # Create system and user prompts
+            system_prompt, user_prompt = self._create_async_prompts(
+                transcript, meeting_type, participants, meeting_context
+            )
+            
+            # Add the specific query to the user prompt
+            user_prompt = f"{user_prompt}\n\nSpecific query: {query}"
+            
+            # Format messages for Perplexity API
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+            
+            # Call Perplexity API
+            response = await self.perplexity_client.chat_completion(
+                messages=messages,
+                model=self.model_config.get("model"),
+                temperature=0.3  # Lower temperature for more accurate extraction
+            )
+            
+            # Parse the response into structured data
+            parsed_result = self._parse_meeting_response(response.content, meeting_type)
+            
+            # Create comprehensive response
+            result = {
+                "meeting_id": context.get("meeting_id", ""),
+                "query_response": parsed_result.get("summary", ""),
+                "action_items": parsed_result.get("action_items", []),
+                "decisions": parsed_result.get("decisions", []),
+                "key_points": parsed_result.get("key_points", []),
+                "follow_ups": parsed_result.get("follow_ups", []),
+                "processed_at": datetime.utcnow().isoformat(),
+                "model_used": self.model_config.get("model"),
+                "raw_response": response.content
+            }
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error querying meeting agent: {str(e)}")
+            return {"error": f"Meeting analysis failed: {str(e)}"}

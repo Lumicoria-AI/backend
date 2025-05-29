@@ -4,8 +4,9 @@ import logging
 from datetime import datetime
 import json
 
-from agents.base_agent import BaseAgent
-from agents.agent_service import AgentService
+from backend.agents.base_agent import BaseAgent
+from backend.db.mongodb.models.document import Document, DocumentStatus
+from backend.db.mongodb.repositories.document_repository import DocumentRepository
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,122 @@ class ResearchMentorAgent(BaseAgent):
             "frequency_penalty": 0.3,
             "presence_penalty": 0.3
         })
+
+        self.document_repository = DocumentRepository()
+        self.system_prompt = """You are a research mentor AI assistant. Your role is to help users with their research tasks by:
+1. Analyzing documents and extracting key insights
+2. Providing guidance on research methodology
+3. Suggesting relevant sources and references
+4. Helping organize and structure research findings
+5. Answering questions about research topics
+
+Always maintain a professional and academic tone. When analyzing documents, focus on:
+- Main arguments and key points
+- Methodology and research approach
+- Evidence and supporting data
+- Conclusions and implications
+- Areas for further research
+
+If you're unsure about something, acknowledge the limitations and suggest how to verify the information."""
+
+    async def process_async(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process a research document asynchronously."""
+        try:
+            document_id = data.get("document_id")
+            if not document_id:
+                raise ValueError("document_id is required")
+
+            # Get document from repository
+            document = await self.document_repository.get_by_id(document_id)
+            if not document:
+                raise ValueError(f"Document not found: {document_id}")
+
+            # Update document status to processing
+            await self.document_repository.update_status(
+                document_id=document_id,
+                status=DocumentStatus.PROCESSING
+            )
+
+            # Extract text content from document
+            # This is a placeholder - implement actual text extraction based on document type
+            text_content = "Sample document content"  # Replace with actual extraction
+
+            # Analyze document using AI model
+            analysis_prompt = f"""Please analyze the following research document and provide:
+1. A summary of the main points
+2. Key findings and insights
+3. Methodology used
+4. Strengths and limitations
+5. Recommendations for further research
+
+Document content:
+{text_content}"""
+
+            analysis = await self._call_model_async(
+                prompt=analysis_prompt,
+                system_prompt=self.system_prompt
+            )
+
+            # Update document with analysis results
+            await self.document_repository.update_extraction(
+                document_id=document_id,
+                extraction_result={"analysis": analysis},
+                extraction_status="completed"
+            )
+
+            return {
+                "status": "success",
+                "document_id": document_id,
+                "analysis": analysis
+            }
+
+        except Exception as e:
+            logger.error(f"Error processing document: {str(e)}")
+            if document_id:
+                await self.document_repository.update_status(
+                    document_id=document_id,
+                    status=DocumentStatus.FAILED,
+                    extraction_error=str(e)
+                )
+            raise
+
+    async def query_async(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Query the research mentor about a topic or document."""
+        try:
+            # If context includes a document_id, fetch the document
+            document_content = ""
+            if context and context.get("document_id"):
+                document = await self.document_repository.get_by_id(context["document_id"])
+                if document and document.extraction_result:
+                    document_content = f"\nRelevant document content:\n{document.extraction_result.get('analysis', '')}"
+
+            # Construct the prompt
+            prompt = f"""Please help with the following research query:
+{query}
+{document_content}
+
+Provide a detailed and well-structured response that:
+1. Directly addresses the query
+2. Cites relevant sources or evidence
+3. Suggests additional research directions if applicable
+4. Maintains academic rigor and objectivity"""
+
+            # Get response from AI model
+            response = await self._call_model_async(
+                prompt=prompt,
+                system_prompt=self.system_prompt
+            )
+
+            return {
+                "status": "success",
+                "query": query,
+                "response": response,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+
+        except Exception as e:
+            logger.error(f"Error processing query: {str(e)}")
+            raise
 
     async def process_async(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Process a research mentoring request asynchronously."""

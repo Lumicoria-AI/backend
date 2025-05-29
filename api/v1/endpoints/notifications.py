@@ -1,16 +1,16 @@
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import EmailStr
-from core.security import get_current_user
-from services.notification_service import notification_service
-from db.mongodb.models.notification import Notification, NotificationType, NotificationPriority
-from db.mongodb.models.user import User
+from backend.api.deps import get_current_active_user
+from backend.services.notification_service import notification_service
+from backend.models.mongodb_models import Notification, NotificationType, NotificationPriority
+from backend.models.user import User
 
 router = APIRouter()
 
 @router.get("/", response_model=List[Notification])
 async def get_notifications(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_active_user),
     unread_only: bool = False,
     limit: int = Query(50, ge=1, le=100),
     skip: int = Query(0, ge=0),
@@ -33,7 +33,7 @@ async def get_notifications(
 
 @router.get("/unread/count")
 async def get_unread_count(
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_active_user)
 ):
     """Get count of unread notifications."""
     return await notification_service.get_unread_count(current_user.id)
@@ -41,7 +41,7 @@ async def get_unread_count(
 @router.post("/{notification_id}/read")
 async def mark_as_read(
     notification_id: str,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_active_user)
 ):
     """Mark a notification as read."""
     success = await notification_service.mark_notification_as_read(
@@ -54,7 +54,7 @@ async def mark_as_read(
 
 @router.post("/read/all")
 async def mark_all_as_read(
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_active_user)
 ):
     """Mark all notifications as read."""
     success = await notification_service.mark_all_notifications_as_read(
@@ -65,7 +65,7 @@ async def mark_all_as_read(
 @router.delete("/{notification_id}")
 async def delete_notification(
     notification_id: str,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_active_user)
 ):
     """Delete a notification."""
     success = await notification_service.delete_notification(
@@ -79,7 +79,7 @@ async def delete_notification(
 @router.post("/test/email")
 async def send_test_email(
     email: EmailStr,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_active_user)
 ):
     """Send a test email notification (for development only)."""
     if not current_user.is_superuser:
@@ -102,7 +102,7 @@ async def send_test_email(
 
 @router.post("/test/in-app")
 async def create_test_in_app_notification(
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_active_user)
 ):
     """Create a test in-app notification (for development only)."""
     if not current_user.is_superuser:

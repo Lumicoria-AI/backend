@@ -2,7 +2,9 @@ from typing import Dict, Any, List, Optional
 import structlog
 from datetime import datetime
 import json
-from services.ai_clients.notion_client import NotionClient, NotionPage, NotionBlock
+from backend.services.ai_clients.notion_client import NotionClient, NotionPage, NotionBlock
+from backend.models.integration import Integration, IntegrationType
+from backend.core.config import settings
 
 logger = structlog.get_logger(__name__)
 

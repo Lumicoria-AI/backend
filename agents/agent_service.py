@@ -4,6 +4,8 @@ from typing import Dict, Any, List, Optional, Union, Type
 import structlog
 import asyncio
 from datetime import datetime
+from pathlib import Path
+import yaml
 
 from .base_agent import BaseAgent
 from .document_agent import DocumentAgent
@@ -67,6 +69,7 @@ class AgentService:
     def _load_agents(self):
         """Initialize agent instances from configuration."""
         agent_configs = self.config.get("agents", {})
+        ai_models_config = self.config.get("ai_models", {})
         
         for agent_name, agent_config in agent_configs.items():
             try:
@@ -79,6 +82,12 @@ class AgentService:
                 if agent_type not in self.agent_types:
                     logger.warning(f"Unknown agent type '{agent_type}' for {agent_name}, skipping")
                     continue
+                
+                # Get the model name and configuration
+                model_name = agent_config.get("model")
+                if model_name and model_name in ai_models_config:
+                    # Add the model configuration to the agent config
+                    agent_config["agent_model_config"] = ai_models_config[model_name]
                 
                 # Get the agent class and instantiate it
                 agent_class = self.agent_types[agent_type]
@@ -413,38 +422,52 @@ class AgentService:
         
         # Social Media Agent
         if "social_media" in agent_configs:
-            self.agents["social_media"] = SocialMediaAgent(agent_configs["social_media"])
-            logger.info("Social Media Agent initialized")
+            agent_config = agent_configs["social_media"].copy()
+            agent_config["agent_id"] = f"social_media_{uuid.uuid4().hex[:8]}"
+            self.agents["social_media"] = SocialMediaAgent(agent_config)
+            logger.info("Social Media Agent initialized", agent_id=agent_config["agent_id"])
         
         # Legal Document Agent
         if "legal_document" in agent_configs:
-            self.agents["legal_document"] = LegalDocumentAgent(agent_configs["legal_document"])
-            logger.info("Legal Document Agent initialized")
+            agent_config = agent_configs["legal_document"].copy()
+            agent_config["agent_id"] = f"legal_document_{uuid.uuid4().hex[:8]}"
+            self.agents["legal_document"] = LegalDocumentAgent(agent_config)
+            logger.info("Legal Document Agent initialized", agent_id=agent_config["agent_id"])
         
         # Learning Coach Agent
         if "learning_coach" in agent_configs:
-            self.agents["learning_coach"] = LearningCoachAgent(agent_configs["learning_coach"])
-            logger.info("Learning Coach Agent initialized")
+            agent_config = agent_configs["learning_coach"].copy()
+            agent_config["agent_id"] = f"learning_coach_{uuid.uuid4().hex[:8]}"
+            self.agents["learning_coach"] = LearningCoachAgent(agent_config)
+            logger.info("Learning Coach Agent initialized", agent_id=agent_config["agent_id"])
         
         # Research Mentor Agent
         if "research_mentor" in agent_configs:
-            self.agents["research_mentor"] = ResearchMentorAgent(agent_configs["research_mentor"])
-            logger.info("Research Mentor Agent initialized")
+            agent_config = agent_configs["research_mentor"].copy()
+            agent_config["agent_id"] = f"research_mentor_{uuid.uuid4().hex[:8]}"
+            self.agents["research_mentor"] = ResearchMentorAgent(agent_config)
+            logger.info("Research Mentor Agent initialized", agent_id=agent_config["agent_id"])
         
         # Knowledge Graph Agent
         if "knowledge_graph" in agent_configs:
-            self.agents["knowledge_graph"] = KnowledgeGraphAgent(agent_configs["knowledge_graph"])
-            logger.info("Knowledge Graph Agent initialized")
+            agent_config = agent_configs["knowledge_graph"].copy()
+            agent_config["agent_id"] = f"knowledge_graph_{uuid.uuid4().hex[:8]}"
+            self.agents["knowledge_graph"] = KnowledgeGraphAgent(agent_config)
+            logger.info("Knowledge Graph Agent initialized", agent_id=agent_config["agent_id"])
         
         # Ethics & Bias Detector Agent
         if "ethics_bias" in agent_configs:
-            self.agents["ethics_bias"] = EthicsBiasAgent(agent_configs["ethics_bias"])
-            logger.info("Ethics & Bias Detector Agent initialized")
+            agent_config = agent_configs["ethics_bias"].copy()
+            agent_config["agent_id"] = f"ethics_bias_{uuid.uuid4().hex[:8]}"
+            self.agents["ethics_bias"] = EthicsBiasAgent(agent_config)
+            logger.info("Ethics & Bias Detector Agent initialized", agent_id=agent_config["agent_id"])
         
         # Focus & Flow Guardian Agent
         if "focus_flow" in agent_configs:
-            self.agents["focus_flow"] = FocusFlowAgent(agent_configs["focus_flow"])
-            logger.info("Focus & Flow Guardian Agent initialized")
+            agent_config = agent_configs["focus_flow"].copy()
+            agent_config["agent_id"] = f"focus_flow_{uuid.uuid4().hex[:8]}"
+            self.agents["focus_flow"] = FocusFlowAgent(agent_config)
+            logger.info("Focus & Flow Guardian Agent initialized", agent_id=agent_config["agent_id"])
 
         # Workspace Ergonomics Agent
         if "workspace_ergonomics" in agent_configs:
@@ -459,57 +482,43 @@ async def setup_agent_service() -> None:
     global _agent_service
     
     if _agent_service is None:
-        _agent_service = AgentService({})
+        # Load configuration from config.yaml
+        import os
+        from pathlib import Path
+        import yaml
+        
+        # Determine the base directory for the project
+        current_file = Path(__file__)
+        base_dir = current_file.parent.parent  # Go up to the backend directory
+        
+        config_path = os.path.join(base_dir, "config", "config.yaml")
         
         # Load configuration
-        # In a real application, this would load from a config file or environment
-        config = {
-            "agents": {
-                "social_media": {
-                    "model": "gpt-4",
-                    "temperature": 0.7,
-                    "max_tokens": 2048
+        if not os.path.exists(config_path):
+            logger.warning(f"Config file not found at {config_path}, using default configuration")
+            config = {
+                "ai_models": {
+                    "perplexity": {
+                        "model": "sonar-medium-online",
+                        "temperature": 0.7,
+                        "max_tokens": 1024
+                    }
                 },
-                "legal_document": {
-                    "model": "gpt-4",
-                    "temperature": 0.3,
-                    "max_tokens": 4096
-                },
-                "learning_coach": {
-                    "model": "gpt-4",
-                    "temperature": 0.7,
-                    "max_tokens": 2048
-                },
-                "research_mentor": {
-                    "model": "gpt-4",
-                    "temperature": 0.5,
-                    "max_tokens": 4096
-                },
-                "knowledge_graph": {
-                    "model": "gpt-4",
-                    "temperature": 0.2,
-                    "max_tokens": 4096,
-                    "graph_storage_path": "data/knowledge_graph.pkl"
-                },
-                "ethics_bias": {
-                    "model": "gpt-4",
-                    "temperature": 0.3,
-                    "max_tokens": 2000
-                },
-                "focus_flow": {
-                    "model": "gpt-4",
-                    "temperature": 0.5,
-                    "max_tokens": 2000
-                },
-                "workspace_ergonomics": {
-                    "model": "gpt-4",
-                    "temperature": 0.3,
-                    "max_tokens": 2000
+                "agents": {
+                    "social_media": {
+                        "type": "social_media",
+                        "model": "perplexity",
+                        "temperature": 0.7,
+                        "max_tokens": 2048
+                    }
                 }
             }
-        }
+        else:
+            with open(config_path, "r") as f:
+                config = yaml.safe_load(f)
         
-        _agent_service.configure(config)
+        # Create agent service with loaded configuration
+        _agent_service = AgentService(config)
         logger.info("Agent service configured successfully")
 
 def get_agent_service() -> AgentService:
@@ -517,4 +526,25 @@ def get_agent_service() -> AgentService:
     if _agent_service is None:
         raise RuntimeError("Agent service not initialized")
     return _agent_service
+
+async def init_agent_service() -> None:
+    """Initialize the agent service for FastAPI startup."""
+    await setup_agent_service()
+    logger.info("Agent service initialized")
+
+async def close_agent_service() -> None:
+    """Cleanup the agent service for FastAPI shutdown."""
+    global _agent_service
+    if _agent_service is not None:
+        # Cleanup any active agents
+        for agent_name, agent in list(_agent_service.agents.items()):
+            try:
+                if hasattr(agent, 'cleanup'):
+                    await agent.cleanup()
+                logger.info(f"Cleaned up agent: {agent_name}")
+            except Exception as e:
+                logger.error(f"Error cleaning up agent {agent_name}: {str(e)}")
+        
+        _agent_service = None
+        logger.info("Agent service closed")
 

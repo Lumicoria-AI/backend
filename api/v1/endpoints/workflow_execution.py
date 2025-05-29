@@ -6,11 +6,11 @@ import asyncio
 from datetime import datetime
 import uuid
 
-from api.deps import get_current_active_user
-from models.user import User
-from agents.studio_service import StudioService
-from agents.orchestration import WorkflowOrchestrator, WorkflowStatus
-from agents.security import AgentSecurityContext, AgentPermission
+from backend.api.deps import get_current_active_user
+from backend.models.user import User
+from backend.agents.studio_service import StudioService
+from backend.agents.orchestration import WorkflowOrchestrator, WorkflowStatus
+from backend.agents.security import AgentSecurityContext, AgentPermission
 
 # Configure logger
 logger = structlog.get_logger(__name__)

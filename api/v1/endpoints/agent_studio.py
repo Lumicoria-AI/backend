@@ -5,15 +5,15 @@ from datetime import datetime
 from enum import Enum
 import structlog
 
-from api.deps import get_current_active_user
-from models.user import User
-from models.mongodb_models import ComponentType, ComponentCategory
-from db.mongodb.repositories.component_repository import component_repository
-from agents.studio_service import StudioService, ComponentDefinition, ComponentInstance, AgentWorkflow
-from agents.security import AgentSecurityContext, AgentPermission
-from agents.factory import AgentFactory
-from agents.security import AgentSecurityManager
-from agents.cache import AgentCache
+from backend.api.deps import get_current_active_user
+from backend.models.user import User
+from backend.models.mongodb_models import ComponentType, ComponentCategory
+from backend.db.mongodb.repositories.component_repository import component_repository
+from backend.agents.studio_service import StudioService, ComponentDefinition, ComponentInstance, AgentWorkflow
+from backend.agents.security import AgentSecurityContext, AgentPermission
+from backend.agents.factory import AgentFactory
+from backend.agents.security import AgentSecurityManager
+from backend.agents.cache import AgentCache
 
 # Configure logger
 logger = structlog.get_logger(__name__)

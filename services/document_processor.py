@@ -75,7 +75,7 @@ class DocumentProcessor:
     async def initialize(self):
         """Ensure client is initialized."""
         if not self.perplexity_client:
-            self.perplexity_client = await create_perplexity_client()
+            self.perplexity_client = create_perplexity_client()
             
     async def process_file(
         self, 
@@ -442,7 +442,8 @@ class DocumentProcessor:
             formatted.append(f"{role}: {content}")
             
         return "\n\n".join(formatted)
-          def _extract_title_from_html(self, html_content: str) -> Optional[str]:
+    
+    def _extract_title_from_html(self, html_content: str) -> Optional[str]:
         """Extract title from HTML content."""
         title_match = re.search(r"<title>(.*?)</title>", html_content, re.IGNORECASE | re.DOTALL)
         if title_match:

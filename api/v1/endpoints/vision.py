@@ -6,9 +6,9 @@ import structlog
 import io
 import base64
 
-from api.deps import get_current_active_user
-from agents.agent_service import AgentService
-from models.user import User
+from backend.api.deps import get_current_active_user
+from backend.agents.agent_service import AgentService
+from backend.models.user import User
 
 # Configure logger
 logger = structlog.get_logger(__name__)

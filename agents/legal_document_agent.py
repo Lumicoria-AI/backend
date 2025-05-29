@@ -3,8 +3,8 @@ from enum import Enum
 import logging
 from datetime import datetime
 
-from agents.base_agent import BaseAgent
-from agents.agent_service import AgentService
+from .base_agent import BaseAgent
+# Removing circular import - agent_service already imports legal_document_agent
 
 logger = logging.getLogger(__name__)
 

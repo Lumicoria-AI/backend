@@ -4,12 +4,12 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 from enum import Enum
 
-from api.deps import get_current_active_user
-from db.mongodb.repositories.agent_universe_repository import agent_universe_repository
-from db.mongodb.repositories.permission_repository import permission_repository
-from models.user import User
-from agents.agent_service import AgentService
-from agents.translation_agent import TranslationAgent, TranslationMode
+from backend.api.deps import get_current_active_user
+from backend.db.mongodb.repositories.agent_universe_repository import agent_universe_repository
+from backend.db.mongodb.repositories.permission_repository import permission_repository
+from backend.models.user import User
+from backend.agents.agent_service import AgentService
+from backend.agents.translation_agent import TranslationAgent, TranslationMode
 
 router = APIRouter()
 
@@ -395,7 +395,7 @@ async def list_supported_languages(
 
 @router.get("/analytics", response_model=Dict[str, Any])
 async def get_translation_analytics(
-    time_range: str = Query("7d", regex="^(1d|7d|30d|90d|1y)$"),
+    time_range: str = Query("7d", pattern="^(1d|7d|30d|90d|1y)$"),
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
     """

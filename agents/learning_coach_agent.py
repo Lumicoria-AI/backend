@@ -4,8 +4,8 @@ import logging
 from datetime import datetime
 import json
 
-from agents.base_agent import BaseAgent
-from agents.agent_service import AgentService
+from .base_agent import BaseAgent
+# Removing circular import - agent_service already imports learning_coach_agent
 
 logger = logging.getLogger(__name__)
 

@@ -3,8 +3,9 @@ from enum import Enum
 import logging
 from datetime import datetime
 import json
+from dataclasses import dataclass
 
-from agents.base_agent import BaseAgent
+from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
 

@@ -6,7 +6,7 @@ import logging
 import json
 from uuid import uuid4
 
-from agents.base_agent import BaseAgent
+from .base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
 

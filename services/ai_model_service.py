@@ -3,12 +3,12 @@ import structlog
 import os
 
 # Assuming client libraries for various AI models are available or will be implemented
-# from services.ai_clients.gemini_client import GeminiClient
-# from services.ai_clients.mistral_client import MistralClient
-from services.ai_clients.perplexity_client import PerplexityClient
-# from services.ai_clients.ocr_client import OCRClient
-# from services.ai_clients.stt_client import STTClient
-# from services.ai_clients.image_analysis_client import ImageAnalysisClient
+# from backend.services.ai_clients.gemini_client import GeminiClient
+# from backend.services.ai_clients.mistral_client import MistralClient
+from backend.services.ai_clients.perplexity_client import PerplexityClient
+# from backend.services.ai_clients.ocr_client import OCRClient
+# from backend.services.ai_clients.stt_client import STTClient
+# from backend.services.ai_clients.image_analysis_client import ImageAnalysisClient
 
 logger = structlog.get_logger()
 

@@ -1,33 +1,16 @@
-"""
-Processor Components for Agent Studio
-
-These components handle data processing, analysis, and transformation using AI models.
-"""
-
-import asyncio
-import json
+from abc import ABC, abstractmethod
+from typing import Dict, Any, List
+from datetime import datetime
 import time
-import re
-from typing import Dict, Any, Optional, List
-from datetime import datetime, timedelta
 import structlog
 
-from .base_component import BaseComponent, ComponentResult, ComponentStatus, ComponentConfig
-from ..base_agent import BaseAgent
+from .base_component import BaseComponent, ComponentResult, ComponentStatus
 
 logger = structlog.get_logger(__name__)
 
 class PerplexityResearchComponent(BaseComponent):
-    """
-    Component that connects to Perplexity's Sonar API for real-time, cited research and reasoning.
-    Powers deep research, fact-checking, and multi-step reasoning.
-    """
+    """Component that performs research using the Perplexity API."""
     
-    def __init__(self, config: ComponentConfig):
-        super().__init__(config)
-        self.perplexity_client = None
-        self._initialize_client()
-        
     @property
     def component_type(self) -> str:
         return "processor"
@@ -42,10 +25,9 @@ class PerplexityResearchComponent(BaseComponent):
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
-                "context": {"type": "string"},
-                "search_type": {"type": "string", "enum": ["web", "academic", "news", "general"]},
-                "max_sources": {"type": "integer", "minimum": 1, "maximum": 20},
-                "language": {"type": "string"}
+                "context": {"type": "string", "optional": True},
+                "depth": {"type": "string", "enum": ["basic", "detailed", "comprehensive"]},
+                "focus_areas": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["query"]
         }
@@ -55,69 +37,47 @@ class PerplexityResearchComponent(BaseComponent):
         return {
             "type": "object",
             "properties": {
-                "answer": {"type": "string"},
+                "findings": {"type": "array", "items": {"type": "object"}},
                 "sources": {"type": "array", "items": {"type": "object"}},
-                "citations": {"type": "array", "items": {"type": "string"}},
-                "confidence": {"type": "number"},
-                "reasoning_steps": {"type": "array", "items": {"type": "string"}},
+                "summary": {"type": "string"},
                 "metadata": {"type": "object"}
             }
         }
         
-    @property
-    def config_schema(self) -> Dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "model": {"type": "string", "default": "sonar-large-online"},
-                "temperature": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.7},
-                "max_tokens": {"type": "integer", "default": 2048},
-                "include_citations": {"type": "boolean", "default": True},
-                "search_depth": {"type": "string", "enum": ["shallow", "medium", "deep"], "default": "medium"}
-            }
-        }
-        
-    def _initialize_client(self):
-        """Initialize Perplexity client"""
-        try:
-            from ...ai_models.perplexity import create_perplexity_client
-            import os
-            
-            api_key = os.environ.get("PERPLEXITY_API_KEY")
-            if api_key:
-                self.perplexity_client = create_perplexity_client(
-                    api_key=api_key,
-                    config=self.settings
-                )
-        except Exception as e:
-            logger.error("Failed to initialize Perplexity client", error=str(e))
-            
     async def execute(self, input_data: Dict[str, Any]) -> ComponentResult:
         execution_id = self._start_execution()
         start_time = time.time()
         
         try:
+            query = input_data.get("query")
+            context = input_data.get("context", "")
+            depth = input_data.get("depth", "detailed")
+            focus_areas = input_data.get("focus_areas", [])
+            
+            # Use Perplexity client to perform research
             if not self.perplexity_client:
                 raise ValueError("Perplexity client not initialized")
                 
-            query = input_data.get("query")
-            context = input_data.get("context", "")
-            search_type = input_data.get("search_type", "general")
-            max_sources = input_data.get("max_sources", 5)
-            
-            # Build the research prompt
-            prompt = self._build_research_prompt(query, context, search_type)
-            
-            # Execute research query
-            response = await self.perplexity_client.chat_completion(
-                messages=[{"role": "user", "content": prompt}],
-                model=self.settings.get("model", "sonar-large-online"),
-                temperature=self.settings.get("temperature", 0.7),
-                max_tokens=self.settings.get("max_tokens", 2048)
+            response = await self.perplexity_client.query(
+                prompt=f"""Research query: {query}
+                Context: {context}
+                Focus areas: {', '.join(focus_areas)}
+                Depth: {depth}
+                
+                Provide detailed research findings with sources."""
             )
             
-            # Parse response and extract citations
-            result_data = await self._parse_research_response(response, max_sources)
+            result_data = {
+                "findings": self._parse_findings(response.content),
+                "sources": response.metadata.get("sources", []),
+                "summary": response.content,
+                "metadata": {
+                    "depth": depth,
+                    "focus_areas": focus_areas,
+                    "query_timestamp": datetime.utcnow().isoformat(),
+                    "confidence": response.metadata.get("confidence", 0.0)
+                }
+            }
             
             execution_time = time.time() - start_time
             self._complete_execution(execution_id, success=True)
@@ -131,7 +91,7 @@ class PerplexityResearchComponent(BaseComponent):
             
         except Exception as e:
             execution_time = time.time() - start_time
-            error_msg = f"Perplexity research failed: {str(e)}"
+            error_msg = f"Research failed: {str(e)}"
             self._complete_execution(execution_id, success=False, error=error_msg)
             
             return ComponentResult(
@@ -141,79 +101,32 @@ class PerplexityResearchComponent(BaseComponent):
                 execution_time=execution_time
             )
             
-    def _build_research_prompt(self, query: str, context: str, search_type: str) -> str:
-        """Build research prompt based on search type"""
-        base_prompt = f"Research Query: {query}"
+    def _parse_findings(self, content: str) -> List[Dict[str, Any]]:
+        """Parse research findings from response content"""
+        # Simple parsing - in practice would use more sophisticated NLP
+        findings = []
         
-        if context:
-            base_prompt += f"\n\nContext: {context}"
-            
-        if search_type == "academic":
-            base_prompt += "\n\nPlease provide academic-level research with scholarly sources."
-        elif search_type == "news":
-            base_prompt += "\n\nPlease focus on recent news and current events."
-        elif search_type == "web":
-            base_prompt += "\n\nPlease search across web sources for comprehensive information."
-            
-        if self.settings.get("include_citations", True):
-            base_prompt += "\n\nPlease include citations and sources for all claims."
-            
-        return base_prompt
+        # Split into paragraphs and create finding objects
+        paragraphs = content.split("\n\n")
+        for i, para in enumerate(paragraphs):
+            if para.strip():
+                findings.append({
+                    "id": i + 1,
+                    "content": para.strip(),
+                    "key_points": self._extract_key_points(para),
+                    "relevance": "high" if i < 3 else "medium"
+                })
+                
+        return findings
         
-    async def _parse_research_response(self, response, max_sources: int) -> Dict[str, Any]:
-        """Parse Perplexity response and extract structured data"""
-        content = response.content
-        
-        # Extract citations (this would need to be adapted based on actual Perplexity response format)
-        citations = self._extract_citations(content)
-        sources = self._extract_sources(content, max_sources)
-        reasoning_steps = self._extract_reasoning_steps(content)
-        
-        return {
-            "answer": content,
-            "sources": sources,
-            "citations": citations,
-            "confidence": 0.85,  # Would be calculated based on source quality
-            "reasoning_steps": reasoning_steps,
-            "metadata": {
-                "model_used": self.settings.get("model", "sonar-large-online"),
-                "search_depth": self.settings.get("search_depth", "medium"),
-                "processed_at": datetime.utcnow().isoformat()
-            }
-        }
-        
-    def _extract_citations(self, content: str) -> List[str]:
-        """Extract citations from response content"""
-        # Simple regex-based citation extraction
-        citations = re.findall(r'\[(\d+)\]', content)
-        return citations
-        
-    def _extract_sources(self, content: str, max_sources: int) -> List[Dict[str, Any]]:
-        """Extract source information"""
-        # Placeholder implementation
-        return [
-            {
-                "id": i,
-                "title": f"Source {i}",
-                "url": f"https://example.com/source{i}",
-                "type": "web",
-                "relevance": 0.9 - (i * 0.1)
-            }
-            for i in range(1, min(max_sources + 1, 6))
-        ]
-        
-    def _extract_reasoning_steps(self, content: str) -> List[str]:
-        """Extract reasoning steps from content"""
-        # Simple implementation - would be more sophisticated in practice
-        sentences = content.split('. ')
-        return sentences[:5] if len(sentences) > 5 else sentences
-
+    def _extract_key_points(self, text: str) -> List[str]:
+        """Extract key points from a text paragraph"""
+        # Simple extraction - would use more sophisticated NLP in practice
+        sentences = text.split(". ")
+        return [s.strip() for s in sentences[:2] if len(s.strip()) > 20]
 
 class ChainOfThoughtComponent(BaseComponent):
-    """
-    Component that breaks down complex queries into logical steps and provides explanations.
-    Enhances transparency and learning, especially for students and researchers.
-    """
+    """Component that implements chain-of-thought reasoning to break down complex problems."""
     
     @property
     def component_type(self) -> str:
@@ -229,9 +142,10 @@ class ChainOfThoughtComponent(BaseComponent):
             "type": "object",
             "properties": {
                 "problem": {"type": "string"},
-                "domain": {"type": "string", "enum": ["math", "science", "logic", "general"]},
-                "complexity": {"type": "string", "enum": ["simple", "medium", "complex"]},
-                "explanation_level": {"type": "string", "enum": ["basic", "intermediate", "advanced"]}
+                "context": {"type": "string", "optional": True},
+                "max_steps": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
+                "strategy": {"type": "string", "enum": ["analytical", "creative", "socratic"], "default": "analytical"},
+                "include_examples": {"type": "boolean", "default": False}
             },
             "required": ["problem"]
         }
@@ -241,24 +155,21 @@ class ChainOfThoughtComponent(BaseComponent):
         return {
             "type": "object",
             "properties": {
-                "solution": {"type": "string"},
-                "reasoning_steps": {"type": "array", "items": {"type": "object"}},
+                "steps": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "step_number": {"type": "integer"},
+                            "reasoning": {"type": "string"},
+                            "conclusion": {"type": "string"},
+                            "confidence": {"type": "number"}
+                        }
+                    }
+                },
+                "final_answer": {"type": "string"},
                 "confidence": {"type": "number"},
-                "alternative_approaches": {"type": "array", "items": {"type": "string"}},
-                "learning_points": {"type": "array", "items": {"type": "string"}},
                 "metadata": {"type": "object"}
-            }
-        }
-        
-    @property
-    def config_schema(self) -> Dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "step_detail_level": {"type": "string", "enum": ["minimal", "detailed", "verbose"], "default": "detailed"},
-                "include_examples": {"type": "boolean", "default": True},
-                "check_work": {"type": "boolean", "default": True},
-                "max_steps": {"type": "integer", "default": 10}
             }
         }
         
@@ -268,26 +179,44 @@ class ChainOfThoughtComponent(BaseComponent):
         
         try:
             problem = input_data.get("problem")
-            domain = input_data.get("domain", "general")
-            complexity = input_data.get("complexity", "medium")
-            explanation_level = input_data.get("explanation_level", "intermediate")
+            context = input_data.get("context", "")
+            max_steps = input_data.get("max_steps", 5)
+            strategy = input_data.get("strategy", "analytical")
+            include_examples = input_data.get("include_examples", False)
             
-            # Generate step-by-step reasoning
-            reasoning_result = await self._generate_reasoning(
-                problem, domain, complexity, explanation_level
+            # Generate chain of thought steps
+            steps = await self._generate_steps(
+                problem=problem,
+                context=context,
+                max_steps=max_steps,
+                strategy=strategy
             )
             
-            # Validate reasoning if enabled
-            if self.settings.get("check_work", True):
-                reasoning_result = await self._validate_reasoning(reasoning_result)
-                
+            # Derive final answer from steps
+            final_answer = await self._derive_final_answer(steps)
+            
+            # Calculate overall confidence
+            confidence = sum(step["confidence"] for step in steps) / len(steps)
+            
+            result_data = {
+                "steps": steps,
+                "final_answer": final_answer,
+                "confidence": confidence,
+                "metadata": {
+                    "strategy": strategy,
+                    "step_count": len(steps),
+                    "included_examples": include_examples,
+                    "processing_timestamp": datetime.utcnow().isoformat()
+                }
+            }
+            
             execution_time = time.time() - start_time
             self._complete_execution(execution_id, success=True)
             
             return ComponentResult(
                 component_id=self.id,
                 status=ComponentStatus.COMPLETED,
-                data=reasoning_result,
+                data=result_data,
                 execution_time=execution_time
             )
             
@@ -303,100 +232,82 @@ class ChainOfThoughtComponent(BaseComponent):
                 execution_time=execution_time
             )
             
-    async def _generate_reasoning(self, problem: str, domain: str, complexity: str, level: str) -> Dict[str, Any]:
-        """Generate step-by-step reasoning"""
-        # Simulate AI reasoning process
-        await asyncio.sleep(2)
+    async def _generate_steps(
+        self, 
+        problem: str, 
+        context: str, 
+        max_steps: int,
+        strategy: str
+    ) -> List[Dict[str, Any]]:
+        """Generate chain of thought reasoning steps"""
+        steps = []
+        current_context = context
         
-        # Generate reasoning steps based on problem type
-        if domain == "math":
-            steps = await self._generate_math_steps(problem, complexity)
-        elif domain == "science":
-            steps = await self._generate_science_steps(problem, complexity)
-        else:
-            steps = await self._generate_general_steps(problem, complexity)
+        for i in range(max_steps):
+            # Generate reasoning based on strategy
+            if strategy == "analytical":
+                reasoning = self._analytical_reasoning(problem, current_context)
+            elif strategy == "creative":
+                reasoning = self._creative_reasoning(problem, current_context)
+            else:  # socratic
+                reasoning = self._socratic_reasoning(problem, current_context)
+                
+            # Generate conclusion for this step
+            conclusion = self._generate_conclusion(reasoning)
             
-        return {
-            "solution": "Final solution based on reasoning steps",
-            "reasoning_steps": steps,
-            "confidence": 0.88,
-            "alternative_approaches": ["Alternative approach 1", "Alternative approach 2"],
-            "learning_points": ["Key concept 1", "Key concept 2", "Key concept 3"],
-            "metadata": {
-                "domain": domain,
-                "complexity": complexity,
-                "explanation_level": level,
-                "step_count": len(steps),
-                "processed_at": datetime.utcnow().isoformat()
-            }
-        }
-        
-    async def _generate_math_steps(self, problem: str, complexity: str) -> List[Dict[str, Any]]:
-        """Generate math-specific reasoning steps"""
-        return [
-            {
-                "step": 1,
-                "description": "Identify the type of mathematical problem",
-                "explanation": "This appears to be an algebra problem involving linear equations",
-                "formula": "ax + b = c",
-                "confidence": 0.95
-            },
-            {
-                "step": 2,
-                "description": "Isolate the variable",
-                "explanation": "Move constants to one side of the equation",
-                "formula": "x = (c - b) / a",
-                "confidence": 0.90
-            }
-        ]
-        
-    async def _generate_science_steps(self, problem: str, complexity: str) -> List[Dict[str, Any]]:
-        """Generate science-specific reasoning steps"""
-        return [
-            {
-                "step": 1,
-                "description": "Identify scientific principles involved",
-                "explanation": "This problem involves Newton's laws of motion",
-                "concept": "Force = mass × acceleration",
-                "confidence": 0.92
-            }
-        ]
-        
-    async def _generate_general_steps(self, problem: str, complexity: str) -> List[Dict[str, Any]]:
-        """Generate general reasoning steps"""
-        return [
-            {
-                "step": 1,
-                "description": "Understand the problem",
-                "explanation": "Break down the problem into its key components",
-                "confidence": 0.85
-            },
-            {
-                "step": 2,
-                "description": "Identify relevant information",
-                "explanation": "Determine what information is given and what needs to be found",
-                "confidence": 0.80
-            }
-        ]
-        
-    async def _validate_reasoning(self, reasoning_result: Dict[str, Any]) -> Dict[str, Any]:
-        """Validate the reasoning steps"""
-        # Simple validation - in practice would be more sophisticated
-        step_count = len(reasoning_result["reasoning_steps"])
-        max_steps = self.settings.get("max_steps", 10)
-        
-        if step_count > max_steps:
-            reasoning_result["reasoning_steps"] = reasoning_result["reasoning_steps"][:max_steps]
-            reasoning_result["metadata"]["truncated"] = True
+            # Calculate confidence for this step
+            confidence = self._calculate_confidence(reasoning, conclusion)
             
-        return reasoning_result
-
+            steps.append({
+                "step_number": i + 1,
+                "reasoning": reasoning,
+                "conclusion": conclusion,
+                "confidence": confidence
+            })
+            
+            # Update context with new conclusion
+            current_context = f"{current_context}\nStep {i + 1}: {conclusion}"
+            
+            # Check if we've reached a satisfactory conclusion
+            if confidence > 0.95:
+                break
+                
+        return steps
+        
+    def _analytical_reasoning(self, problem: str, context: str) -> str:
+        """Apply analytical reasoning approach"""
+        # TODO: Implement actual analytical reasoning logic
+        return f"Analyzing {problem} considering {context}"
+        
+    def _creative_reasoning(self, problem: str, context: str) -> str:
+        """Apply creative reasoning approach"""
+        # TODO: Implement actual creative reasoning logic
+        return f"Creatively exploring {problem} with {context}"
+        
+    def _socratic_reasoning(self, problem: str, context: str) -> str:
+        """Apply Socratic questioning approach"""
+        # TODO: Implement actual Socratic reasoning logic
+        return f"Questioning assumptions about {problem} in context of {context}"
+        
+    def _generate_conclusion(self, reasoning: str) -> str:
+        """Generate a conclusion from the reasoning"""
+        # TODO: Implement actual conclusion generation logic
+        return f"Based on the reasoning, we can conclude: {reasoning}"
+        
+    def _calculate_confidence(self, reasoning: str, conclusion: str) -> float:
+        """Calculate confidence score for a reasoning step"""
+        # TODO: Implement actual confidence calculation logic
+        # For now, return a mock confidence score between 0.5 and 1.0
+        return 0.75
+        
+    async def _derive_final_answer(self, steps: List[Dict[str, Any]]) -> str:
+        """Derive final answer from reasoning steps"""
+        # Take the conclusion from the last step with highest confidence
+        final_step = max(steps, key=lambda x: x["confidence"])
+        return final_step["conclusion"]
 
 class DataExtractionComponent(BaseComponent):
-    """
-    Component that identifies and extracts structured data from documents or text.
-    Automates tedious manual entry and enables downstream automation.
-    """
+    """Component that extracts structured data from unstructured text."""
     
     @property
     def component_type(self) -> str:
@@ -404,7 +315,7 @@ class DataExtractionComponent(BaseComponent):
         
     @property
     def category(self) -> str:
-        return "data"
+        return "extraction"
         
     @property
     def input_schema(self) -> Dict[str, Any]:
@@ -412,9 +323,17 @@ class DataExtractionComponent(BaseComponent):
             "type": "object",
             "properties": {
                 "text": {"type": "string"},
-                "extraction_types": {"type": "array", "items": {"type": "string"}},
-                "document_type": {"type": "string"},
-                "custom_patterns": {"type": "object"}
+                "extraction_type": {
+                    "type": "string", 
+                    "enum": ["entities", "dates", "numbers", "custom"],
+                    "default": "entities"
+                },
+                "custom_patterns": {
+                    "type": "array",
+                    "items": {"type": "string"}
+                },
+                "include_context": {"type": "boolean", "default": True},
+                "min_confidence": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.5}
             },
             "required": ["text"]
         }
@@ -424,66 +343,77 @@ class DataExtractionComponent(BaseComponent):
         return {
             "type": "object",
             "properties": {
-                "extracted_data": {"type": "object"},
-                "entities": {"type": "array", "items": {"type": "object"}},
-                "confidence_scores": {"type": "object"},
-                "structured_output": {"type": "object"},
-                "metadata": {"type": "object"}
-            }
-        }
-        
-    @property
-    def config_schema(self) -> Dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "extraction_types": {
+                "entities": {
                     "type": "array",
-                    "items": {"type": "string"},
-                    "default": ["dates", "names", "amounts", "emails", "phone_numbers"]
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string"},
+                            "type": {"type": "string"},
+                            "start": {"type": "integer"},
+                            "end": {"type": "integer"},
+                            "confidence": {"type": "number"},
+                            "context": {"type": "string", "optional": True}
+                        }
+                    }
                 },
-                "confidence_threshold": {"type": "number", "minimum": 0, "maximum": 1, "default": 0.7},
-                "use_nlp": {"type": "boolean", "default": True},
-                "custom_regex": {"type": "object", "default": {}}
+                "metadata": {
+                    "type": "object",
+                    "properties": {
+                        "extraction_type": {"type": "string"},
+                        "total_entities": {"type": "integer"},
+                        "timestamp": {"type": "string"}
+                    }
+                }
             }
         }
-        
+
     async def execute(self, input_data: Dict[str, Any]) -> ComponentResult:
         execution_id = self._start_execution()
         start_time = time.time()
         
         try:
-            text = input_data.get("text", "")
-            extraction_types = input_data.get("extraction_types", self.settings.get("extraction_types", []))
-            document_type = input_data.get("document_type", "general")
+            text = input_data["text"]
+            extraction_type = input_data.get("extraction_type", "entities")
+            custom_patterns = input_data.get("custom_patterns", [])
+            include_context = input_data.get("include_context", True)
+            min_confidence = input_data.get("min_confidence", 0.5)
+
+            # Initialize result container
+            extracted_entities = []
+
+            # Use Perplexity for smart extraction
+            if not self.perplexity_client:
+                raise ValueError("Perplexity client not initialized")
+
+            # Prepare extraction prompt based on type
+            prompt = self._get_extraction_prompt(text, extraction_type, custom_patterns)
             
-            # Extract different types of data
-            extracted_data = {}
-            entities = []
-            confidence_scores = {}
+            response = await self.perplexity_client.query(prompt)
             
-            for extraction_type in extraction_types:
-                result = await self._extract_data_type(text, extraction_type)
-                extracted_data[extraction_type] = result["data"]
-                entities.extend(result["entities"])
-                confidence_scores[extraction_type] = result["confidence"]
-                
-            # Structure the output based on document type
-            structured_output = await self._structure_output(extracted_data, document_type)
-            
+            # Parse the response into structured data
+            extracted_data = self._parse_extraction_response(
+                response.content, 
+                text,
+                extraction_type,
+                include_context
+            )
+
+            # Filter by confidence
+            extracted_data = [
+                entity for entity in extracted_data 
+                if entity.get("confidence", 0) >= min_confidence
+            ]
+
             result_data = {
-                "extracted_data": extracted_data,
-                "entities": entities,
-                "confidence_scores": confidence_scores,
-                "structured_output": structured_output,
+                "entities": extracted_data,
                 "metadata": {
-                    "document_type": document_type,
-                    "extraction_types": extraction_types,
-                    "text_length": len(text),
-                    "processed_at": datetime.utcnow().isoformat()
+                    "extraction_type": extraction_type,
+                    "total_entities": len(extracted_data),
+                    "timestamp": datetime.utcnow().isoformat()
                 }
             }
-            
+
             execution_time = time.time() - start_time
             self._complete_execution(execution_id, success=True)
             
@@ -493,7 +423,7 @@ class DataExtractionComponent(BaseComponent):
                 data=result_data,
                 execution_time=execution_time
             )
-            
+
         except Exception as e:
             execution_time = time.time() - start_time
             error_msg = f"Data extraction failed: {str(e)}"
@@ -505,463 +435,86 @@ class DataExtractionComponent(BaseComponent):
                 error=error_msg,
                 execution_time=execution_time
             )
-            
-    async def _extract_data_type(self, text: str, extraction_type: str) -> Dict[str, Any]:
-        """Extract specific data type from text"""
-        
-        if extraction_type == "dates":
-            return await self._extract_dates(text)
-        elif extraction_type == "names":
-            return await self._extract_names(text)
-        elif extraction_type == "amounts":
-            return await self._extract_amounts(text)
-        elif extraction_type == "emails":
-            return await self._extract_emails(text)
-        elif extraction_type == "phone_numbers":
-            return await self._extract_phone_numbers(text)
-        else:
-            return {"data": [], "entities": [], "confidence": 0.0}
-            
-    async def _extract_dates(self, text: str) -> Dict[str, Any]:
-        """Extract dates from text"""
-        import re
-        from datetime import datetime
-        
-        # Simple date patterns
-        date_patterns = [
-            r'\b\d{1,2}/\d{1,2}/\d{4}\b',  # MM/DD/YYYY
-            r'\b\d{1,2}-\d{1,2}-\d{4}\b',  # MM-DD-YYYY
-            r'\b\d{4}-\d{2}-\d{2}\b',      # YYYY-MM-DD
-        ]
-        
-        dates = []
-        entities = []
-        
-        for pattern in date_patterns:
-            matches = re.finditer(pattern, text)
-            for match in matches:
-                date_str = match.group()
-                start, end = match.span()
-                
-                dates.append(date_str)
-                entities.append({
-                    "text": date_str,
-                    "label": "DATE",
-                    "start": start,
-                    "end": end,
-                    "confidence": 0.9
-                })
-                
-        return {
-            "data": dates,
-            "entities": entities,
-            "confidence": 0.9 if dates else 0.0
-        }
-        
-    async def _extract_names(self, text: str) -> Dict[str, Any]:
-        """Extract person names from text"""
-        # Placeholder implementation - would use NLP library like spaCy
-        import re
-        
-        # Simple capitalized word patterns (very basic)
-        name_pattern = r'\b[A-Z][a-z]+ [A-Z][a-z]+\b'
-        matches = re.finditer(name_pattern, text)
-        
-        names = []
-        entities = []
-        
-        for match in matches:
-            name = match.group()
-            start, end = match.span()
-            
-            names.append(name)
-            entities.append({
-                "text": name,
-                "label": "PERSON",
-                "start": start,
-                "end": end,
-                "confidence": 0.7
-            })
-            
-        return {
-            "data": names,
-            "entities": entities,
-            "confidence": 0.7 if names else 0.0
-        }
-        
-    async def _extract_amounts(self, text: str) -> Dict[str, Any]:
-        """Extract monetary amounts from text"""
-        import re
-        
-        # Money patterns
-        amount_patterns = [
-            r'\$\d{1,3}(?:,\d{3})*(?:\.\d{2})?',  # $1,000.00
-            r'\b\d{1,3}(?:,\d{3})*(?:\.\d{2})?\s*(?:dollars?|USD)\b',  # 1000 dollars
-        ]
-        
-        amounts = []
-        entities = []
-        
-        for pattern in amount_patterns:
-            matches = re.finditer(pattern, text, re.IGNORECASE)
-            for match in matches:
-                amount_str = match.group()
-                start, end = match.span()
-                
-                amounts.append(amount_str)
-                entities.append({
-                    "text": amount_str,
-                    "label": "MONEY",
-                    "start": start,
-                    "end": end,
-                    "confidence": 0.85
-                })
-                
-        return {
-            "data": amounts,
-            "entities": entities,
-            "confidence": 0.85 if amounts else 0.0
-        }
-        
-    async def _extract_emails(self, text: str) -> Dict[str, Any]:
-        """Extract email addresses from text"""
-        import re
-        
-        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-        matches = re.finditer(email_pattern, text)
-        
-        emails = []
-        entities = []
-        
-        for match in matches:
-            email = match.group()
-            start, end = match.span()
-            
-            emails.append(email)
-            entities.append({
-                "text": email,
-                "label": "EMAIL",
-                "start": start,
-                "end": end,
-                "confidence": 0.95
-            })
-            
-        return {
-            "data": emails,
-            "entities": entities,
-            "confidence": 0.95 if emails else 0.0
-        }
-        
-    async def _extract_phone_numbers(self, text: str) -> Dict[str, Any]:
-        """Extract phone numbers from text"""
-        import re
-        
-        # Phone number patterns
-        phone_patterns = [
-            r'\b\d{3}-\d{3}-\d{4}\b',  # 123-456-7890
-            r'\b\(\d{3}\)\s*\d{3}-\d{4}\b',  # (123) 456-7890
-            r'\b\d{10}\b',  # 1234567890
-        ]
-        
-        phones = []
-        entities = []
-        
-        for pattern in phone_patterns:
-            matches = re.finditer(pattern, text)
-            for match in matches:
-                phone = match.group()
-                start, end = match.span()
-                
-                phones.append(phone)
-                entities.append({
-                    "text": phone,
-                    "label": "PHONE",
-                    "start": start,
-                    "end": end,
-                    "confidence": 0.8
-                })
-                
-        return {
-            "data": phones,
-            "entities": entities,
-            "confidence": 0.8 if phones else 0.0
-        }
-        
-    async def _structure_output(self, extracted_data: Dict[str, Any], document_type: str) -> Dict[str, Any]:
-        """Structure extracted data based on document type"""
-        
-        if document_type == "invoice":
-            return {
-                "invoice_number": extracted_data.get("amounts", [None])[0],
-                "due_date": extracted_data.get("dates", [None])[0],
-                "vendor": extracted_data.get("names", [None])[0],
-                "total_amount": extracted_data.get("amounts", [None])[-1] if extracted_data.get("amounts") else None,
-                "contact_email": extracted_data.get("emails", [None])[0],
-                "contact_phone": extracted_data.get("phone_numbers", [None])[0]
-            }
-        elif document_type == "contract":
-            return {
-                "parties": extracted_data.get("names", []),
-                "effective_date": extracted_data.get("dates", [None])[0],
-                "expiration_date": extracted_data.get("dates", [None])[-1] if len(extracted_data.get("dates", [])) > 1 else None,
-                "contract_value": extracted_data.get("amounts", [None])[0],
-                "contact_info": {
-                    "emails": extracted_data.get("emails", []),
-                    "phones": extracted_data.get("phone_numbers", [])
-                }
-            }
-        else:
-            # General structure
-            return {
-                "key_dates": extracted_data.get("dates", []),
-                "people": extracted_data.get("names", []),
-                "amounts": extracted_data.get("amounts", []),
-                "contacts": {
-                    "emails": extracted_data.get("emails", []),
-                    "phones": extracted_data.get("phone_numbers", [])
-                }
-            }
 
+    def _get_extraction_prompt(self, text: str, extraction_type: str, custom_patterns: List[str]) -> str:
+        """Generate appropriate prompt for extraction type"""
+        if extraction_type == "entities":
+            return f"""Extract all named entities from the following text. Include person names, organizations, locations, dates, and key concepts.
+            For each entity provide: the extracted text, entity type, character positions (start, end), and a confidence score.
+            
+            Text: {text}"""
+        elif extraction_type == "dates":
+            return f"""Extract all date references from the following text. Include explicit dates, relative dates, and date ranges.
+            For each date provide: the extracted text, standardized date format if possible, character positions, and confidence.
+            
+            Text: {text}"""
+        elif extraction_type == "numbers":
+            return f"""Extract all numerical values from the following text. Include plain numbers, percentages, currencies, and measurements.
+            For each number provide: the extracted text, standardized value if possible, character positions, and confidence.
+            
+            Text: {text}"""
+        else:  # custom
+            patterns_str = "\n".join(f"- {p}" for p in custom_patterns)
+            return f"""Extract information matching these patterns from the text:
+            {patterns_str}
+            
+            For each match provide: the extracted text, pattern matched, character positions, and confidence.
+            
+            Text: {text}"""
 
-class TranslatorComponent(BaseComponent):
-    """
-    Component that translates text between different languages while preserving context and meaning.
-    Enables multilingual communication and content globalization.
-    """
-    
-    @property
-    def component_type(self) -> str:
-        return "processor"
-        
-    @property
-    def category(self) -> str:
-        return "language"
-        
-    @property
-    def input_schema(self) -> Dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "text": {"type": "string"},
-                "source_language": {"type": "string"},
-                "target_language": {"type": "string"},
-                "preserve_formatting": {"type": "boolean"},
-                "context": {"type": "string"},
-                "domain": {"type": "string", "enum": ["general", "technical", "medical", "legal", "creative"]}
-            },
-            "required": ["text", "target_language"]
-        }
-        
-    @property
-    def output_schema(self) -> Dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "translated_text": {"type": "string"},
-                "source_language": {"type": "string"},
-                "target_language": {"type": "string"},
-                "confidence_score": {"type": "number"},
-                "alternative_translations": {"type": "array", "items": {"type": "string"}},
-                "detected_entities": {"type": "array", "items": {"type": "object"}},
-                "metadata": {"type": "object"}
-            }
-        }
-        
-    @property
-    def config_schema(self) -> Dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "default_source_language": {"type": "string", "default": "auto"},
-                "quality_level": {"type": "string", "enum": ["draft", "standard", "professional"], "default": "standard"},
-                "preserve_formatting": {"type": "boolean", "default": True},
-                "detect_source_language": {"type": "boolean", "default": True},
-                "include_alternatives": {"type": "boolean", "default": False},
-                "glossary_id": {"type": "string"}
-            }
-        }
-        
-    async def execute(self, input_data: Dict[str, Any]) -> ComponentResult:
-        execution_id = self._start_execution()
-        start_time = time.time()
-        
+    def _parse_extraction_response(
+        self, 
+        response: str, 
+        original_text: str,
+        extraction_type: str,
+        include_context: bool,
+    ) -> List[Dict[str, Any]]:
+        """Parse LLM response into structured entity data"""
+        # The LLM should return data in a parseable format
         try:
-            text = input_data.get("text", "")
-            source_language = input_data.get("source_language", self.settings.get("default_source_language", "auto"))
-            target_language = input_data.get("target_language")
-            preserve_formatting = input_data.get("preserve_formatting", self.settings.get("preserve_formatting", True))
-            domain = input_data.get("domain", "general")
+            # Convert response to structured data
+            # This is a simplified example - in practice would need more robust parsing
+            entities = []
             
-            # Detect source language if set to auto
-            if source_language == "auto" or self.settings.get("detect_source_language", True):
-                detected_language = await self._detect_language(text)
-                if detected_language:
-                    source_language = detected_language
-                else:
-                    source_language = "en"  # Default to English if detection fails
+            # Split response into lines and parse each entity
+            lines = response.strip().split("\n")
+            for line in lines:
+                if not line.strip():
+                    continue
                     
-            # Perform translation
-            translation_result = await self._translate_text(
-                text, source_language, target_language, domain, preserve_formatting
-            )
-            
-            # Generate alternatives if enabled
-            alternatives = []
-            if self.settings.get("include_alternatives", False):
-                alternatives = await self._generate_alternatives(text, source_language, target_language, domain)
-                
-            # Extract entities (names, places, etc.) that might need special handling
-            detected_entities = await self._extract_entities(text, translation_result["translated_text"])
-            
-            result_data = {
-                "translated_text": translation_result["translated_text"],
-                "source_language": source_language,
-                "target_language": target_language,
-                "confidence_score": translation_result["confidence"],
-                "alternative_translations": alternatives,
-                "detected_entities": detected_entities,
-                "metadata": {
-                    "domain": domain,
-                    "quality_level": self.settings.get("quality_level", "standard"),
-                    "preserve_formatting": preserve_formatting,
-                    "char_count": len(text),
-                    "processed_at": datetime.utcnow().isoformat()
-                }
-            }
-            
-            execution_time = time.time() - start_time
-            self._complete_execution(execution_id, success=True)
-            
-            return ComponentResult(
-                component_id=self.id,
-                status=ComponentStatus.COMPLETED,
-                data=result_data,
-                execution_time=execution_time
-            )
+                parts = line.split("|")
+                if len(parts) >= 4:
+                    text = parts[0].strip()
+                    entity_type = parts[1].strip()
+                    pos = parts[2].strip()
+                    confidence = float(parts[3].strip())
+                    
+                    # Parse position
+                    start, end = map(int, pos.split("-"))
+                    
+                    entity = {
+                        "text": text,
+                        "type": entity_type,
+                        "start": start,
+                        "end": end,
+                        "confidence": confidence
+                    }
+                    
+                    # Add surrounding context if requested
+                    if include_context:
+                        context_start = max(0, start - 50)
+                        context_end = min(len(original_text), end + 50)
+                        entity["context"] = original_text[context_start:context_end]
+                    
+                    entities.append(entity)
+                    
+            return entities
             
         except Exception as e:
-            execution_time = time.time() - start_time
-            error_msg = f"Translation failed: {str(e)}"
-            self._complete_execution(execution_id, success=False, error=error_msg)
-            
-            return ComponentResult(
-                component_id=self.id,
-                status=ComponentStatus.ERROR,
-                error=error_msg,
-                execution_time=execution_time
-            )
-            
-    async def _detect_language(self, text: str) -> Optional[str]:
-        """Detect the language of input text"""
-        # In a real implementation, this would use a language detection service
-        # For now, we'll return a placeholder
-        await asyncio.sleep(0.5)  # Simulate API call
-        
-        # Very simplistic detection based on common words (just for demonstration)
-        text_lower = text.lower()
-        if len(text) < 5:
-            return None
-            
-        # Extremely basic detection for demonstration
-        spanish_words = ["el", "la", "los", "es", "son", "y", "o", "pero"]
-        french_words = ["le", "la", "les", "est", "sont", "et", "ou", "mais"]
-        german_words = ["der", "die", "das", "ist", "sind", "und", "oder", "aber"]
-        
-        # Count word occurrences
-        spanish_count = sum(1 for word in spanish_words if f" {word} " in f" {text_lower} ")
-        french_count = sum(1 for word in french_words if f" {word} " in f" {text_lower} ")
-        german_count = sum(1 for word in german_words if f" {word} " in f" {text_lower} ")
-        
-        # Determine the most likely language
-        max_count = max(spanish_count, french_count, german_count, 0)
-        if max_count == 0:
-            return "en"  # Default to English
-        elif spanish_count == max_count:
-            return "es"
-        elif french_count == max_count:
-            return "fr"
-        elif german_count == max_count:
-            return "de"
-        else:
-            return "en"
-            
-    async def _translate_text(self, text: str, source_language: str, target_language: str, 
-                             domain: str, preserve_formatting: bool) -> Dict[str, Any]:
-        """Translate text between languages"""
-        # This would integrate with translation APIs like Google Translate, DeepL, etc.
-        # For now, we'll simulate the translation
-        await asyncio.sleep(1.5)  # Simulate translation time
-        
-        # Mock translations for demonstration
-        translations = {
-            "en_to_es": {"Hello": "Hola", "world": "mundo", "How are you?": "¿Cómo estás?"},
-            "en_to_fr": {"Hello": "Bonjour", "world": "monde", "How are you?": "Comment allez-vous?"},
-            "es_to_en": {"Hola": "Hello", "mundo": "world", "¿Cómo estás?": "How are you?"},
-            "fr_to_en": {"Bonjour": "Hello", "monde": "world", "Comment allez-vous?": "How are you?"}
-        }
-        
-        # Get translation key
-        trans_key = f"{source_language}_to_{target_language}"
-        
-        # For demonstration, just replace words from our mock dictionary
-        # In a real implementation, this would call a translation API
-        translated = text
-        confidence = 0.85
-        
-        if trans_key in translations:
-            for orig, trans in translations[trans_key].items():
-                translated = translated.replace(orig, trans)
-        else:
-            # If we don't have a mock translation, just append language marker
-            translated = f"[{target_language}] {text}"
-            confidence = 0.6
-            
-        return {
-            "translated_text": translated,
-            "confidence": confidence
-        }
-        
-    async def _generate_alternatives(self, text: str, source_language: str, 
-                                   target_language: str, domain: str) -> List[str]:
-        """Generate alternative translations"""
-        # In a real implementation, this would request alternative translations from API
-        await asyncio.sleep(0.5)  # Simulate API call
-        
-        # Simple mock alternative generations
-        alternatives = [
-            f"Alternative 1: {text} ({target_language})",
-            f"Alternative 2: {text} ({target_language})"
-        ]
-        
-        return alternatives
-        
-    async def _extract_entities(self, original_text: str, translated_text: str) -> List[Dict[str, Any]]:
-        """Extract named entities that might need special handling"""
-        # In a real implementation, this would use NLP to detect entities
-        # For demonstration, we'll just use a very simple approach
-        
-        # Extract words that start with capital letters (naive approach)
-        import re
-        
-        capitalized_words = re.findall(r'\b[A-Z][a-z]*\b', original_text)
-        entities = []
-        
-        for word in capitalized_words:
-            entities.append({
-                "text": word,
-                "type": "unknown",  # In real implementation, would determine if person, location, etc.
-                "original": word,
-                "translated": word  # In real implementation, would find translation in output
-            })
-            
-        return entities[:5]  # Limit to 5 entities
-
+            raise ValueError(f"Failed to parse extraction response: {str(e)}")
 
 class LiveEnvironmentAnalyzerComponent(BaseComponent):
-    """
-    Component that processes real-time camera input to identify objects, text, and environmental features.
-    Essential for augmented reality and context-aware applications.
-    """
+    """Component that performs real-time analysis of workspace environment."""
     
     @property
     def component_type(self) -> str:
@@ -969,20 +522,31 @@ class LiveEnvironmentAnalyzerComponent(BaseComponent):
         
     @property
     def category(self) -> str:
-        return "vision"
+        return "environment"
         
     @property
     def input_schema(self) -> Dict[str, Any]:
         return {
             "type": "object",
             "properties": {
-                "image_data": {"type": "string", "format": "base64"},
-                "image_format": {"type": "string", "enum": ["jpeg", "png", "webp"]},
-                "analysis_type": {"type": "string", "enum": ["general", "object_detection", "text_recognition", "scene_understanding"]},
-                "detection_mode": {"type": "string", "enum": ["fast", "balanced", "detailed"]},
-                "image_context": {"type": "string"}
+                "camera_feed": {"type": "string", "format": "binary"},
+                "sensor_data": {
+                    "type": "object",
+                    "properties": {
+                        "light_level": {"type": "number"},
+                        "noise_level": {"type": "number"},
+                        "temperature": {"type": "number"},
+                        "humidity": {"type": "number"}
+                    }
+                },
+                "analysis_type": {
+                    "type": "string", 
+                    "enum": ["ergonomics", "lighting", "organization", "comprehensive"],
+                    "default": "comprehensive"
+                },
+                "user_preferences": {"type": "object"}
             },
-            "required": ["image_data"]
+            "required": ["camera_feed"]
         }
         
     @property
@@ -990,85 +554,86 @@ class LiveEnvironmentAnalyzerComponent(BaseComponent):
         return {
             "type": "object",
             "properties": {
-                "objects": {"type": "array", "items": {"type": "object"}},
-                "text_blocks": {"type": "array", "items": {"type": "object"}},
-                "scene_labels": {"type": "array", "items": {"type": "string"}},
-                "dominant_colors": {"type": "array", "items": {"type": "object"}},
-                "safety_labels": {"type": "array", "items": {"type": "object"}},
-                "analysis_summary": {"type": "string"},
-                "metadata": {"type": "object"}
+                "environment_status": {
+                    "type": "object",
+                    "properties": {
+                        "ergonomics": {
+                            "type": "object",
+                            "properties": {
+                                "posture_score": {"type": "number"},
+                                "screen_distance": {"type": "number"},
+                                "desk_setup": {"type": "string"},
+                                "recommendations": {"type": "array", "items": {"type": "string"}}
+                            }
+                        },
+                        "lighting": {
+                            "type": "object",
+                            "properties": {
+                                "brightness_score": {"type": "number"},
+                                "glare_detected": {"type": "boolean"},
+                                "recommendations": {"type": "array", "items": {"type": "string"}}
+                            }
+                        },
+                        "organization": {
+                            "type": "object",
+                            "properties": {
+                                "clutter_score": {"type": "number"},
+                                "workspace_efficiency": {"type": "string"},
+                                "recommendations": {"type": "array", "items": {"type": "string"}}
+                            }
+                        }
+                    }
+                },
+                "alerts": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "severity": {"type": "string", "enum": ["low", "medium", "high"]},
+                            "message": {"type": "string"},
+                            "suggestion": {"type": "string"}
+                        }
+                    }
+                },
+                "metadata": {
+                    "type": "object",
+                    "properties": {
+                        "timestamp": {"type": "string", "format": "date-time"},
+                        "analysis_duration": {"type": "number"}
+                    }
+                }
             }
         }
-        
-    @property
-    def config_schema(self) -> Dict[str, Any]:
-        return {
-            "type": "object",
-            "properties": {
-                "detection_threshold": {"type": "number", "minimum": 0.1, "maximum": 1.0, "default": 0.5},
-                "max_detections": {"type": "integer", "default": 20},
-                "enable_text_recognition": {"type": "boolean", "default": True},
-                "enable_object_detection": {"type": "boolean", "default": True},
-                "enable_scene_understanding": {"type": "boolean", "default": True},
-                "enable_color_analysis": {"type": "boolean", "default": True},
-                "enable_safety_check": {"type": "boolean", "default": True}
-            }
-        }
-        
+
     async def execute(self, input_data: Dict[str, Any]) -> ComponentResult:
         execution_id = self._start_execution()
         start_time = time.time()
         
         try:
-            image_data = input_data.get("image_data")
-            image_format = input_data.get("image_format", "jpeg")
-            analysis_type = input_data.get("analysis_type", "general")
-            detection_mode = input_data.get("detection_mode", "balanced")
-            image_context = input_data.get("image_context", "")
-            
-            if not image_data:
-                raise ValueError("No image data provided")
-                
-            # Process image based on analysis type
-            result_data = {}
-            
-            # Object detection
-            if analysis_type in ["general", "object_detection"] and self.settings.get("enable_object_detection", True):
-                objects = await self._detect_objects(image_data, detection_mode)
-                result_data["objects"] = objects
-                
-            # Text recognition
-            if analysis_type in ["general", "text_recognition"] and self.settings.get("enable_text_recognition", True):
-                text_blocks = await self._recognize_text(image_data)
-                result_data["text_blocks"] = text_blocks
-                
-            # Scene understanding
-            if analysis_type in ["general", "scene_understanding"] and self.settings.get("enable_scene_understanding", True):
-                scene_labels = await self._understand_scene(image_data, image_context)
-                result_data["scene_labels"] = scene_labels
-                
-            # Color analysis
-            if self.settings.get("enable_color_analysis", True):
-                dominant_colors = await self._analyze_colors(image_data)
-                result_data["dominant_colors"] = dominant_colors
-                
-            # Safety check
-            if self.settings.get("enable_safety_check", True):
-                safety_labels = await self._check_safety(image_data)
-                result_data["safety_labels"] = safety_labels
-                
-            # Generate summary
-            result_data["analysis_summary"] = await self._generate_summary(result_data)
-            
-            # Add metadata
-            result_data["metadata"] = {
-                "analysis_type": analysis_type,
-                "detection_mode": detection_mode,
-                "image_format": image_format,
-                "threshold": self.settings.get("detection_threshold", 0.5),
-                "processed_at": datetime.utcnow().isoformat()
+            camera_feed = input_data["camera_feed"]
+            sensor_data = input_data.get("sensor_data", {})
+            analysis_type = input_data.get("analysis_type", "comprehensive")
+            user_preferences = input_data.get("user_preferences", {})
+
+            # Initialize environment analysis
+            environment_status = {
+                "ergonomics": await self._analyze_ergonomics(camera_feed),
+                "lighting": await self._analyze_lighting(camera_feed, sensor_data),
+                "organization": await self._analyze_organization(camera_feed)
             }
-            
+
+            # Generate alerts based on analysis
+            alerts = self._generate_alerts(environment_status)
+
+            result_data = {
+                "environment_status": environment_status,
+                "alerts": alerts,
+                "metadata": {
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "analysis_duration": time.time() - start_time
+                }
+            }
+
             execution_time = time.time() - start_time
             self._complete_execution(execution_id, success=True)
             
@@ -1078,7 +643,7 @@ class LiveEnvironmentAnalyzerComponent(BaseComponent):
                 data=result_data,
                 execution_time=execution_time
             )
-            
+
         except Exception as e:
             execution_time = time.time() - start_time
             error_msg = f"Environment analysis failed: {str(e)}"
@@ -1090,136 +655,144 @@ class LiveEnvironmentAnalyzerComponent(BaseComponent):
                 error=error_msg,
                 execution_time=execution_time
             )
-            
-    async def _detect_objects(self, image_data: str, detection_mode: str) -> List[Dict[str, Any]]:
-        """Detect objects in the image"""
-        # Would use computer vision APIs like Google Vision, Azure Computer Vision, etc.
-        await asyncio.sleep(1)  # Simulate processing time
-        
-        # Simulated results - would be from actual CV API
-        detection_threshold = self.settings.get("detection_threshold", 0.5)
-        max_detections = self.settings.get("max_detections", 20)
-        
-        # Dummy objects for demonstration
-        objects = [
-            {
-                "label": "Person",
-                "confidence": 0.95,
-                "bounding_box": {"x": 10, "y": 20, "width": 100, "height": 200}
-            },
-            {
-                "label": "Desk",
-                "confidence": 0.88,
-                "bounding_box": {"x": 150, "y": 220, "width": 300, "height": 100}
-            },
-            {
-                "label": "Laptop",
-                "confidence": 0.92,
-                "bounding_box": {"x": 200, "y": 240, "width": 150, "height": 100}
-            }
-        ]
-        
-        # Filter by confidence threshold
-        filtered_objects = [obj for obj in objects if obj["confidence"] >= detection_threshold]
-        
-        # Limit to max detections
-        return filtered_objects[:max_detections]
-        
-    async def _recognize_text(self, image_data: str) -> List[Dict[str, Any]]:
-        """Recognize text in the image using OCR"""
-        # Would use OCR services like Google Vision OCR, Azure OCR, Tesseract, etc.
-        await asyncio.sleep(0.8)  # Simulate processing time
-        
-        # Simulated text recognition results
-        return [
-            {
-                "text": "Welcome to Lumicoria",
-                "confidence": 0.92,
-                "bounding_box": {"x": 50, "y": 100, "width": 200, "height": 40},
-                "language": "en"
-            },
-            {
-                "text": "AI Studio",
-                "confidence": 0.89,
-                "bounding_box": {"x": 50, "y": 150, "width": 100, "height": 35},
-                "language": "en"
-            }
-        ]
-        
-    async def _understand_scene(self, image_data: str, image_context: str) -> List[str]:
-        """Understand the overall scene in the image"""
-        # Would use scene understanding APIs for this
-        await asyncio.sleep(0.6)  # Simulate processing time
-        
-        # Simulated scene labels
-        scene_labels = ["indoor", "office", "workspace", "computer setup"]
-        
-        if image_context:
-            # Use context to enhance labels (in real implementation)
-            scene_labels.append(f"context: {image_context}")
-            
-        return scene_labels
-        
-    async def _analyze_colors(self, image_data: str) -> List[Dict[str, Any]]:
-        """Analyze dominant colors in the image"""
-        # Would use image processing libraries like OpenCV or color analysis APIs
-        await asyncio.sleep(0.4)  # Simulate processing time
-        
-        # Simulated color analysis results
-        return [
-            {"color": "rgb(240, 240, 245)", "name": "light gray", "percentage": 0.35},
-            {"color": "rgb(30, 30, 35)", "name": "dark gray", "percentage": 0.25},
-            {"color": "rgb(25, 120, 210)", "name": "blue", "percentage": 0.15},
-            {"color": "rgb(240, 240, 245)", "name": "white", "percentage": 0.15},
-            {"color": "rgb(200, 75, 50)", "name": "red", "percentage": 0.10}
-        ]
-        
-    async def _check_safety(self, image_data: str) -> List[Dict[str, Any]]:
-        """Check for potentially unsafe content"""
-        # Would use content moderation APIs
-        await asyncio.sleep(0.3)  # Simulate processing time
-        
-        # Simulated safety check results (in real implementation, would be from moderation API)
-        return [
-            {"category": "violence", "confidence": 0.01},
-            {"category": "adult", "confidence": 0.01},
-            {"category": "sensitive", "confidence": 0.02}
-        ]
-        
-    async def _generate_summary(self, results: Dict[str, Any]) -> str:
-        """Generate a textual summary of the analysis"""
-        # Build summary based on detected elements
-        
-        objects_summary = ""
-        if results.get("objects"):
-            object_names = [obj["label"] for obj in results.get("objects", [])]
-            objects_summary = f"Detected {len(object_names)} objects: {', '.join(object_names[:3])}"
-            if len(object_names) > 3:
-                objects_summary += " and more"
-                
-        text_summary = ""
-        if results.get("text_blocks"):
-            text_count = len(results.get("text_blocks", []))
-            text_summary = f"Found {text_count} text elements"
-            
-        scene_summary = ""
-        if results.get("scene_labels"):
-            scene_summary = f"Scene type: {', '.join(results.get('scene_labels', [])[:2])}"
-            
-        # Combine all summaries
-        summary_parts = [part for part in [objects_summary, text_summary, scene_summary] if part]
-        
-        if summary_parts:
-            return ". ".join(summary_parts) + "."
-        else:
-            return "No significant elements detected in image."
 
+    async def _analyze_ergonomics(self, camera_feed: str) -> Dict[str, Any]:
+        """Analyze workspace ergonomics using computer vision"""
+        # Use perplexity for intelligent scene analysis
+        prompt = """Analyze the workspace image for ergonomic factors:
+        - Detect person's posture and body position
+        - Assess screen height and distance
+        - Evaluate desk and chair setup
+        Provide scores and specific recommendations."""
 
-class CitationManagerComponent(BaseComponent):
-    """
-    Component that manages and formats research citations from various sources.
-    Ensures academic integrity and proper attribution in research documents.
-    """
+        response = await self.perplexity_client.query(prompt, context={"image": camera_feed})
+        
+        # Parse the response into structured data
+        analysis = self._parse_ergonomics_response(response.content)
+        return analysis
+
+    async def _analyze_lighting(self, camera_feed: str, sensor_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Analyze workspace lighting conditions"""
+        light_level = sensor_data.get("light_level", 0)
+        
+        prompt = f"""Analyze the workspace image and light sensor data (level: {light_level}) for:
+        - Overall brightness assessment
+        - Glare detection
+        - Light distribution
+        Provide scores and recommendations for optimal lighting."""
+
+        response = await self.perplexity_client.query(prompt, context={"image": camera_feed})
+        
+        return self._parse_lighting_response(response.content)
+
+    async def _analyze_organization(self, camera_feed: str) -> Dict[str, Any]:
+        """Analyze workspace organization and clutter"""
+        prompt = """Analyze the workspace image for organization:
+        - Detect clutter and unnecessary items
+        - Assess workspace layout efficiency
+        - Identify optimization opportunities
+        Provide a clutter score and organization suggestions."""
+
+        response = await self.perplexity_client.query(prompt, context={"image": camera_feed})
+        
+        return self._parse_organization_response(response.content)
+
+    def _generate_alerts(self, environment_status: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate actionable alerts based on analysis results"""
+        alerts = []
+        
+        # Ergonomics alerts
+        ergonomics = environment_status["ergonomics"]
+        if ergonomics["posture_score"] < 0.7:
+            alerts.append({
+                "severity": "high",
+                "message": "Poor posture detected",
+                "suggestion": "Adjust your chair and monitor height to maintain proper posture"
+            })
+
+        # Lighting alerts
+        lighting = environment_status["lighting"]
+        if lighting["glare_detected"]:
+            alerts.append({
+                "severity": "medium",
+                "message": "Screen glare detected",
+                "suggestion": "Adjust monitor angle or window blinds to reduce glare"
+            })
+
+        # Organization alerts
+        organization = environment_status["organization"]
+        if organization["clutter_score"] > 0.7:
+            alerts.append({
+                "severity": "low",
+                "message": "High workspace clutter detected",
+                "suggestion": "Take a few minutes to organize and declutter your workspace"
+            })
+
+        return alerts
+
+    def _parse_ergonomics_response(self, response: str) -> Dict[str, Any]:
+        """Parse the ergonomics analysis response"""
+        try:
+            # Simple example - in practice would need more robust parsing
+            return {
+                "posture_score": 0.85,
+                "screen_distance": 60,  # cm
+                "desk_setup": "Good",
+                "recommendations": [
+                    "Maintain screen at eye level",
+                    "Keep arms at 90 degrees when typing",
+                    "Ensure feet are flat on the floor"
+                ]
+            }
+        except Exception as e:
+            logger.error("Failed to parse ergonomics response", error=str(e))
+            return {
+                "posture_score": 0,
+                "screen_distance": 0,
+                "desk_setup": "Unknown",
+                "recommendations": []
+            }
+            
+    def _parse_lighting_response(self, response: str) -> Dict[str, Any]:
+        """Parse the lighting analysis response"""
+        try:
+            return {
+                "brightness_score": 0.75,
+                "glare_detected": False,
+                "recommendations": [
+                    "Consider adding a desk lamp for task lighting",
+                    "Ensure even light distribution across workspace"
+                ]
+            }
+        except Exception as e:
+            logger.error("Failed to parse lighting response", error=str(e))
+            return {
+                "brightness_score": 0,
+                "glare_detected": False,
+                "recommendations": []
+            }
+            
+    def _parse_organization_response(self, response: str) -> Dict[str, Any]:
+        """Parse the organization analysis response"""
+        try:
+            return {
+                "clutter_score": 0.3,
+                "workspace_efficiency": "Good",
+                "recommendations": [
+                    "Use desk organizers for frequently used items",
+                    "Create dedicated spaces for different activities"
+                ]
+            }
+        except Exception as e:
+            logger.error("Failed to parse organization response", error=str(e))
+            return {
+                "clutter_score": 0,
+                "workspace_efficiency": "Unknown",
+                "recommendations": []
+            }
+
+class TranslatorComponent(BaseComponent):
+    """Component that translates text between languages while preserving context and meaning."""
     
     @property
     def component_type(self) -> str:
@@ -1227,7 +800,7 @@ class CitationManagerComponent(BaseComponent):
         
     @property
     def category(self) -> str:
-        return "academic"
+        return "translation"
         
     @property
     def input_schema(self) -> Dict[str, Any]:
@@ -1235,11 +808,288 @@ class CitationManagerComponent(BaseComponent):
             "type": "object",
             "properties": {
                 "text": {"type": "string"},
-                "sources": {"type": "array", "items": {"type": "object"}},
-                "style": {"type": "string", "enum": ["apa", "mla", "chicago", "ieee", "harvard"]},
-                "inline_citations": {"type": "boolean"},
-                "include_bibliography": {"type": "boolean"},
-                "attach_doi": {"type": "boolean"}
+                "source_language": {"type": "string"},
+                "target_language": {"type": "string"},
+                "preserve_formatting": {"type": "boolean", "default": True},
+                "context": {"type": "string", "enum": ["general", "technical", "legal", "medical", "literary"]},
+                "tone": {"type": "string", "enum": ["formal", "informal", "neutral"]},
+                "glossary": {
+                    "type": "object",
+                    "additionalProperties": {"type": "string"}
+                }
+            },
+            "required": ["text", "target_language"]
+        }
+        
+    @property
+    def output_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "translated_text": {"type": "string"},
+                "detected_source_language": {"type": "string"},
+                "confidence": {"type": "number"},
+                "alternatives": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string"},
+                            "confidence": {"type": "number"},
+                            "back_translation": {"type": "string"}
+                        }
+                    }
+                },
+                "glossary_matches": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "original": {"type": "string"},
+                            "translated": {"type": "string"},
+                            "context": {"type": "string"}
+                        }
+                    }
+                },
+                "metadata": {
+                    "type": "object",
+                    "properties": {
+                        "character_count": {"type": "integer"},
+                        "processing_time": {"type": "number"},
+                        "quality_score": {"type": "number"}
+                    }
+                }
+            }
+        }
+
+    async def execute(self, input_data: Dict[str, Any]) -> ComponentResult:
+        execution_id = self._start_execution()
+        start_time = time.time()
+        
+        try:
+            # Extract input parameters
+            text = input_data["text"]
+            target_language = input_data["target_language"]
+            source_language = input_data.get("source_language")
+            preserve_formatting = input_data.get("preserve_formatting", True)
+            context = input_data.get("context", "general")
+            tone = input_data.get("tone", "neutral")
+            glossary = input_data.get("glossary", {})
+
+            # Detect source language if not provided
+            if not source_language:
+                source_language = await self._detect_language(text)
+
+            # Prepare translation prompt with context
+            prompt = self._prepare_translation_prompt(
+                text, source_language, target_language, 
+                context, tone, preserve_formatting
+            )
+
+            # Get translation from Perplexity
+            response = await self.perplexity_client.query(prompt)
+            
+            # Process the translation
+            translation_result = self._process_translation_response(
+                response.content,
+                text,
+                source_language,
+                target_language,
+                glossary
+            )
+
+            # Add metadata
+            translation_result["metadata"] = {
+                "character_count": len(text),
+                "processing_time": time.time() - start_time,
+                "quality_score": self._calculate_quality_score(translation_result)
+            }
+
+            execution_time = time.time() - start_time
+            self._complete_execution(execution_id, success=True)
+            
+            return ComponentResult(
+                component_id=self.id,
+                status=ComponentStatus.COMPLETED,
+                data=translation_result,
+                execution_time=execution_time
+            )
+
+        except Exception as e:
+            execution_time = time.time() - start_time
+            error_msg = f"Translation failed: {str(e)}"
+            self._complete_execution(execution_id, success=False, error=error_msg)
+            
+            return ComponentResult(
+                component_id=self.id,
+                status=ComponentStatus.ERROR,
+                error=error_msg,
+                execution_time=execution_time
+            )
+
+    async def _detect_language(self, text: str) -> str:
+        """Detect the language of input text"""
+        prompt = f"""What is the language of this text? Respond with just the ISO 639-1 language code.
+        Text: {text[:200]}..."""  # Use first 200 chars for detection
+
+        response = await self.perplexity_client.query(prompt)
+        return response.content.strip().lower()
+
+    def _prepare_translation_prompt(
+        self, 
+        text: str,
+        source_language: str,
+        target_language: str,
+        context: str,
+        tone: str,
+        preserve_formatting: bool
+    ) -> str:
+        """Prepare a detailed translation prompt"""
+        prompt_parts = [
+            f"Translate the following text from {source_language} to {target_language}.",
+            f"Context: {context}",
+            f"Tone: {tone}",
+        ]
+        
+        if preserve_formatting:
+            prompt_parts.append("Preserve the original formatting, including line breaks and special characters.")
+
+        prompt_parts.extend([
+            "Ensure accuracy while maintaining natural flow.",
+            "",
+            "Text to translate:",
+            text,
+            "",
+            "Provide the translation followed by any alternative translations or notes, separated by '---'."
+        ])
+
+        return "\n".join(prompt_parts)
+
+    def _process_translation_response(
+        self,
+        response: str,
+        original_text: str,
+        source_language: str,
+        target_language: str,
+        glossary: Dict[str, str]
+    ) -> Dict[str, Any]:
+        """Process and structure the translation response"""
+        try:
+            # Split response into main translation and alternatives
+            parts = response.split("---")
+            main_translation = parts[0].strip()
+            
+            # Process any alternatives if provided
+            alternatives = []
+            if len(parts) > 1:
+                alt_text = parts[1].strip()
+                # Parse alternatives from the text
+                # This is a simplified example
+                alternatives = [
+                    {
+                        "text": alt.strip(),
+                        "confidence": 0.8,
+                        "back_translation": ""  # Would need another API call for back translation
+                    }
+                    for alt in alt_text.split("\n")
+                    if alt.strip()
+                ]
+
+            # Find glossary term matches
+            glossary_matches = []
+            for original, translated in glossary.items():
+                if original.lower() in original_text.lower():
+                    glossary_matches.append({
+                        "original": original,
+                        "translated": translated,
+                        "context": self._extract_term_context(original, original_text)
+                    })
+
+            return {
+                "translated_text": main_translation,
+                "detected_source_language": source_language,
+                "confidence": 0.9,  # Would need more sophisticated confidence calculation
+                "alternatives": alternatives,
+                "glossary_matches": glossary_matches
+            }
+
+        except Exception as e:
+            logger.error("Failed to process translation response", error=str(e))
+            # Return minimal valid response
+            return {
+                "translated_text": "",
+                "detected_source_language": source_language,
+                "confidence": 0,
+                "alternatives": [],
+                "glossary_matches": []
+            }
+
+    def _extract_term_context(self, term: str, text: str, context_chars: int = 50) -> str:
+        """Extract surrounding context for a glossary term"""
+        try:
+            term_pos = text.lower().find(term.lower())
+            if term_pos == -1:
+                return ""
+                
+            start = max(0, term_pos - context_chars)
+            end = min(len(text), term_pos + len(term) + context_chars)
+            
+            context = text[start:end]
+            if start > 0:
+                context = "..." + context
+            if end < len(text):
+                context = context + "..."
+                
+            return context
+            
+        except Exception as e:
+            logger.error("Failed to extract term context", error=str(e))
+            return ""
+
+    def _calculate_quality_score(self, result: Dict[str, Any]) -> float:
+        """Calculate an overall quality score for the translation"""
+        try:
+            # This is a simplified scoring example
+            # Real implementation would use more sophisticated metrics
+            
+            # Base score from confidence
+            score = result["confidence"]
+            
+            # Adjust based on glossary usage
+            if result["glossary_matches"]:
+                score += 0.1
+                
+            # Adjust based on alternatives availability
+            if result["alternatives"]:
+                score += 0.1
+                
+            return min(1.0, score)
+            
+        except Exception as e:
+            logger.error("Failed to calculate quality score", error=str(e))
+            return 0.0
+
+class CitationManagerComponent(BaseComponent):
+    """Component that manages research citations and references."""
+    
+    @property
+    def component_type(self) -> str:
+        return "processor"
+        
+    @property
+    def category(self) -> str:
+        return "citations"
+        
+    @property
+    def input_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+                "citation_style": {"type": "string", "enum": ["APA", "MLA", "Chicago", "IEEE", "Harvard"]},
+                "source_materials": {"type": "array", "items": {"type": "object"}},
+                "validate_sources": {"type": "boolean"},
+                "generate_bibliography": {"type": "boolean"}
             },
             "required": ["text"]
         }
@@ -1250,23 +1100,55 @@ class CitationManagerComponent(BaseComponent):
             "type": "object",
             "properties": {
                 "processed_text": {"type": "string"},
-                "bibliography": {"type": "array", "items": {"type": "string"}},
                 "citations": {"type": "array", "items": {"type": "object"}},
-                "citation_stats": {"type": "object"},
-                "metadata": {"type": "object"}
+                "bibliography": {"type": "array", "items": {"type": "string"}},
+                "citation_analysis": {"type": "object"}
             }
         }
+
+class SummarizationComponent(BaseComponent):
+    """Component that generates summaries of text content."""
+    
+    @property
+    def component_type(self) -> str:
+        return "processor"
         
     @property
-    def config_schema(self) -> Dict[str, Any]:
+    def category(self) -> str:
+        return "text_processing"
+        
+    @property
+    def input_schema(self) -> Dict[str, Any]:
         return {
             "type": "object",
             "properties": {
-                "default_style": {"type": "string", "enum": ["apa", "mla", "chicago", "ieee", "harvard"], "default": "apa"},
-                "detect_uncited_quotes": {"type": "boolean", "default": True},
-                "verify_urls": {"type": "boolean", "default": False},
-                "add_doi_links": {"type": "boolean", "default": True},
-                "citation_database": {"type": "string"}
+                "text": {"type": "string"},
+                "max_length": {"type": "integer", "minimum": 50, "maximum": 2000, "default": 500},
+                "style": {"type": "string", "enum": ["concise", "detailed", "bullet_points"], "default": "concise"},
+                "focus_areas": {"type": "array", "items": {"type": "string"}, "default": []},
+                "include_key_points": {"type": "boolean", "default": True}
+            },
+            "required": ["text"]
+        }
+        
+    @property
+    def output_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "summary": {"type": "string"},
+                "key_points": {"type": "array", "items": {"type": "string"}},
+                "metadata": {
+                    "type": "object",
+                    "properties": {
+                        "original_length": {"type": "integer"},
+                        "summary_length": {"type": "integer"},
+                        "compression_ratio": {"type": "number"},
+                        "style": {"type": "string"},
+                        "focus_areas": {"type": "array", "items": {"type": "string"}},
+                        "timestamp": {"type": "string"}
+                    }
+                }
             }
         }
         
@@ -1275,56 +1157,42 @@ class CitationManagerComponent(BaseComponent):
         start_time = time.time()
         
         try:
-            text = input_data.get("text", "")
-            sources = input_data.get("sources", [])
-            style = input_data.get("style", self.settings.get("default_style", "apa"))
-            inline_citations = input_data.get("inline_citations", True)
-            include_bibliography = input_data.get("include_bibliography", True)
-            attach_doi = input_data.get("attach_doi", self.settings.get("add_doi_links", True))
+            text = input_data.get("text")
+            max_length = input_data.get("max_length", 500)
+            style = input_data.get("style", "concise")
+            focus_areas = input_data.get("focus_areas", [])
+            include_key_points = input_data.get("include_key_points", True)
             
-            # Extract existing citations from text
-            existing_citations = await self._extract_citations(text)
+            # Generate summary using AI model
+            prompt = self._generate_summary_prompt(
+                text=text,
+                max_length=max_length,
+                style=style,
+                focus_areas=focus_areas
+            )
             
-            # Detect uncited quotes if enabled
-            uncited_quotes = []
-            if self.settings.get("detect_uncited_quotes", True):
-                uncited_quotes = await self._detect_uncited_quotes(text, existing_citations)
-                
-            # Verify URLs if enabled
-            if self.settings.get("verify_urls", False):
-                sources = await self._verify_urls(sources)
-                
-            # Format citations according to style
-            formatted_citations = await self._format_citations(sources, style)
+            response = await self._call_ai_model(prompt)
             
-            # Process text with citations
-            processed_text = text
-            if inline_citations:
-                processed_text = await self._add_inline_citations(text, formatted_citations, style)
-                
-            # Generate bibliography
-            bibliography = []
-            if include_bibliography:
-                bibliography = await self._generate_bibliography(formatted_citations, style)
-                
-            # Add DOI links if enabled
-            if attach_doi:
-                bibliography = await self._add_doi_links(bibliography, formatted_citations)
-                
-            # Generate citation statistics
-            citation_stats = await self._generate_citation_stats(formatted_citations)
-                
+            # Extract key points if requested
+            key_points = []
+            if include_key_points:
+                key_points = await self._extract_key_points(text)
+            
+            # Calculate metadata
+            original_length = len(text.split())
+            summary_length = len(response.split())
+            compression_ratio = summary_length / original_length if original_length > 0 else 0
+            
             result_data = {
-                "processed_text": processed_text,
-                "bibliography": bibliography,
-                "citations": formatted_citations,
-                "uncited_quotes": uncited_quotes,
-                "citation_stats": citation_stats,
+                "summary": response,
+                "key_points": key_points,
                 "metadata": {
+                    "original_length": original_length,
+                    "summary_length": summary_length,
+                    "compression_ratio": compression_ratio,
                     "style": style,
-                    "source_count": len(sources),
-                    "bibliography_included": include_bibliography,
-                    "processed_at": datetime.utcnow().isoformat()
+                    "focus_areas": focus_areas,
+                    "timestamp": datetime.utcnow().isoformat()
                 }
             }
             
@@ -1340,7 +1208,7 @@ class CitationManagerComponent(BaseComponent):
             
         except Exception as e:
             execution_time = time.time() - start_time
-            error_msg = f"Citation management failed: {str(e)}"
+            error_msg = f"Summarization failed: {str(e)}"
             self._complete_execution(execution_id, success=False, error=error_msg)
             
             return ComponentResult(
@@ -1350,341 +1218,394 @@ class CitationManagerComponent(BaseComponent):
                 execution_time=execution_time
             )
             
-    async def _extract_citations(self, text: str) -> List[Dict[str, Any]]:
-        """Extract existing citations from text"""
-        # This would use NLP or regex patterns to extract citations
-        import re
+    def _generate_summary_prompt(
+        self,
+        text: str,
+        max_length: int,
+        style: str,
+        focus_areas: List[str]
+    ) -> str:
+        """Generate prompt for summary generation."""
+        style_instructions = {
+            "concise": "Provide a concise summary focusing on the main points.",
+            "detailed": "Provide a detailed summary that captures important nuances and context.",
+            "bullet_points": "Provide a summary in bullet point format, highlighting key information."
+        }
         
-        # Extract citations in various formats (simplified for demonstration)
-        citations = []
+        prompt = f"""Summarize the following text in {max_length} words or less.
+        Style: {style_instructions.get(style, style_instructions['concise'])}
+        """
         
-        # APA-style citations
-        apa_citations = re.findall(r'\(([A-Za-z]+(?:,? & [A-Za-z]+)?, \d{4})\)', text)
-        for citation in apa_citations:
-            citations.append({
-                "type": "apa",
-                "text": citation,
-                "position": text.find(f"({citation})")
-            })
+        if focus_areas:
+            prompt += f"\nFocus on these areas: {', '.join(focus_areas)}"
             
-        # MLA-style citations
-        mla_citations = re.findall(r'\(([A-Za-z]+ \d+)\)', text)
-        for citation in mla_citations:
-            citations.append({
-                "type": "mla",
-                "text": citation,
-                "position": text.find(f"({citation})")
-            })
+        prompt += f"\n\nText to summarize:\n{text}"
+        
+        return prompt
+        
+    async def _extract_key_points(self, text: str) -> List[str]:
+        """Extract key points from the text."""
+        prompt = f"""Extract the 3-5 most important key points from the following text.
+        Format each point as a clear, concise statement.
+        
+        Text:
+        {text}
+        """
+        
+        response = await self._call_ai_model(prompt)
+        
+        # Split response into points and clean up
+        points = [point.strip() for point in response.split('\n') if point.strip()]
+        return points[:5]  # Limit to 5 points maximum
+
+class TaskGeneratorComponent(BaseComponent):
+    """Component that generates and manages task breakdowns and workflows."""
+    
+    @property
+    def component_type(self) -> str:
+        return "processor"
+        
+    @property
+    def category(self) -> str:
+        return "task_management"
+        
+    @property
+    def input_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "goal": {"type": "string"},
+                "context": {"type": "string", "optional": True},
+                "constraints": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": []
+                },
+                "priority_level": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "urgent"],
+                    "default": "medium"
+                },
+                "estimated_duration": {
+                    "type": "string",
+                    "enum": ["short", "medium", "long"],
+                    "default": "medium"
+                },
+                "dependencies": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "default": []
+                }
+            },
+            "required": ["goal"]
+        }
+        
+    @property
+    def output_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "tasks": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "title": {"type": "string"},
+                            "description": {"type": "string"},
+                            "subtasks": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {"type": "string"},
+                                        "title": {"type": "string"},
+                                        "description": {"type": "string"},
+                                        "estimated_duration": {"type": "string"},
+                                        "dependencies": {"type": "array", "items": {"type": "string"}}
+                                    }
+                                }
+                            },
+                            "estimated_duration": {"type": "string"},
+                            "priority": {"type": "string"},
+                            "dependencies": {"type": "array", "items": {"type": "string"}},
+                            "required_resources": {"type": "array", "items": {"type": "string"}},
+                            "success_criteria": {"type": "array", "items": {"type": "string"}}
+                        }
+                    }
+                },
+                "workflow": {
+                    "type": "object",
+                    "properties": {
+                        "total_tasks": {"type": "integer"},
+                        "estimated_completion_time": {"type": "string"},
+                        "critical_path": {"type": "array", "items": {"type": "string"}},
+                        "resource_requirements": {"type": "object"},
+                        "risk_factors": {"type": "array", "items": {"type": "string"}}
+                    }
+                },
+                "metadata": {
+                    "type": "object",
+                    "properties": {
+                        "generation_timestamp": {"type": "string"},
+                        "complexity_score": {"type": "number"},
+                        "confidence_score": {"type": "number"}
+                    }
+                }
+            }
+        }
+        
+    async def execute(self, input_data: Dict[str, Any]) -> ComponentResult:
+        execution_id = self._start_execution()
+        start_time = time.time()
+        
+        try:
+            goal = input_data["goal"]
+            context = input_data.get("context", "")
+            constraints = input_data.get("constraints", [])
+            priority_level = input_data.get("priority_level", "medium")
+            estimated_duration = input_data.get("estimated_duration", "medium")
+            dependencies = input_data.get("dependencies", [])
             
-        # Numeric citations
-        numeric_citations = re.findall(r'\[(\d+)\]', text)
-        for citation in numeric_citations:
-            citations.append({
-                "type": "numeric",
-                "text": citation,
-                "position": text.find(f"[{citation}]")
-            })
+            # Generate task breakdown using AI model
+            prompt = self._generate_task_prompt(
+                goal=goal,
+                context=context,
+                constraints=constraints,
+                priority_level=priority_level,
+                estimated_duration=estimated_duration,
+                dependencies=dependencies
+            )
             
-        return citations
-        
-    async def _detect_uncited_quotes(self, text: str, existing_citations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Detect potential uncited quotes in text"""
-        # This would use NLP for quote detection
-        import re
-        
-        uncited_quotes = []
-        
-        # Find quoted content
-        quotes = re.findall(r'"([^"]+)"', text)
-        
-        for quote in quotes:
-            # Check if quote is near a citation (simplified)
-            quote_pos = text.find(f'"{quote}"')
-            is_cited = False
+            response = await self._call_ai_model(prompt)
             
-            # Check if there's a citation within 100 characters after the quote
-            for citation in existing_citations:
-                if 0 <= citation["position"] - quote_pos <= 100:
-                    is_cited = True
-                    break
-                    
-            if not is_cited and len(quote) > 20:  # Only flag substantial quotes
-                uncited_quotes.append({
-                    "quote": quote,
-                    "position": quote_pos,
-                    "length": len(quote)
-                })
-                
-        return uncited_quotes
-        
-    async def _verify_urls(self, sources: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Verify that URLs in sources are valid"""
-        # In a real implementation, this would make HTTP requests to check URLs
-        await asyncio.sleep(0.5)  # Simulate URL verification
-        
-        # For demonstration, we'll mark all URLs as valid
-        for source in sources:
-            if "url" in source:
-                source["url_verified"] = True
-                
-        return sources
-        
-    async def _format_citations(self, sources: List[Dict[str, Any]], style: str) -> List[Dict[str, Any]]:
-        """Format citations according to the specified style"""
-        formatted_citations = []
-        
-        for i, source in enumerate(sources):
-            citation = {
-                "id": i + 1,
-                "source": source,
-                "inline_citation": "",
-                "bibliography_entry": ""
+            # Parse the response into structured task data
+            tasks = self._parse_task_response(response)
+            
+            # Generate workflow analysis
+            workflow = self._analyze_workflow(tasks)
+            
+            # Calculate metadata
+            complexity_score = self._calculate_complexity(tasks)
+            confidence_score = self._calculate_confidence(tasks)
+            
+            result_data = {
+                "tasks": tasks,
+                "workflow": workflow,
+                "metadata": {
+                    "generation_timestamp": datetime.utcnow().isoformat(),
+                    "complexity_score": complexity_score,
+                    "confidence_score": confidence_score
+                }
             }
             
-            # Format based on style
-            if style == "apa":
-                citation["inline_citation"] = self._format_apa_inline(source)
-                citation["bibliography_entry"] = self._format_apa_bibliography(source)
-            elif style == "mla":
-                citation["inline_citation"] = self._format_mla_inline(source)
-                citation["bibliography_entry"] = self._format_mla_bibliography(source)
-            elif style == "chicago":
-                citation["inline_citation"] = self._format_chicago_inline(source)
-                citation["bibliography_entry"] = self._format_chicago_bibliography(source)
-            elif style == "ieee":
-                citation["inline_citation"] = f"[{i+1}]"
-                citation["bibliography_entry"] = self._format_ieee_bibliography(source, i+1)
-            else:  # Harvard
-                citation["inline_citation"] = self._format_harvard_inline(source)
-                citation["bibliography_entry"] = self._format_harvard_bibliography(source)
-                
-            formatted_citations.append(citation)
+            execution_time = time.time() - start_time
+            self._complete_execution(execution_id, success=True)
             
-        return formatted_citations
-        
-    def _format_apa_inline(self, source: Dict[str, Any]) -> str:
-        """Format APA inline citation"""
-        author = source.get("author", "Anonymous")
-        year = source.get("year", "n.d.")
-        
-        if isinstance(author, list) and len(author) > 1:
-            if len(author) == 2:
-                return f"({author[0]} & {author[1]}, {year})"
-            else:
-                return f"({author[0]} et al., {year})"
-        else:
-            if isinstance(author, list) and len(author) > 0:
-                author = author[0]
-            return f"({author}, {year})"
+            return ComponentResult(
+                component_id=self.id,
+                status=ComponentStatus.COMPLETED,
+                data=result_data,
+                execution_time=execution_time
+            )
             
-    def _format_apa_bibliography(self, source: Dict[str, Any]) -> str:
-        """Format APA bibliography entry"""
-        author = source.get("author", "Anonymous")
-        year = source.get("year", "n.d.")
-        title = source.get("title", "Untitled")
-        publisher = source.get("publisher", "")
-        url = source.get("url", "")
-        
-        if isinstance(author, list):
-            if len(author) > 1:
-                author_text = f"{author[0]}, " + ", ".join(author[1:])
-            else:
-                author_text = author[0] if author else "Anonymous"
-        else:
-            author_text = author
+        except Exception as e:
+            execution_time = time.time() - start_time
+            error_msg = f"Task generation failed: {str(e)}"
+            self._complete_execution(execution_id, success=False, error=error_msg)
             
-        entry = f"{author_text}. ({year}). {title}."
-        
-        if publisher:
-            entry += f" {publisher}."
+            return ComponentResult(
+                component_id=self.id,
+                status=ComponentStatus.ERROR,
+                error=error_msg,
+                execution_time=execution_time
+            )
             
-        if url:
-            entry += f" Retrieved from {url}"
+    def _generate_task_prompt(
+        self,
+        goal: str,
+        context: str,
+        constraints: List[str],
+        priority_level: str,
+        estimated_duration: str,
+        dependencies: List[str]
+    ) -> str:
+        """Generate prompt for task breakdown."""
+        prompt_parts = [
+            f"Break down the following goal into actionable tasks:",
+            f"Goal: {goal}",
+            f"Context: {context}" if context else "",
+            f"Priority Level: {priority_level}",
+            f"Estimated Duration: {estimated_duration}",
+        ]
+        
+        if constraints:
+            prompt_parts.append(f"Constraints:\n" + "\n".join(f"- {c}" for c in constraints))
             
-        return entry
-        
-    def _format_mla_inline(self, source: Dict[str, Any]) -> str:
-        """Format MLA inline citation"""
-        author = source.get("author", "Anonymous")
-        page = source.get("page", "")
-        
-        if isinstance(author, list) and len(author) > 0:
-            author = author[0]
+        if dependencies:
+            prompt_parts.append(f"Dependencies:\n" + "\n".join(f"- {d}" for d in dependencies))
             
-        if page:
-            return f"({author} {page})"
-        else:
-            return f"({author})"
+        prompt_parts.extend([
+            "\nFor each task, provide:",
+            "- A clear title and description",
+            "- Subtasks if needed",
+            "- Estimated duration",
+            "- Dependencies on other tasks",
+            "- Required resources",
+            "- Success criteria",
+            "\nFormat the response as a structured list of tasks with their details."
+        ])
+        
+        return "\n".join(prompt_parts)
+        
+    def _parse_task_response(self, response: str) -> List[Dict[str, Any]]:
+        """Parse the AI model's response into structured task data."""
+        try:
+            # This is a simplified parsing example
+            # In practice, would need more robust parsing based on the actual response format
+            tasks = []
+            current_task = None
             
-    def _format_mla_bibliography(self, source: Dict[str, Any]) -> str:
-        """Format MLA bibliography entry"""
-        author = source.get("author", "Anonymous")
-        title = source.get("title", "Untitled")
-        publisher = source.get("publisher", "")
-        year = source.get("year", "n.d.")
-        medium = source.get("medium", "Web")
-        
-        if isinstance(author, list):
-            if len(author) > 1:
-                author_text = f"{author[0]}, and " + ", and ".join(author[1:])
-            else:
-                author_text = author[0] if author else "Anonymous"
-        else:
-            author_text = author
-            
-        entry = f"{author_text}. \"{title}.\" {publisher}, {year}. {medium}."
-        return entry
-        
-    def _format_chicago_inline(self, source: Dict[str, Any]) -> str:
-        """Format Chicago inline citation"""
-        author = source.get("author", "Anonymous")
-        year = source.get("year", "n.d.")
-        
-        if isinstance(author, list) and len(author) > 0:
-            author = author[0]
-            
-        return f"({author} {year})"
-        
-    def _format_chicago_bibliography(self, source: Dict[str, Any]) -> str:
-        """Format Chicago bibliography entry"""
-        author = source.get("author", "Anonymous")
-        year = source.get("year", "n.d.")
-        title = source.get("title", "Untitled")
-        publisher = source.get("publisher", "")
-        
-        if isinstance(author, list):
-            if len(author) > 1:
-                author_text = f"{author[0]}, and " + " and ".join(author[1:])
-            else:
-                author_text = author[0] if author else "Anonymous"
-        else:
-            author_text = author
-            
-        entry = f"{author_text}. {year}. {title}. {publisher}."
-        return entry
-        
-    def _format_ieee_bibliography(self, source: Dict[str, Any], number: int) -> str:
-        """Format IEEE bibliography entry"""
-        author = source.get("author", "Anonymous")
-        year = source.get("year", "n.d.")
-        title = source.get("title", "Untitled")
-        publisher = source.get("publisher", "")
-        
-        if isinstance(author, list):
-            if len(author) > 3:
-                author_text = f"{author[0]} et al."
-            else:
-                author_text = ", ".join(author)
-        else:
-            author_text = author
-            
-        entry = f"[{number}] {author_text}, \"{title},\" {publisher}, {year}."
-        return entry
-        
-    def _format_harvard_inline(self, source: Dict[str, Any]) -> str:
-        """Format Harvard inline citation"""
-        author = source.get("author", "Anonymous")
-        year = source.get("year", "n.d.")
-        
-        if isinstance(author, list) and len(author) > 0:
-            author = author[0]
-            
-        return f"({author}, {year})"
-        
-    def _format_harvard_bibliography(self, source: Dict[str, Any]) -> str:
-        """Format Harvard bibliography entry"""
-        author = source.get("author", "Anonymous")
-        year = source.get("year", "n.d.")
-        title = source.get("title", "Untitled")
-        publisher = source.get("publisher", "")
-        
-        if isinstance(author, list):
-            if len(author) > 1:
-                author_text = f"{author[0]} and " + " and ".join(author[1:])
-            else:
-                author_text = author[0] if author else "Anonymous"
-        else:
-            author_text = author
-            
-        entry = f"{author_text}, {year}. {title}. {publisher}."
-        return entry
-        
-    async def _add_inline_citations(self, text: str, citations: List[Dict[str, Any]], style: str) -> str:
-        """Add inline citations to the text"""
-        # In a real implementation, this would use NLP to identify citation locations
-        # For demonstration, we'll just append a sample citation at the end
-        
-        if not citations:
-            return text
-            
-        # For demonstration purposes, we'll just add a sample citation at the end
-        citation_sample = citations[0]["inline_citation"]
-        
-        if text.endswith("."):
-            return f"{text[:-1]} {citation_sample}."
-        else:
-            return f"{text} {citation_sample}"
-        
-    async def _generate_bibliography(self, citations: List[Dict[str, Any]], style: str) -> List[str]:
-        """Generate bibliography entries for citations"""
-        
-        bibliography = []
-        
-        # Sort citations by author
-        sorted_citations = sorted(
-            citations, 
-            key=lambda c: c["source"].get("author", "Anonymous") if isinstance(c["source"].get("author"), str) 
-            else (c["source"].get("author", ["Anonymous"])[0] if c["source"].get("author") else "Anonymous")
-        )
-        
-        for citation in sorted_citations:
-            bibliography.append(citation["bibliography_entry"])
-            
-        return bibliography
-        
-    async def _add_doi_links(self, bibliography: List[str], citations: List[Dict[str, Any]]) -> List[str]:
-        """Add DOI links to bibliography entries"""
-        # In a real implementation, this would extract DOIs from citation data
-        
-        updated_bibliography = bibliography.copy()
-        
-        for i, citation in enumerate(citations):
-            doi = citation["source"].get("doi")
-            if doi and i < len(updated_bibliography):
-                updated_bibliography[i] += f" doi:{doi}"
-                
-        return updated_bibliography
-        
-    async def _generate_citation_stats(self, citations: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Generate statistics about citations"""
-        
-        # Count citations by year
-        years = {}
-        for citation in citations:
-            year = citation["source"].get("year", "n.d.")
-            if year != "n.d.":
-                try:
-                    year = int(year)
-                    years[year] = years.get(year, 0) + 1
-                except ValueError:
-                    pass
+            for line in response.split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
                     
-        # Count citations by source type
-        types = {}
-        for citation in citations:
-            source_type = citation["source"].get("type", "unknown")
-            types[source_type] = types.get(source_type, 0) + 1
+                if line.startswith("Task "):
+                    if current_task:
+                        tasks.append(current_task)
+                    current_task = {
+                        "id": f"task_{len(tasks) + 1}",
+                        "title": line[5:].strip(),
+                        "description": "",
+                        "subtasks": [],
+                        "estimated_duration": "medium",
+                        "priority": "medium",
+                        "dependencies": [],
+                        "required_resources": [],
+                        "success_criteria": []
+                    }
+                elif current_task:
+                    if line.startswith("Description:"):
+                        current_task["description"] = line[12:].strip()
+                    elif line.startswith("Subtasks:"):
+                        # Parse subtasks
+                        pass
+                    elif line.startswith("Duration:"):
+                        current_task["estimated_duration"] = line[9:].strip()
+                    elif line.startswith("Dependencies:"):
+                        current_task["dependencies"] = [d.strip() for d in line[13:].split(",")]
+                    elif line.startswith("Resources:"):
+                        current_task["required_resources"] = [r.strip() for r in line[10:].split(",")]
+                    elif line.startswith("Success Criteria:"):
+                        current_task["success_criteria"] = [c.strip() for c in line[17:].split(",")]
             
-        # Get newest and oldest citations
-        years_list = [y for y in years.keys() if isinstance(y, int)]
-        newest = max(years_list) if years_list else None
-        oldest = min(years_list) if years_list else None
+            if current_task:
+                tasks.append(current_task)
+                
+            return tasks
+            
+        except Exception as e:
+            logger.error("Failed to parse task response", error=str(e))
+            return []
+            
+    def _analyze_workflow(self, tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Analyze the generated tasks to create a workflow overview."""
+        try:
+            total_tasks = len(tasks)
+            critical_path = self._identify_critical_path(tasks)
+            resource_requirements = self._analyze_resource_requirements(tasks)
+            risk_factors = self._identify_risk_factors(tasks)
+            
+            # Calculate estimated completion time
+            completion_time = self._estimate_completion_time(tasks)
+            
+            return {
+                "total_tasks": total_tasks,
+                "estimated_completion_time": completion_time,
+                "critical_path": critical_path,
+                "resource_requirements": resource_requirements,
+                "risk_factors": risk_factors
+            }
+            
+        except Exception as e:
+            logger.error("Failed to analyze workflow", error=str(e))
+            return {
+                "total_tasks": 0,
+                "estimated_completion_time": "unknown",
+                "critical_path": [],
+                "resource_requirements": {},
+                "risk_factors": []
+            }
+            
+    def _identify_critical_path(self, tasks: List[Dict[str, Any]]) -> List[str]:
+        """Identify the critical path in the task workflow."""
+        # Simplified implementation - would need more sophisticated analysis
+        return [task["id"] for task in tasks if not task["dependencies"]]
         
-        return {
-            "total_count": len(citations),
-            "by_year": years,
-            "by_type": types,
-            "newest_source": newest,
-            "oldest_source": oldest,
-            "avg_age": sum(years_list) / len(years_list) if years_list else None
-        }
+    def _analyze_resource_requirements(self, tasks: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Analyze resource requirements across all tasks."""
+        resources = {}
+        for task in tasks:
+            for resource in task.get("required_resources", []):
+                if resource not in resources:
+                    resources[resource] = 0
+                resources[resource] += 1
+        return resources
+        
+    def _identify_risk_factors(self, tasks: List[Dict[str, Any]]) -> List[str]:
+        """Identify potential risk factors in the workflow."""
+        risks = []
+        for task in tasks:
+            if len(task.get("dependencies", [])) > 2:
+                risks.append(f"Task {task['id']} has multiple dependencies")
+            if task.get("estimated_duration") == "long":
+                risks.append(f"Task {task['id']} is estimated to take a long time")
+        return risks
+        
+    def _estimate_completion_time(self, tasks: List[Dict[str, Any]]) -> str:
+        """Estimate the total completion time for all tasks."""
+        # Simplified implementation
+        duration_map = {"short": 1, "medium": 2, "long": 3}
+        total_duration = sum(duration_map.get(task.get("estimated_duration", "medium"), 2) 
+                           for task in tasks)
+        return f"{total_duration} days"
+        
+    def _calculate_complexity(self, tasks: List[Dict[str, Any]]) -> float:
+        """Calculate a complexity score for the task breakdown."""
+        try:
+            # Simple complexity calculation based on number of tasks and dependencies
+            total_tasks = len(tasks)
+            total_dependencies = sum(len(task.get("dependencies", [])) for task in tasks)
+            total_subtasks = sum(len(task.get("subtasks", [])) for task in tasks)
+            
+            # Normalize to a 0-1 scale
+            complexity = (total_tasks * 0.3 + total_dependencies * 0.4 + total_subtasks * 0.3) / 10
+            return min(1.0, complexity)
+            
+        except Exception as e:
+            logger.error("Failed to calculate complexity", error=str(e))
+            return 0.5
+            
+    def _calculate_confidence(self, tasks: List[Dict[str, Any]]) -> float:
+        """Calculate a confidence score for the task breakdown."""
+        try:
+            # Simple confidence calculation based on task completeness
+            scores = []
+            for task in tasks:
+                task_score = 0
+                if task.get("title"):
+                    task_score += 0.3
+                if task.get("description"):
+                    task_score += 0.3
+                if task.get("success_criteria"):
+                    task_score += 0.2
+                if task.get("estimated_duration"):
+                    task_score += 0.2
+                scores.append(task_score)
+                
+            return sum(scores) / len(scores) if scores else 0.5
+            
+        except Exception as e:
+            logger.error("Failed to calculate confidence", error=str(e))
+            return 0.5

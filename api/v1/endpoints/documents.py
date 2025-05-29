@@ -6,13 +6,13 @@ from enum import Enum
 import json
 import structlog
 
-from api.deps import get_current_active_user
-from db.mongodb.repositories.document_repository import document_repository
-from db.mongodb.repositories.task_repository import task_repository
-from db.mongodb.repositories.permission_repository import permission_repository
-from services.ai_model_service import ai_model_service
-from models.user import User
-from models.document import (
+from backend.api.deps import get_current_active_user
+from backend.db.mongodb.repositories.document_repository import document_repository
+from backend.db.mongodb.repositories.task_repository import task_repository
+from backend.db.mongodb.repositories.permission_repository import permission_repository
+from backend.services.ai_model_service import ai_model_service
+from backend.models.user import User
+from backend.models.document import (
     Document,
     DocumentCreate,
     DocumentUpdate,
@@ -23,7 +23,7 @@ from models.document import (
 
 # Configure logger
 logger = structlog.get_logger(__name__)
-from models.task import TaskCreate
+from backend.models.task import TaskCreate
 
 router = APIRouter()
 
@@ -454,7 +454,7 @@ async def get_document_summary(
 
 @router.get("/analytics", response_model=Dict[str, Any])
 async def get_document_analytics(
-    time_range: str = Query("7d", regex="^(1d|7d|30d|90d|1y)$"),
+    time_range: str = Query("7d", pattern="^(1d|7d|30d|90d|1y)$"),
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
     """

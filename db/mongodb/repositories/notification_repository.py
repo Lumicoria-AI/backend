@@ -1,13 +1,33 @@
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
+from pymongo import ASCENDING
+from backend.db.mongodb.base_repository import BaseRepository
+from backend.db.mongodb.models.notification import Notification, NotificationCreate, NotificationUpdate
+import structlog
 from datetime import datetime
 from bson import ObjectId
-from db.mongodb.base_repository import BaseRepository
-from db.mongodb.models.notification import Notification, NotificationType, NotificationPriority
-from db.mongodb.mongodb import get_database
+from motor.motor_asyncio import AsyncIOMotorDatabase
+from backend.db.mongodb.mongodb import get_mongodb
 
-class NotificationRepository(BaseRepository):
-    def __init__(self):
-        super().__init__(get_database(), "notifications")
+logger = structlog.get_logger()
+
+class NotificationRepository(BaseRepository[Notification]):
+    def __init__(self, db: AsyncIOMotorDatabase):
+        super().__init__("notifications", Notification)
+        self.db = db
+
+    @classmethod
+    async def create(cls) -> 'NotificationRepository':
+        db = await get_mongodb()
+        return cls(db)
+
+# Create a singleton instance
+notification_repository: Optional[NotificationRepository] = None
+
+async def get_notification_repository() -> NotificationRepository:
+    global notification_repository
+    if notification_repository is None:
+        notification_repository = await NotificationRepository.create()
+    return notification_repository
 
     async def create_notification(self, notification: Notification) -> Notification:
         """Create a new notification."""
@@ -112,7 +132,4 @@ class NotificationRepository(BaseRepository):
         notifications = []
         async for doc in cursor:
             notifications.append(Notification(**doc))
-        return notifications
-
-# Create singleton instance
-notification_repository = NotificationRepository() 
+        return notifications 

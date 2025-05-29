@@ -44,4 +44,13 @@ class MongoDB:
 
 
 async def get_mongodb() -> MongoDB:
-    return MongoDB() 
+    return MongoDB()
+
+# Add wrapper functions for FastAPI startup/shutdown events
+async def init_mongodb() -> None:
+    """Initialize MongoDB connection."""
+    await MongoDB.connect()
+
+async def close_mongodb() -> None:
+    """Close MongoDB connection."""
+    await MongoDB.disconnect() 

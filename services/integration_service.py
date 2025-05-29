@@ -1,19 +1,23 @@
 from typing import Any, Dict, List, Optional
 import structlog
+from datetime import datetime
+from motor.motor_asyncio import AsyncIOMotorClient
 
 # Assuming these repositories and services exist
-from db.mongodb.repositories.integration_repository import integration_repository
-from models.integration import Integration, IntegrationType
+from backend.db.mongodb.repositories.integration_repository import integration_repository
+from backend.models.integration import Integration, IntegrationCreate
 # Assuming specific integration client libraries are available or will be implemented
-# from services.google_calendar_client import GoogleCalendarClient
-# from services.slack_client import SlackClient
-# from services.salesforce_client import SalesforceClient
-from integrations.notion import NotionIntegration
-from integrations.google_workspace import GoogleWorkspaceIntegration
-from integrations.slack import SlackIntegration
+# from backend.services.google_calendar_client import GoogleCalendarClient
+# from backend.services.slack_client import SlackClient
+# from backend.services.salesforce_client import SalesforceClient
+from backend.integrations.notion import NotionIntegration
+from backend.integrations.google_workspace import GoogleWorkspaceIntegration
+from backend.integrations.slack import SlackIntegration
 from ..core.config import settings
+from backend.core.logging import get_logger
 
-logger = structlog.get_logger(__name__)
+# Initialize logger
+logger = get_logger("lumicoria.services.integration")
 
 class IntegrationService:
     """Service for managing external integrations."""
@@ -101,7 +105,7 @@ class IntegrationService:
                     return await integration.archive_project_channel(**data)
                     
             raise ValueError(f"Action '{action}' not supported for integration type '{integration_type}'")
-            
+
         except Exception as e:
             logger.error(
                 f"Error executing integration action: {str(e)}",

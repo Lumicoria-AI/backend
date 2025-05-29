@@ -26,6 +26,85 @@ class DocumentAgent(BaseAgent):
         # Configure with default model if not specified
         if "model" not in self.model_config:
             self.model_config["model"] = "sonar-large-online"
+
+    async def query_async(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Query the document with natural language questions.
+        
+        Args:
+            query: The natural language query about the document
+            context: Optional context including document content and metadata
+            
+        Returns:
+            Dictionary containing the response and any relevant extracted information
+        """
+        if not context or not context.get("document_text"):
+            return {"error": "No document content provided in context"}
+            
+        document_text = context["document_text"]
+        prompt = (
+            f"Using the following document content, answer this question: {query}\n\n"
+            f"Document content:\n{document_text[:8000]}..."  # Limit document length
+        )
+        
+        try:
+            if self.perplexity_client:
+                messages = [{"role": "user", "content": prompt}]
+                response = await self.perplexity_client.chat_completion(messages)
+                return {
+                    "response": response.content,
+                    "query": query,
+                    "document_id": context.get("document_id"),
+                    "confidence": response.metadata.get("confidence", 0.0) if response.metadata else 0.0
+                }
+            else:
+                return {"error": "Perplexity client not initialized"}
+        except Exception as e:
+            logger.error(f"Error querying document: {str(e)}")
+            return {"error": f"Failed to process query: {str(e)}"}
+
+    async def process_async(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process document data asynchronously.
+        
+        Args:
+            data: Dictionary containing document text and metadata
+            
+        Returns:
+            Dictionary with extracted information and analysis
+        """
+        try:
+            # Extract document content and metadata
+            document_text = data.get("text", "")
+            document_metadata = data.get("metadata", {})
+            
+            if not document_text:
+                return {"error": "No document text provided"}
+            
+            prompt = (
+                f"Analyze the following document and extract key information including "
+                f"{', '.join(self.extraction_targets)}. For each extracted item, include "
+                f"the exact text from the document and the relevant context.\n\n"
+                f"Document content:\n{document_text[:8000]}..."  # Limit document length
+            )
+            
+            if self.perplexity_client:
+                messages = [{"role": "user", "content": prompt}]
+                response = await self.perplexity_client.chat_completion(messages)
+                
+                # Process and structure the response
+                return {
+                    "analysis": response.content,
+                    "metadata": document_metadata,
+                    "extraction_targets": self.extraction_targets,
+                    "model_used": self.model_config.get("model", "unknown"),
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "confidence": response.metadata.get("confidence", 0.0) if response.metadata else 0.0
+                }
+            else:
+                return {"error": "Perplexity client not initialized"}
+                
+        except Exception as e:
+            logger.error(f"Error processing document: {str(e)}")
+            return {"error": f"Failed to process document: {str(e)}"}
             
     def process(self, document_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process a document to extract key information and generate tasks.
@@ -91,85 +170,6 @@ class DocumentAgent(BaseAgent):
         except Exception as e:
             logger.error(f"Error processing document: {str(e)}")
             return {"error": f"Document processing failed: {str(e)}"}
-    
-    async def process_async(self, document_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Process a document asynchronously with optimized parallel processing.
-        
-        Args:
-            document_data: Dictionary containing document text, metadata, and context.
-            
-        Returns:
-            Dictionary with extracted information, tasks, and insights.
-        """
-        document_text = document_data.get("text", "")
-        document_metadata = document_data.get("metadata", {})
-        user_context = document_data.get("user_context", {})
-        
-        if not document_text:
-            return {"error": "No document text provided"}
-            
-        try:
-            # Run extractions in parallel for efficiency
-            extraction_prompt = (
-                f"Analyze the following document and extract key information including "
-                f"{', '.join(self.extraction_targets)}. For each extracted item, include "
-                f"the exact text from the document and the relevant context."
-            )
-            
-            tasks_prompt = (
-                f"Extract all tasks, deadlines, and action items from this document. "
-                f"Format them as a list where each task includes a title, priority (High/Medium/Low), "
-                f"deadline (if available), and responsible party (if mentioned). "
-                f"Only include actionable items that require someone to do something."
-            )
-            
-            # Use Perplexity client directly for more control
-            if not self.perplexity_client:
-                self.initialize_models()
-                
-            if not self.perplexity_client:
-                return {"error": "Perplexity client not initialized"}
-                
-            # Run extractions in parallel
-            extraction_task = self.perplexity_client.extract_document_info(
-                document=document_text,
-                extraction_targets=self.extraction_targets
-            )
-            
-            tasks_task = self.perplexity_client.generate_tasks_from_document(
-                document=document_text,
-                user_context=json.dumps(user_context) if user_context else None
-            )
-            
-            # Wait for all tasks to complete
-            extraction_response, tasks_response = await asyncio.gather(extraction_task, tasks_task)
-            
-            # Parse results
-            extracted_info = self._parse_extraction(extraction_response.content)
-            parsed_tasks = self._parse_tasks(tasks_response.content)
-            
-            # Create comprehensive response
-            result = {
-                "document_id": document_metadata.get("id", ""),
-                "extracted_info": extracted_info,
-                "tasks": parsed_tasks,
-                "processed_at": datetime.utcnow().isoformat(),
-                "model_used": self.model_config.get("model"),
-                "citations": [
-                    {
-                        "text": citation.text,
-                        "url": citation.metadata.url,
-                        "title": citation.metadata.title
-                    } 
-                    for citation in (tasks_response.citations + extraction_response.citations)
-                ]
-            }
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"Error in async document processing: {str(e)}")
-            return {"error": f"Async document processing failed: {str(e)}"}
 
     def _parse_extraction(self, extraction_text: str) -> Dict[str, Any]:
         """Parse the extraction results into a structured format.

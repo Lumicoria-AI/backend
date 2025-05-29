@@ -1,11 +1,13 @@
 from typing import Dict, Any, List, Optional, Union
-import structlog
 from datetime import datetime
-from services.integration_service import integration_service
-from db.mongodb.repositories.integration_repository import integration_repository
-from models.integration import IntegrationType
+from backend.core.logging import get_logger
+from backend.services.integration_service import integration_service
+from backend.db.mongodb.repositories.integration_repository import integration_repository
+from backend.models.integration import IntegrationType
+from backend.core.config import settings
 
-logger = structlog.get_logger(__name__)
+# Initialize logger
+logger = get_logger("lumicoria.services.project_manager")
 
 class ProjectManager:
     """
@@ -275,13 +277,14 @@ class ProjectManager:
                 organization_id=organization_id,
                 database_id=database_id,
                 task_name=task_name
-            )
+            )            
             return {"status": "error", "message": f"Failed to add task: {str(e)}"}
-      async def export_meeting_to_project(self,
-                                     organization_id: str,
-                                     meeting_data: Dict[str, Any],
-                                     integration_type: str = "notion",
-                                     integration_id: Optional[str] = None) -> Dict[str, Any]:
+
+    async def export_meeting_to_project(self,
+                                       organization_id: str,
+                                       meeting_data: Dict[str, Any],
+                                       integration_type: str = "notion",
+                                       integration_id: Optional[str] = None) -> Dict[str, Any]:
         """
         Export meeting data to a project management tool.
         

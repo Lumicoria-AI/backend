@@ -8,6 +8,7 @@ import asyncio
 from .factory import AgentFactory, AgentType, AgentConfig
 from .security import AgentSecurityManager, AgentSecurityContext, AgentPermission
 from .cache import AgentCache
+from .base_agent import BaseAgent
 
 # Configure logging
 logger = structlog.get_logger(__name__)

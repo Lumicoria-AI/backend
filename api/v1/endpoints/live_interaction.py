@@ -1,13 +1,13 @@
 from typing import Any, List, Optional, Dict
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Body
 from pydantic import BaseModel, Field
 from datetime import datetime
 from enum import Enum
 
-from api.deps import get_current_active_user
-from db.mongodb.repositories.agent_universe_repository import agent_universe_repository
-from services.live_interaction_service import live_interaction_service
-from models.user import User
+from backend.api.deps import get_current_active_user
+from backend.db.mongodb.repositories.agent_universe_repository import agent_universe_repository
+from backend.services.live_interaction_service import live_interaction_service
+from backend.models.user import User
 
 router = APIRouter()
 
@@ -29,17 +29,19 @@ class LiveInteractionData(BaseModel):
     content: str # Base64 encoded data or text content
     metadata: Optional[Dict[str, Any]]
 
+class LiveSessionCreate(BaseModel):
+    interaction_mode: str
+    active_agent_ids: List[str] = Field(default_factory=list)
+    metadata: Optional[Dict[str, Any]] = None
+
 @router.post("/sessions", response_model=LiveInteractionSession)
 async def start_live_session(
-    interaction_mode: str,
-    active_agent_ids: List[str] = Field(default=[]),
-    metadata: Optional[Dict[str, Any]] = None,
+    session_data: LiveSessionCreate = Body(...),
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
     """
     Start a new live interaction session.
-    """
-    # Here we would create a new session in the database
+    """    # Here we would create a new session in the database
     # For now, we'll return a dummy response
     session_id = "dummy_session_id_" + str(datetime.now().timestamp())
     return LiveInteractionSession(
@@ -47,10 +49,10 @@ async def start_live_session(
         user_id=current_user.id,
         organization_id=current_user.organization_id,
         start_time=datetime.now(),
-        interaction_mode=interaction_mode,
-        active_agents=active_agent_ids,
+        interaction_mode=session_data.interaction_mode,
+        active_agents=session_data.active_agent_ids,
         status="active",
-        metadata=metadata
+        metadata=session_data.metadata
     )
 
 @router.post("/sessions/{session_id}/data")

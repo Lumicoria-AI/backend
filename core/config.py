@@ -4,6 +4,7 @@ from pydantic import AnyHttpUrl, validator, Field, HttpUrl, ConfigDict
 import secrets
 from functools import lru_cache
 from pathlib import Path
+import os
 
 
 class DatabaseSettings(BaseSettings):
@@ -35,18 +36,21 @@ class Settings(BaseSettings):
     
     # API Settings
     API_V1_STR: str = "/api/v1"
-    PROJECT_NAME: str = "Lumicoria.ai"
+    PROJECT_NAME: str = "Lumicoria AI"
+    VERSION: str = "0.1.0"
+    DESCRIPTION: str = "AI-powered platform for personalized learning and productivity"
     
     # Security
     SECRET_KEY: str = "your-secret-key-here"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
+    ALGORITHM: str = "HS256"
     
     # Database
-    MONGODB_URL: str = "mongodb://localhost:27017/lumicoria"
-    DATABASE_NAME: str = "lumicoria"
+    MONGODB_URL: str = "mongodb://localhost:27017"
+    MONGODB_DB_NAME: str = "lumicoria"
     
     # OpenAI
-    OPENAI_API_KEY: str = "your-openai-api-key-here"
+    OPENAI_API_KEY: Optional[str] = None
     OPENAI_MODEL: str = "gpt-4-turbo-preview"
     
     # Notion
@@ -91,7 +95,7 @@ class Settings(BaseSettings):
         ]
 
     # Firebase Configuration
-    FIREBASE_CREDENTIALS_PATH: str = "firebase-credentials.json"
+    FIREBASE_CREDENTIALS_PATH: str = str(Path(__file__).parent.parent / "firebase-credentials.json")
     
     # Database Configuration
     db: DatabaseSettings = Field(default_factory=DatabaseSettings)
@@ -116,8 +120,8 @@ class Settings(BaseSettings):
     LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
     # File Upload
-    UPLOAD_DIR: Path = Path("uploads")
-    MAX_UPLOAD_SIZE: int = 2 * 1024 * 1024  # 2MB
+    UPLOAD_DIR: str = str(Path(__file__).parent.parent / "uploads")
+    MAX_UPLOAD_SIZE: int = 10 * 1024 * 1024  # 10MB
     ALLOWED_EXTENSIONS: set[str] = {"jpg", "jpeg", "png", "gif"}
 
     # Email Settings
@@ -128,6 +132,20 @@ class Settings(BaseSettings):
     SMTP_FROM_EMAIL: str = "noreply@lumicoria.ai"
     SMTP_FROM_NAME: str = "Lumicoria.ai"
 
+    # Azure
+    AZURE_OPENAI_API_KEY: Optional[str] = None
+    AZURE_OPENAI_ENDPOINT: Optional[str] = None
+    AZURE_OPENAI_API_VERSION: str = "2023-05-15"
+
+    # Google Cloud
+    GOOGLE_CLOUD_PROJECT: Optional[str] = None
+    GOOGLE_APPLICATION_CREDENTIALS: Optional[str] = None
+
+    # AWS
+    AWS_ACCESS_KEY_ID: Optional[str] = None
+    AWS_SECRET_ACCESS_KEY: Optional[str] = None
+    AWS_REGION: str = "us-east-1"
+
 
 @lru_cache()
 def get_settings() -> Settings:
@@ -137,4 +155,4 @@ def get_settings() -> Settings:
 settings = get_settings()
 
 # Create upload directory if it doesn't exist
-settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+os.makedirs(settings.UPLOAD_DIR, exist_ok=True)

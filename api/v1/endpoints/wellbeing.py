@@ -5,23 +5,25 @@ from datetime import datetime, timedelta
 from enum import Enum
 import structlog
 
-from api.deps import get_current_active_user
-from db.mongodb.repositories.wellbeing_repository import wellbeing_repository
-from db.mongodb.repositories.permission_repository import permission_repository
-from models.user import User
-from models.wellbeing import (
+from backend.api.deps import get_current_active_user, get_current_user_id
+from backend.db.mongodb.repositories.wellbeing_repository import WellbeingRepository, wellbeing_repository
+from backend.db.mongodb.repositories.permission_repository import permission_repository
+from backend.models.user import User
+from backend.models.wellbeing import (
     WellbeingMetric,
     WellbeingMetricCreate,
     WellbeingGoal,
     WellbeingGoalCreate,
     WellbeingRecommendation,
     BreakType,
-    ActivityType
+    ActivityType,
+    WellbeingStats,
+    WellbeingRecord
 )
 
 # Import AgentService for wellbeing recommendations
-from agents.agent_service import AgentService
-from api.v1.endpoints.agents import get_agent_service
+from backend.agents.agent_service import AgentService
+from backend.api.v1.endpoints.agents import get_agent_service
 
 # Configure logger
 logger = structlog.get_logger(__name__)
@@ -458,7 +460,7 @@ async def record_activity(
 
 @router.get("/analytics", response_model=Dict[str, Any])
 async def get_wellbeing_analytics(
-    time_range: str = Query("7d", regex="^(1d|7d|30d|90d|1y)$"),
+    time_range: str = Query("7d", pattern="^(1d|7d|30d|90d|1y)$"),
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
     """
@@ -473,7 +475,7 @@ async def get_wellbeing_analytics(
 
 @router.get("/organization-analytics", response_model=Dict[str, Any])
 async def get_organization_wellbeing_analytics(
-    time_range: str = Query("7d", regex="^(1d|7d|30d|90d|1y)$"),
+    time_range: str = Query("7d", pattern="^(1d|7d|30d|90d|1y)$"),
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
     """
@@ -512,6 +514,22 @@ async def get_wellbeing_status(
         metrics=metrics_to_fetch
     )
     return latest_metrics
+
+@router.get("/stats", response_model=WellbeingStats)
+async def get_wellbeing_stats(
+    time_range: str = Query("7d", pattern="^(1d|7d|30d|90d|1y)$"),
+    user_id: str = Depends(get_current_user_id)
+):
+    """Get wellbeing statistics for the specified time range."""
+    # ... existing code ...
+
+@router.get("/history", response_model=List[WellbeingRecord])
+async def get_wellbeing_history(
+    time_range: str = Query("7d", pattern="^(1d|7d|30d|90d|1y)$"),
+    user_id: str = Depends(get_current_user_id)
+):
+    """Get wellbeing history for the specified time range."""
+    # ... existing code ...
 
 # Create a singleton instance
 wellbeing_repository = WellbeingRepository() 

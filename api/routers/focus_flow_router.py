@@ -4,8 +4,8 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 import logging
 
-from agents.focus_flow_agent import FocusFlowAgent, FocusState, DistractionType, ProductivityTechnique
-from api.dependencies import get_agent_service
+from backend.agents.focus_flow_agent import FocusFlowAgent, FocusState, DistractionType, ProductivityTechnique
+from backend.api.dependencies import get_agent_service
 
 logger = logging.getLogger(__name__)
 

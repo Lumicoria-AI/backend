@@ -1,17 +1,19 @@
 from typing import Any, Dict, List, Optional
 from datetime import datetime
 from bson import ObjectId
+from backend.core.logging import get_logger
 import structlog
 import base64
 import json
 
 # Assuming these repositories and services exist or will be created
-from db.mongodb.repositories.agent_universe_repository import agent_universe_repository
-# from db.mongodb.repositories.live_interaction_repository import live_interaction_repository # Needs implementation
-from services.ai_model_service import ai_model_service # Needs implementation
-# from services.integration_service import integration_service # Needs implementation
+from backend.db.mongodb.repositories.agent_universe_repository import agent_universe_repository
+# from backend.db.mongodb.repositories.live_interaction_repository import live_interaction_repository # Needs implementation
+from backend.services.ai_model_service import ai_model_service # Needs implementation
+# from backend.services.integration_service import integration_service # Needs implementation
 
-logger = structlog.get_logger()
+# Initialize logger
+logger = get_logger("lumicoria.services.live_interaction")
 
 class LiveInteractionService:
     def __init__(self):

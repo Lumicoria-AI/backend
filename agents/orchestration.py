@@ -13,9 +13,29 @@ import time
 import uuid
 from enum import Enum
 
-from ..components.base_component import BaseComponent, ComponentResult, ComponentStatus, ComponentConfig
-from ..components import *
-from ..studio_service import AgentWorkflow, ComponentInstance
+from .components.base_component import BaseComponent, ComponentResult, ComponentStatus, ComponentConfig
+from .components.input_components import (
+    DocumentUploadComponent,
+    LiveCameraComponent,
+    VoiceInputComponent,
+    TextInputComponent
+)
+from .components.processor_components import (
+    PerplexityResearchComponent,
+    ChainOfThoughtComponent,
+    DataExtractionComponent, 
+    SummarizationComponent,
+    TaskGeneratorComponent,
+    LiveEnvironmentAnalyzerComponent,
+    TranslatorComponent,
+    CitationManagerComponent
+)
+from .components.output_components import (
+    CalendarIntegrationComponent,
+    AgentDeploymentComponent,
+    WellbeingCoachComponent
+)
+from .studio_service import AgentWorkflow, ComponentInstance
 
 # Configure logger
 logger = structlog.get_logger(__name__)
@@ -373,14 +393,14 @@ class ComponentFactory:
             "data_extraction": DataExtractionComponent,
             "summarization": SummarizationComponent,
             "task_generator": TaskGeneratorComponent,
-            "wellbeing_coach": WellbeingCoachComponent,
             "live_environment_analyzer": LiveEnvironmentAnalyzerComponent,
             "translator": TranslatorComponent,
             "citation_manager": CitationManagerComponent,
             
             # Output components
             "calendar_integration": CalendarIntegrationComponent,
-            "agent_deployment": AgentDeploymentComponent
+            "agent_deployment": AgentDeploymentComponent,
+            "wellbeing_coach": WellbeingCoachComponent
         }
         
     async def create_component(self, component_id: str, config: ComponentConfig) -> BaseComponent:

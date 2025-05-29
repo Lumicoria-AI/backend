@@ -1,43 +1,48 @@
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+from abc import ABC, abstractmethod
 import os # Import os for accessing environment variables
 # Import necessary libraries for AI models
-from ai_models.perplexity import create_perplexity_client, PerplexityClient
+from backend.ai_models.perplexity import create_perplexity_client, PerplexityClient
 import structlog
 import asyncio
 
 # Configure logger
 logger = structlog.get_logger(__name__)
 
-class BaseAgent:
+class BaseAgent(ABC):
     def __init__(self, config: Dict[str, Any]):
         self.config = config
         # Access the global AI models config from the main app settings if available
-        # Otherwise, expect model_config to be passed in the agent's config
-        self.model_config = config.get("model_config", {}) or self._get_global_model_config(config.get("model"))
-        self.perplexity_client = None
+        # Otherwise, expect agent_model_config to be passed in the agent's config
+        self.model_config = config.get("agent_model_config", {}) or self._get_global_model_config(config.get("model"))
+        self.perplexity_client: Optional[PerplexityClient] = None
         self.initialize_models()
 
     def initialize_models(self):
-        """Initialize AI model clients based on configuration."""
-        model_name = self.model_config.get("model", "perplexity")
-        
-        # Initialize Perplexity client if it's the configured model
-        if model_name == "perplexity" or self.config.get("use_perplexity", False) or "sonar" in model_name.lower():
-            perplexity_config = self.model_config.get("perplexity", {})
-            api_key = (os.environ.get("PERPLEXITY_API_KEY") or 
-                      perplexity_config.get("api_key"))
+        """Initialize AI models and clients."""
+        try:
+            # If we have a model name but no model config, try to get it from the global config
+            if not self.model_config and self.config.get("model"):
+                self.model_config = self._get_global_model_config(self.config["model"])
             
-            if api_key:
-                try:
-                    self.perplexity_client = create_perplexity_client(
-                        api_key=api_key, 
-                        config=perplexity_config
-                    )
-                    logger.info("Perplexity client initialized successfully")
-                except Exception as e:
-                    logger.error(f"Failed to initialize Perplexity client: {e}")
-            else:
-                logger.warning("Perplexity API key not found, client not initialized")
+            # Ensure we have the API key
+            if not self.model_config.get("api_key"):
+                # Try to get it from environment variables
+                model_name = self.model_config.get("model", "").lower()
+                if "perplexity" in model_name or "sonar" in model_name:
+                    api_key = os.environ.get("PERPLEXITY_API_KEY")
+                    if api_key:
+                        self.model_config["api_key"] = api_key
+            
+            if not self.model_config.get("api_key"):
+                raise ValueError("Perplexity API key not found in configuration or environment variables")
+            
+            self.perplexity_client = create_perplexity_client(
+                config=self.model_config
+            )
+        except Exception as e:
+            logger.error(f"Error initializing Perplexity client: {str(e)}")
+            raise
 
     def _get_global_model_config(self, model_name: str) -> Dict[str, Any]:
         # This is a placeholder to retrieve model configuration from a global settings object
@@ -46,6 +51,16 @@ class BaseAgent:
         # {"ai_models": {"model_name": {...}}}
         global_models_config = self.config.get("ai_models", {})
         return global_models_config.get(model_name, {})
+
+    @abstractmethod
+    async def process_async(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process data asynchronously."""
+        pass
+
+    @abstractmethod
+    async def query_async(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Query the agent asynchronously."""
+        pass
 
     def process(self, data: Any) -> Any:
         # This method should be overridden by subclasses

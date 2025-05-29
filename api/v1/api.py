@@ -1,6 +1,32 @@
 from fastapi import APIRouter
-
-from api.v1.endpoints import auth, users, agents, documents, live_interaction, tasks, activity, integrations, notifications, vision, student, creative, research, projects, meeting, wellbeing, customer_service, translation, data_analysis, social_media, legal_document, learning_coach, rag, lumicoria_chat, agent_studio, workflow_execution
+from backend.api.v1.endpoints import (
+    auth,
+    users,
+    agents,
+    documents,
+    live_interaction,
+    tasks,
+    activity,
+    integrations,
+    notifications,
+    vision,
+    student,
+    creative,
+    research,
+    projects,
+    meeting,
+    wellbeing,
+    customer_service,
+    translation,
+    data_analysis,
+    social_media,
+    legal_document,
+    learning_coach,
+    rag,
+    lumicoria_chat,
+    agent_studio,
+    workflow_execution
+)
 
 api_router = APIRouter()
 
@@ -44,7 +70,7 @@ api_router.include_router(documents.router, prefix="/documents", tags=["document
 api_router.include_router(wellbeing.router, prefix="/wellbeing", tags=["wellbeing"])
 
 # Live Interaction endpoints
-api_router.include_router(live_interaction.router, prefix="/live-interaction", tags=["live interaction"])
+api_router.include_router(live_interaction.router, prefix="/live", tags=["live interaction"])
 
 # Task endpoints
 api_router.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
@@ -94,7 +120,7 @@ api_router.include_router(
 api_router.include_router(
     rag.router,
     prefix="/rag",
-    tags=["rag"],
+    tags=["retrieval augmented generation"],
     responses={
         200: {"description": "Success"},
         400: {"description": "Bad Request"},
@@ -179,7 +205,7 @@ api_router.include_router(
 api_router.include_router(
     data_analysis.router,
     prefix="/data-analysis",
-    tags=["data-analysis"],
+    tags=["data analysis"],
     responses={
         200: {"description": "Success"},
         400: {"description": "Bad Request"},
@@ -195,7 +221,7 @@ api_router.include_router(
 api_router.include_router(
     social_media.router,
     prefix="/social-media",
-    tags=["social-media"],
+    tags=["social media"],
     responses={
         200: {"description": "Success"},
         400: {"description": "Bad Request"},
@@ -210,8 +236,8 @@ api_router.include_router(
 # Legal Document endpoints
 api_router.include_router(
     legal_document.router,
-    prefix="/legal-document",
-    tags=["legal-document"],
+    prefix="/legal",
+    tags=["legal documents"],
     responses={
         200: {"description": "Success"},
         400: {"description": "Bad Request"},
@@ -227,7 +253,7 @@ api_router.include_router(
 api_router.include_router(
     learning_coach.router,
     prefix="/learning-coach",
-    tags=["learning-coach"],
+    tags=["learning coach"],
     responses={
         200: {"description": "Success"},
         400: {"description": "Bad Request"},
@@ -242,8 +268,8 @@ api_router.include_router(
 # Lumicoria Chat endpoints - the main assistant interface
 api_router.include_router(
     lumicoria_chat.router,
-    prefix="/lumicoria",
-    tags=["lumicoria-ai"],
+    prefix="/chat",
+    tags=["chat"],
     responses={
         200: {"description": "Success"},
         400: {"description": "Bad Request"},
@@ -259,7 +285,7 @@ api_router.include_router(
 api_router.include_router(
     agent_studio.router,
     prefix="/agent-studio",
-    tags=["agent-studio"],
+    tags=["agent studio"],
     responses={
         200: {"description": "Success"},
         400: {"description": "Bad Request"},
@@ -274,8 +300,8 @@ api_router.include_router(
 # Workflow Execution endpoints
 api_router.include_router(
     workflow_execution.router,
-    prefix="/workflow-execution",
-    tags=["workflow-execution"],
+    prefix="/workflows",
+    tags=["workflow execution"],
     responses={
         200: {"description": "Success"},
         400: {"description": "Bad Request"},

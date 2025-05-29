@@ -33,14 +33,12 @@ class PyObjectId(ObjectId):
     @classmethod
     def __get_pydantic_json_schema__(
         cls,
-        _schema_generator: GetJsonSchemaHandler,
-        _property_schema: JsonSchemaValue,
-    ) -> JsonSchemaValue:
-        _property_schema.update(type="string")
-        return _property_schema
+        schema_generator: Any,
+        property_schema: Any,
+    ) -> Any:
+        return { "type": "string" }
 
-class Notification(BaseModel):
-    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
+class NotificationBase(BaseModel):
     user_id: Optional[str] = None
     user_email: Optional[EmailStr] = None
     notification_type: NotificationType
@@ -48,6 +46,20 @@ class Notification(BaseModel):
     content: str
     priority: NotificationPriority = NotificationPriority.NORMAL
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+class NotificationCreate(NotificationBase):
+    pass
+
+class NotificationUpdate(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
+    priority: Optional[NotificationPriority] = None
+    metadata: Optional[Dict[str, Any]] = None
+    read: Optional[bool] = None
+    read_at: Optional[datetime] = None
+
+class Notification(NotificationBase):
+    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
     created_at: datetime = Field(default_factory=datetime.utcnow)
     read: bool = False
     read_at: Optional[datetime] = None

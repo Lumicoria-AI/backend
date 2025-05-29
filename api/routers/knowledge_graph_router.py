@@ -4,8 +4,8 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 import logging
 
-from agents.knowledge_graph_agent import KnowledgeGraphAgent, GraphNodeType, GraphRelationType
-from api.dependencies import get_agent_service
+from backend.agents.knowledge_graph_agent import KnowledgeGraphAgent, GraphNodeType, GraphRelationType
+from backend.api.dependencies import get_agent_service
 
 logger = logging.getLogger(__name__)
 

@@ -1,18 +1,13 @@
 from typing import Optional, List, Dict, Any, Union
-from motor.motor_asyncio import ASCENDING, DESCENDING
+from pymongo import ASCENDING, DESCENDING
 from bson import ObjectId
 from datetime import datetime, timedelta
 from ..base_repository import BaseRepository
-from ...models.mongodb_models import (
-    Agent,
-    AgentCapability,
-    AgentStatus,
-    AgentStudioData
-)
+from backend.models.mongodb_models import Agent, AgentCapability, AgentStatus
 # Assuming these repositories and services exist
 from .component_repository import component_repository
-from services.ai_model_service import ai_model_service
-from services.integration_service import integration_service
+from backend.services.ai_model_service import ai_model_service
+from backend.services.integration_service import integration_service
 
 import structlog
 import json

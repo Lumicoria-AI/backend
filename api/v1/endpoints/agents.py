@@ -1,15 +1,16 @@
 from typing import Any, List, Optional, Dict
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Query
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from datetime import datetime, timedelta
 from enum import Enum
 
-from api.deps import get_current_active_user
-from db.mongodb.repositories.agent_universe_repository import agent_universe_repository
-from db.mongodb.repositories.component_repository import component_repository
-from db.mongodb.repositories.permission_repository import permission_repository
-from models.user import User
-from models.agent import (
+from backend.api.deps import get_current_active_user
+from backend.db.mongodb.repositories.agent_universe_repository import agent_universe_repository
+from backend.db.mongodb.repositories.component_repository import component_repository
+from backend.db.mongodb.repositories.permission_repository import permission_repository
+from backend.models.user import User
+from backend.models.mongodb_models import (
     Agent,
     AgentCreate,
     AgentUpdate,
@@ -17,22 +18,55 @@ from models.agent import (
     AgentType,
     AgentStatus
 )
+from backend.core.security import rate_limit
 
 # Import the AgentService and agent implementations
-from agents.agent_service import AgentService
-from agents.document_agent import DocumentAgent
+from backend.agents.agent_service import AgentService
+from backend.agents.document_agent import DocumentAgent
 # Import configuration loading (assuming it's in backend.core.config)
-from core.config import settings
+from backend.core.config import settings
 import yaml
+import structlog
 
+logger = structlog.get_logger()
 router = APIRouter()
 
 # Load configuration and initialize AgentService (simple approach, consider dependency injection for production)
 def get_agent_service() -> AgentService:
-    config_path = settings.BASE_DIR / "backend" / "config" / "config.yaml"
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
+    import os
+    from pathlib import Path
+    
+    # Determine the base directory for the project
+    # First try to use settings if it has a path attribute
+    if hasattr(settings, 'BASE_DIR'):
+        base_dir = settings.BASE_DIR
+    else:
+        # If not available, construct path based on the current file location
+        current_file = Path(__file__)
+        base_dir = current_file.parent.parent.parent.parent.parent  # Go up to the project root
+    
+    config_path = os.path.join(base_dir, "backend", "config", "config.yaml")
+    
+    # Use a default config if file doesn't exist
+    if not os.path.exists(config_path):
+        logger.warning(f"Config file not found at {config_path}, using default configuration")
+        config = {
+            "ai_models": {
+                "perplexity": {
+                    "model": "sonar-medium-online",
+                    "temperature": 0.7,
+                    "max_tokens": 1024
+                }
+            }
+        }
+    else:
+        with open(config_path, "r") as f:
+            config = yaml.safe_load(f)
+    
     return AgentService(config)
+
+# Create a singleton instance for use throughout this file
+agent_service = get_agent_service()
 
 class AgentResponse(BaseModel):
     id: str
@@ -67,28 +101,144 @@ class AgentSummaryResponse(BaseModel):
     total_usage: int
     capability_stats: Dict[str, Any]
 
-@router.get("/discover", response_model=List[AgentResponse])
-async def discover_agents(
-    filters: AgentDiscoveryFilters = Depends(),
-    skip: int = Query(0, ge=0),
-    limit: int = Query(10, ge=1, le=100),
+@router.get("/", response_model=List[dict])
+@rate_limit()
+async def list_agents(current_user: User = Depends(get_current_active_user)) -> Any:
+    """List all available agents."""
+    try:
+        agents = await agent_universe_repository.discover_agents(
+            organization_id=current_user.organization_id,
+            capabilities=None,
+            agent_type=None,
+            min_success_rate=None,
+            max_error_rate=None,
+            tags=None,
+            search_query=None,
+            skip=0,
+            limit=100
+        )
+        return agents
+    except Exception as e:
+        logger.error(f"Error listing agents: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error listing agents"
+        )
+
+@router.get("/{agent_id}", response_model=dict)
+@rate_limit()
+async def get_agent(
+    agent_id: str,
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
-    """
-    Discover available agents based on filters.
-    """
-    agents = await agent_universe_repository.discover_agents(
-        organization_id=current_user.organization_id,
-        capabilities=filters.capabilities,
-        agent_type=filters.agent_type,
-        min_success_rate=filters.min_success_rate,
-        max_error_rate=filters.max_error_rate,
-        tags=filters.tags,
-        search_query=filters.search_query,
-        skip=skip,
-        limit=limit
-    )
-    return agents
+    """Get agent details."""
+    try:
+        agent = await agent_universe_repository.get_agent_by_id(
+            agent_id=agent_id,
+            organization_id=current_user.organization_id
+        )
+        if not agent:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Agent not found"
+            )
+        return agent
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting agent: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error getting agent details"
+        )
+
+@router.post("/{agent_id}/chat", response_model=dict)
+@rate_limit()
+async def chat_with_agent(
+    agent_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """Chat with an agent."""
+    try:
+        data = await request.json()
+        message = data.get("message")
+        if not message:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Message is required"
+            )
+
+        response = await agent_service.chat_with_agent(
+            agent_id=agent_id,
+            user_id=str(current_user.id),
+            message=message
+        )
+        return response
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error chatting with agent: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error processing chat request"
+        )
+
+@router.post("/{agent_id}/execute", response_model=dict)
+@rate_limit()
+async def execute_agent_task(
+    agent_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """Execute an agent task."""
+    try:
+        data = await request.json()
+        task = data.get("task")
+        if not task:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Task is required"
+            )
+
+        result = await agent_service.execute_task(
+            agent_id=agent_id,
+            user_id=str(current_user.id),
+            task=task
+        )
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error executing agent task: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error executing task"
+        )
+
+@router.get("/{agent_id}/status", response_model=dict)
+@rate_limit()
+async def get_agent_status(
+    agent_id: str,
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """Get agent status."""
+    try:
+        status = await agent_service.get_agent_status(agent_id)
+        if not status:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Agent not found"
+            )
+        return status
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting agent status: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error getting agent status"
+        )
 
 @router.post("", response_model=AgentResponse)
 async def create_agent(
@@ -122,39 +272,6 @@ async def create_agent(
         configuration=agent_in.configuration,
         metadata=agent_in.metadata
     )
-    return agent
-
-@router.get("/{agent_id}", response_model=AgentResponse)
-async def get_agent(
-    agent_id: str,
-    current_user: User = Depends(get_current_active_user)
-) -> Any:
-    """
-    Get agent by ID.
-    """
-    agent = await agent_universe_repository.get_agent_by_id(
-        agent_id=agent_id,
-        organization_id=current_user.organization_id
-    )
-    if not agent:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Agent not found"
-        )
-
-    # Basic permission check: user must be in the same organization or agent is public
-    if str(agent.organization_id) != current_user.organization_id and not agent.is_public:
-        # More granular permission check if needed (e.g., view permission)
-        has_permission = await permission_repository.check_permission(
-            user_id=current_user.id,
-            organization_id=current_user.organization_id,
-            resource_type="AGENT",
-            resource_id=agent_id,
-            permission_type="VIEW"
-        )
-        if not has_permission:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to access this agent")
-
     return agent
 
 @router.put("/{agent_id}", response_model=AgentResponse)
@@ -237,8 +354,7 @@ async def execute_agent(
         )
     except Exception as e:
         # Log the error for debugging
-        import logging
-        logging.error(f"Error executing agent {agent_id}: {e}")
+        logger.error(f"Error executing agent {agent_id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="An error occurred during agent execution."
@@ -454,7 +570,7 @@ The prompt should be detailed, specific, and tailored to the user's needs as a {
 @router.get("/{agent_id}/performance", response_model=Dict[str, Any])
 async def get_agent_performance(
     agent_id: str,
-    time_range: str = Query("7d", regex="^(1d|7d|30d|90d|1y)$"),
+    time_range: str = Query("7d", pattern="^(1d|7d|30d|90d|1y)$"),
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
     """
@@ -493,7 +609,7 @@ async def get_agent_capabilities(
 
 @router.get("/analytics", response_model=Dict[str, Any])
 async def get_agent_analytics(
-    time_range: str = Query("7d", regex="^(1d|7d|30d|90d|1y)$"),
+    time_range: str = Query("7d", pattern="^(1d|7d|30d|90d|1y)$"),
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
     """

@@ -928,3 +928,671 @@ class WellbeingCoachComponent(BaseComponent):
             }
             
         return None
+
+
+class CalendarIntegrationComponent(BaseComponent):
+    """
+    Component that integrates with calendar systems to manage events, schedules, and reminders.
+    Supports multiple calendar providers and event management features.
+    """
+    
+    @property
+    def component_type(self) -> str:
+        return "output"
+        
+    @property
+    def category(self) -> str:
+        return "calendar"
+        
+    @property
+    def input_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "event_details": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"},
+                        "description": {"type": "string"},
+                        "start_time": {"type": "string", "format": "date-time"},
+                        "end_time": {"type": "string", "format": "date-time"},
+                        "location": {"type": "string"},
+                        "attendees": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "email": {"type": "string"},
+                                    "name": {"type": "string"},
+                                    "response_status": {
+                                        "type": "string",
+                                        "enum": ["accepted", "declined", "tentative", "needs_action"]
+                                    }
+                                }
+                            }
+                        },
+                        "reminders": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "minutes": {"type": "integer"},
+                                    "method": {"type": "string", "enum": ["email", "popup", "sms"]}
+                                }
+                            }
+                        },
+                        "recurrence": {
+                            "type": "object",
+                            "properties": {
+                                "frequency": {"type": "string", "enum": ["daily", "weekly", "monthly", "yearly"]},
+                                "interval": {"type": "integer"},
+                                "end_date": {"type": "string", "format": "date"}
+                            }
+                        }
+                    },
+                    "required": ["title", "start_time", "end_time"]
+                },
+                "calendar_provider": {
+                    "type": "string",
+                    "enum": ["google", "outlook", "apple", "custom"],
+                    "default": "google"
+                },
+                "operation": {
+                    "type": "string",
+                    "enum": ["create", "update", "delete", "get"],
+                    "default": "create"
+                },
+                "event_id": {"type": "string"},
+                "timezone": {"type": "string", "default": "UTC"}
+            },
+            "required": ["event_details", "operation"]
+        }
+        
+    @property
+    def output_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "event": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "html_link": {"type": "string"},
+                        "status": {"type": "string"},
+                        "created": {"type": "string", "format": "date-time"},
+                        "updated": {"type": "string", "format": "date-time"},
+                        "summary": {"type": "string"},
+                        "description": {"type": "string"},
+                        "start": {"type": "object"},
+                        "end": {"type": "object"},
+                        "attendees": {"type": "array"},
+                        "reminders": {"type": "object"}
+                    }
+                },
+                "operation_status": {"type": "string"},
+                "attendee_responses": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "email": {"type": "string"},
+                            "response": {"type": "string"},
+                            "timestamp": {"type": "string", "format": "date-time"}
+                        }
+                    }
+                },
+                "metadata": {"type": "object"}
+            }
+        }
+        
+    @property
+    def config_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "default_calendar": {"type": "string", "default": "primary"},
+                "default_reminders": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "minutes": {"type": "integer"},
+                            "method": {"type": "string"}
+                        }
+                    }
+                },
+                "working_hours": {
+                    "type": "object",
+                    "properties": {
+                        "start": {"type": "string"},
+                        "end": {"type": "string"},
+                        "timezone": {"type": "string"}
+                    }
+                },
+                "auto_decline_conflicts": {"type": "boolean", "default": False},
+                "send_notifications": {"type": "boolean", "default": True}
+            }
+        }
+        
+    async def execute(self, input_data: Dict[str, Any]) -> ComponentResult:
+        execution_id = self._start_execution()
+        start_time = time.time()
+        
+        try:
+            event_details = input_data.get("event_details", {})
+            operation = input_data.get("operation", "create")
+            calendar_provider = input_data.get("calendar_provider", "google")
+            event_id = input_data.get("event_id")
+            timezone = input_data.get("timezone", "UTC")
+            
+            # Perform the requested calendar operation
+            if operation == "create":
+                result = await self._create_event(event_details, calendar_provider, timezone)
+            elif operation == "update":
+                if not event_id:
+                    raise ValueError("event_id is required for update operation")
+                result = await self._update_event(event_id, event_details, calendar_provider, timezone)
+            elif operation == "delete":
+                if not event_id:
+                    raise ValueError("event_id is required for delete operation")
+                result = await self._delete_event(event_id, calendar_provider)
+            else:  # get
+                if not event_id:
+                    raise ValueError("event_id is required for get operation")
+                result = await self._get_event(event_id, calendar_provider)
+                
+            # Get attendee responses if available
+            attendee_responses = []
+            if result.get("event", {}).get("attendees"):
+                attendee_responses = await self._get_attendee_responses(
+                    result["event"]["id"],
+                    calendar_provider
+                )
+                
+            result_data = {
+                "event": result.get("event", {}),
+                "operation_status": result.get("status", "success"),
+                "attendee_responses": attendee_responses,
+                "metadata": {
+                    "calendar_provider": calendar_provider,
+                    "operation": operation,
+                    "timezone": timezone,
+                    "processing_timestamp": datetime.utcnow().isoformat(),
+                    "settings": self.settings
+                }
+            }
+            
+            execution_time = time.time() - start_time
+            self._complete_execution(execution_id, success=True)
+            
+            return ComponentResult(
+                component_id=self.id,
+                status=ComponentStatus.COMPLETED,
+                data=result_data,
+                execution_time=execution_time
+            )
+            
+        except Exception as e:
+            execution_time = time.time() - start_time
+            error_msg = f"Calendar operation failed: {str(e)}"
+            self._complete_execution(execution_id, success=False, error=error_msg)
+            
+            return ComponentResult(
+                component_id=self.id,
+                status=ComponentStatus.ERROR,
+                error=error_msg,
+                execution_time=execution_time
+            )
+            
+    async def _create_event(
+        self,
+        event_details: Dict[str, Any],
+        provider: str,
+        timezone: str
+    ) -> Dict[str, Any]:
+        """Create a new calendar event"""
+        # TODO: Implement actual calendar integration
+        # This is a placeholder implementation
+        return {
+            "event": {
+                "id": "event_123",
+                "html_link": "https://calendar.example.com/event/123",
+                "status": "confirmed",
+                "created": datetime.utcnow().isoformat(),
+                "updated": datetime.utcnow().isoformat(),
+                "summary": event_details.get("title", ""),
+                "description": event_details.get("description", ""),
+                "start": {"dateTime": event_details.get("start_time")},
+                "end": {"dateTime": event_details.get("end_time")},
+                "attendees": event_details.get("attendees", []),
+                "reminders": {"useDefault": True}
+            },
+            "status": "success"
+        }
+        
+    async def _update_event(
+        self,
+        event_id: str,
+        event_details: Dict[str, Any],
+        provider: str,
+        timezone: str
+    ) -> Dict[str, Any]:
+        """Update an existing calendar event"""
+        # TODO: Implement actual calendar integration
+        return await self._create_event(event_details, provider, timezone)
+        
+    async def _delete_event(
+        self,
+        event_id: str,
+        provider: str
+    ) -> Dict[str, Any]:
+        """Delete a calendar event"""
+        # TODO: Implement actual calendar integration
+        return {
+            "status": "success",
+            "message": f"Event {event_id} deleted successfully"
+        }
+        
+    async def _get_event(
+        self,
+        event_id: str,
+        provider: str
+    ) -> Dict[str, Any]:
+        """Get details of a calendar event"""
+        # TODO: Implement actual calendar integration
+        return {
+            "event": {
+                "id": event_id,
+                "html_link": f"https://calendar.example.com/event/{event_id}",
+                "status": "confirmed",
+                "created": datetime.utcnow().isoformat(),
+                "updated": datetime.utcnow().isoformat(),
+                "summary": "Sample Event",
+                "description": "This is a sample event",
+                "start": {"dateTime": datetime.utcnow().isoformat()},
+                "end": {"dateTime": datetime.utcnow().isoformat()},
+                "attendees": [],
+                "reminders": {"useDefault": True}
+            },
+            "status": "success"
+        }
+        
+    async def _get_attendee_responses(
+        self,
+        event_id: str,
+        provider: str
+    ) -> List[Dict[str, Any]]:
+        """Get attendee responses for an event"""
+        # TODO: Implement actual calendar integration
+        return [
+            {
+                "email": "attendee@example.com",
+                "response": "accepted",
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        ]
+
+
+class AgentDeploymentComponent(BaseComponent):
+    """
+    Component that manages the deployment and lifecycle of AI agents.
+    Handles agent deployment, monitoring, scaling, and updates.
+    """
+    
+    @property
+    def component_type(self) -> str:
+        return "output"
+        
+    @property
+    def category(self) -> str:
+        return "deployment"
+        
+    @property
+    def input_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "agent_config": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "version": {"type": "string"},
+                        "description": {"type": "string"},
+                        "components": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {"type": "string"},
+                                    "type": {"type": "string"},
+                                    "config": {"type": "object"}
+                                }
+                            }
+                        },
+                        "workflow": {
+                            "type": "object",
+                            "properties": {
+                                "nodes": {"type": "array"},
+                                "edges": {"type": "array"}
+                            }
+                        },
+                        "resources": {
+                            "type": "object",
+                            "properties": {
+                                "cpu": {"type": "string"},
+                                "memory": {"type": "string"},
+                                "gpu": {"type": "boolean"},
+                                "storage": {"type": "string"}
+                            }
+                        }
+                    },
+                    "required": ["name", "version", "components", "workflow"]
+                },
+                "deployment_type": {
+                    "type": "string",
+                    "enum": ["cloud", "edge", "hybrid"],
+                    "default": "cloud"
+                },
+                "environment": {
+                    "type": "string",
+                    "enum": ["development", "staging", "production"],
+                    "default": "development"
+                },
+                "operation": {
+                    "type": "string",
+                    "enum": ["deploy", "update", "scale", "monitor", "undeploy"],
+                    "default": "deploy"
+                },
+                "scaling_config": {
+                    "type": "object",
+                    "properties": {
+                        "min_instances": {"type": "integer"},
+                        "max_instances": {"type": "integer"},
+                        "target_cpu_utilization": {"type": "number"},
+                        "target_memory_utilization": {"type": "number"}
+                    }
+                }
+            },
+            "required": ["agent_config", "operation"]
+        }
+        
+    @property
+    def output_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "deployment_status": {
+                    "type": "object",
+                    "properties": {
+                        "status": {"type": "string"},
+                        "message": {"type": "string"},
+                        "deployment_id": {"type": "string"},
+                        "endpoints": {
+                            "type": "object",
+                            "properties": {
+                                "api": {"type": "string"},
+                                "monitoring": {"type": "string"},
+                                "logs": {"type": "string"}
+                            }
+                        }
+                    }
+                },
+                "agent_metrics": {
+                    "type": "object",
+                    "properties": {
+                        "cpu_usage": {"type": "number"},
+                        "memory_usage": {"type": "number"},
+                        "request_count": {"type": "integer"},
+                        "error_rate": {"type": "number"},
+                        "latency": {"type": "number"}
+                    }
+                },
+                "component_status": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "component_id": {"type": "string"},
+                            "status": {"type": "string"},
+                            "health": {"type": "string"},
+                            "metrics": {"type": "object"}
+                        }
+                    }
+                },
+                "metadata": {"type": "object"}
+            }
+        }
+        
+    @property
+    def config_schema(self) -> Dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "deployment_provider": {
+                    "type": "string",
+                    "enum": ["kubernetes", "docker", "cloud_run", "custom"],
+                    "default": "kubernetes"
+                },
+                "monitoring": {
+                    "type": "object",
+                    "properties": {
+                        "enabled": {"type": "boolean", "default": True},
+                        "metrics_interval": {"type": "integer", "default": 60},
+                        "alert_thresholds": {"type": "object"}
+                    }
+                },
+                "logging": {
+                    "type": "object",
+                    "properties": {
+                        "level": {"type": "string", "default": "info"},
+                        "retention_days": {"type": "integer", "default": 30},
+                        "export_to": {"type": "array", "items": {"type": "string"}}
+                    }
+                },
+                "security": {
+                    "type": "object",
+                    "properties": {
+                        "authentication": {"type": "boolean", "default": True},
+                        "encryption": {"type": "boolean", "default": True},
+                        "rate_limiting": {"type": "boolean", "default": True}
+                    }
+                }
+            }
+        }
+        
+    async def execute(self, input_data: Dict[str, Any]) -> ComponentResult:
+        execution_id = self._start_execution()
+        start_time = time.time()
+        
+        try:
+            agent_config = input_data.get("agent_config", {})
+            operation = input_data.get("operation", "deploy")
+            deployment_type = input_data.get("deployment_type", "cloud")
+            environment = input_data.get("environment", "development")
+            scaling_config = input_data.get("scaling_config", {})
+            
+            # Perform the requested deployment operation
+            if operation == "deploy":
+                result = await self._deploy_agent(
+                    agent_config,
+                    deployment_type,
+                    environment,
+                    scaling_config
+                )
+            elif operation == "update":
+                result = await self._update_agent(
+                    agent_config,
+                    deployment_type,
+                    environment
+                )
+            elif operation == "scale":
+                result = await self._scale_agent(
+                    agent_config.get("name"),
+                    scaling_config
+                )
+            elif operation == "monitor":
+                result = await self._monitor_agent(
+                    agent_config.get("name")
+                )
+            else:  # undeploy
+                result = await self._undeploy_agent(
+                    agent_config.get("name")
+                )
+                
+            # Get component status if available
+            component_status = []
+            if result.get("deployment_status", {}).get("status") == "running":
+                component_status = await self._get_component_status(
+                    agent_config.get("name")
+                )
+                
+            result_data = {
+                "deployment_status": result.get("deployment_status", {}),
+                "agent_metrics": result.get("metrics", {}),
+                "component_status": component_status,
+                "metadata": {
+                    "deployment_type": deployment_type,
+                    "environment": environment,
+                    "operation": operation,
+                    "processing_timestamp": datetime.utcnow().isoformat(),
+                    "settings": self.settings
+                }
+            }
+            
+            execution_time = time.time() - start_time
+            self._complete_execution(execution_id, success=True)
+            
+            return ComponentResult(
+                component_id=self.id,
+                status=ComponentStatus.COMPLETED,
+                data=result_data,
+                execution_time=execution_time
+            )
+            
+        except Exception as e:
+            execution_time = time.time() - start_time
+            error_msg = f"Agent deployment operation failed: {str(e)}"
+            self._complete_execution(execution_id, success=False, error=error_msg)
+            
+            return ComponentResult(
+                component_id=self.id,
+                status=ComponentStatus.ERROR,
+                error=error_msg,
+                execution_time=execution_time
+            )
+            
+    async def _deploy_agent(
+        self,
+        agent_config: Dict[str, Any],
+        deployment_type: str,
+        environment: str,
+        scaling_config: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Deploy a new agent instance"""
+        # TODO: Implement actual deployment logic
+        # This is a placeholder implementation
+        return {
+            "deployment_status": {
+                "status": "running",
+                "message": "Agent deployed successfully",
+                "deployment_id": "deploy_123",
+                "endpoints": {
+                    "api": "https://api.example.com/agent/123",
+                    "monitoring": "https://monitoring.example.com/agent/123",
+                    "logs": "https://logs.example.com/agent/123"
+                }
+            },
+            "metrics": {
+                "cpu_usage": 0.2,
+                "memory_usage": 0.3,
+                "request_count": 0,
+                "error_rate": 0.0,
+                "latency": 0.1
+            }
+        }
+        
+    async def _update_agent(
+        self,
+        agent_config: Dict[str, Any],
+        deployment_type: str,
+        environment: str
+    ) -> Dict[str, Any]:
+        """Update an existing agent deployment"""
+        # TODO: Implement actual update logic
+        return await self._deploy_agent(agent_config, deployment_type, environment, {})
+        
+    async def _scale_agent(
+        self,
+        agent_name: str,
+        scaling_config: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Scale an agent deployment"""
+        # TODO: Implement actual scaling logic
+        return {
+            "deployment_status": {
+                "status": "scaled",
+                "message": f"Agent {agent_name} scaled successfully",
+                "deployment_id": "deploy_123"
+            },
+            "metrics": {
+                "cpu_usage": 0.4,
+                "memory_usage": 0.5,
+                "request_count": 100,
+                "error_rate": 0.01,
+                "latency": 0.15
+            }
+        }
+        
+    async def _monitor_agent(
+        self,
+        agent_name: str
+    ) -> Dict[str, Any]:
+        """Monitor an agent deployment"""
+        # TODO: Implement actual monitoring logic
+        return {
+            "deployment_status": {
+                "status": "running",
+                "message": f"Agent {agent_name} is healthy",
+                "deployment_id": "deploy_123"
+            },
+            "metrics": {
+                "cpu_usage": 0.3,
+                "memory_usage": 0.4,
+                "request_count": 50,
+                "error_rate": 0.005,
+                "latency": 0.12
+            }
+        }
+        
+    async def _undeploy_agent(
+        self,
+        agent_name: str
+    ) -> Dict[str, Any]:
+        """Undeploy an agent"""
+        # TODO: Implement actual undeployment logic
+        return {
+            "deployment_status": {
+                "status": "undeployed",
+                "message": f"Agent {agent_name} undeployed successfully",
+                "deployment_id": "deploy_123"
+            }
+        }
+        
+    async def _get_component_status(
+        self,
+        agent_name: str
+    ) -> List[Dict[str, Any]]:
+        """Get status of agent components"""
+        # TODO: Implement actual component status monitoring
+        return [
+            {
+                "component_id": "comp_1",
+                "status": "running",
+                "health": "healthy",
+                "metrics": {
+                    "cpu_usage": 0.1,
+                    "memory_usage": 0.2,
+                    "request_count": 25
+                }
+            }
+        ]

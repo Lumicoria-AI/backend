@@ -635,3 +635,71 @@ class CreativeAgent(BaseAgent):
             })
         
         return result
+
+    async def query_async(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Query the creative agent asynchronously.
+        
+        Args:
+            query: The query string for creative content generation
+            context: Optional context dictionary containing content parameters and preferences
+            
+        Returns:
+            Dictionary containing generated creative content
+        """
+        try:
+            # Ensure Perplexity client is initialized
+            if not self.perplexity_client:
+                self.initialize_models()
+                
+            if not self.perplexity_client:
+                return {"error": "Perplexity client not initialized"}
+            
+            # Get content parameters from context
+            content_type = context.get("content_type", "general") if context else "general"
+            topic = context.get("topic", "") if context else ""
+            guidelines = context.get("guidelines", []) if context else []
+            audience = context.get("audience", "general") if context else "general"
+            tone = context.get("tone", "neutral") if context else "neutral"
+            length = context.get("length", "medium") if context else "medium"
+            
+            # Create system and user prompts
+            system_prompt, user_prompt = self._create_async_prompts(
+                content_type, topic or query, guidelines, audience, tone, length
+            )
+            
+            # Format messages for Perplexity API
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+            
+            # Call Perplexity API
+            response = await self.perplexity_client.chat_completion(
+                messages=messages,
+                model=self.model_config.get("model"),
+                temperature=0.8  # Slightly higher temperature for creativity
+            )
+            
+            # Parse the content based on its type
+            parsed_content = self._parse_creative_content(response.content, content_type)
+            
+            # Create comprehensive response
+            result = {
+                "content": parsed_content,
+                "raw_content": response.content,
+                "processed_at": datetime.utcnow().isoformat(),
+                "model_used": self.model_config.get("model"),
+                "content_type": content_type,
+                "metadata": {
+                    "topic": topic or query,
+                    "audience": audience,
+                    "tone": tone,
+                    "length": length
+                }
+            }
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error querying creative agent: {str(e)}")
+            return {"error": f"Creative content generation failed: {str(e)}"}

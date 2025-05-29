@@ -1,13 +1,13 @@
 ai_models:
   perplexity:
-    api_key: YOUR_PERPLEXITY_API_KEY
+    api_key: pplx-uxk1yZxYX03pKtM1mVglOexNhvYHeM1q9xRFxxqDssY8490Ms
     model: "sonar-large-online"
 
 
 agents:
   document_agent:
     type: "document"
-    model: "perplexity"
+    model: "perplexity"  
   wellbeing_agent:
     type: "wellbeing"
     model: "perplexity"
@@ -22,7 +22,8 @@ agents:
     model: "perplexity"
   creative_agent:
     type: "creative"
-    model: "mistral"  student_agent:
+    model: "mistral"
+  student_agent:
     type: "student"
     model: "perplexity"
   rag:

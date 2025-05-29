@@ -16,14 +16,14 @@ from .processor_components import (
     PerplexityResearchComponent,
     ChainOfThoughtComponent,
     DataExtractionComponent,
-    SummarizationComponent,
-    TaskGeneratorComponent,
-    WellbeingCoachComponent,
     LiveEnvironmentAnalyzerComponent,
     TranslatorComponent,
     CitationManagerComponent
 )
 from .output_components import (
+    SummarizationComponent,
+    TaskGeneratorComponent,
+    WellbeingCoachComponent,
     CalendarIntegrationComponent,
     AgentDeploymentComponent
 )

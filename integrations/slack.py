@@ -1,4 +1,3 @@
-// Slack integration 
 
 from typing import Dict, Any, List, Optional
 import structlog

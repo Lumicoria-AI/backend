@@ -4,10 +4,10 @@ from pydantic import BaseModel
 from datetime import datetime
 from enum import Enum
 
-from api.deps import get_current_active_user
-from db.mongodb.repositories.task_repository import task_repository
-from models.user import User
-from models.task import Task, TaskCreate, TaskUpdate, TaskStatus, TaskPriority
+from backend.api.deps import get_current_active_user
+from backend.db.mongodb.repositories.task_repository import task_repository
+from backend.models.user import User
+from backend.models.task import Task, TaskCreate, TaskUpdate, TaskStatus, TaskPriority
 
 router = APIRouter()
 
@@ -106,24 +106,24 @@ async def update_task(
 async def delete_task(
     task_id: str,
     current_user: User = Depends(get_current_active_user)
-) -> Any:
+) -> None:
     """
     Delete a task.
     """
     existing_task = await task_repository.get_task_by_id(task_id, organization_id=current_user.organization_id)
     if not existing_task:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found or not authorized")
-
-    success = await task_repository.delete_task(
+    
+    deleted = await task_repository.delete_task(
         task_id=task_id,
         organization_id=current_user.organization_id
     )
-    if not success:
+    if not deleted:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, # Use 500 if delete failed after existence check
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to delete task"
         )
-    return # 204 No Content implies success
+    return None
 
 @router.get("/", response_model=List[TaskResponse])
 async def list_tasks(
@@ -164,7 +164,7 @@ async def list_upcoming_tasks(
 
 @router.get("/analytics", response_model=Dict[str, Any])
 async def get_task_analytics(
-    time_range: str = Query("7d", regex="^(1d|7d|30d|90d|1y)$"), # e.g., "7d", "30d", "1y"
+    time_range: str = Query("7d", pattern="^(1d|7d|30d|90d|1y)$"), # e.g., "7d", "30d", "1y"
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
     """

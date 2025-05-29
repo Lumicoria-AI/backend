@@ -217,6 +217,109 @@ class VisionAgent(BaseAgent):
             logger.error(f"Error in async image processing: {str(e)}")
             return {"error": f"Async image processing failed: {str(e)}"}
 
+    async def query_async(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Query the vision agent asynchronously.
+        
+        Args:
+            query: The query string about an image
+            context: Optional context dictionary containing image data and analysis parameters
+            
+        Returns:
+            Dictionary containing image analysis results
+        """
+        try:
+            if not context or not (context.get("image_content") or context.get("image_path") or context.get("image_url")):
+                return {"error": "No image data provided in context"}
+            
+            # Ensure Perplexity client is initialized
+            if not self.perplexity_client:
+                self.initialize_models()
+                
+            if not self.perplexity_client:
+                return {"error": "Perplexity client not initialized"}
+            
+            # Get image data from context
+            image_content = context.get("image_content")
+            image_path = context.get("image_path")
+            image_url = context.get("image_url")
+            
+            # Prepare image data
+            if image_content:
+                encoded_image = self._encode_image(image_content)
+            elif image_path:
+                with open(image_path, "rb") as image_file:
+                    encoded_image = self._encode_image(image_file.read())
+            elif image_url:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(image_url)
+                    response.raise_for_status()
+                    encoded_image = self._encode_image(response.content)
+            
+            # Create system prompt for image analysis
+            system_prompt = (
+                "You are an expert computer vision system. Analyze the provided image in detail and provide "
+                "a comprehensive analysis. Focus on identifying objects, text, people, scene context, and "
+                "any noteworthy elements. If you see text in the image, transcribe it accurately."
+            )
+            
+            # Prepare content with image
+            content = [
+                {
+                    "type": "text",
+                    "text": query
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{encoded_image}"
+                    }
+                }
+            ]
+            
+            # Format messages for Perplexity API
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": content}
+            ]
+            
+            # Use parameters from context or defaults
+            model_params = {
+                "temperature": context.get("temperature", 0.7),
+                "max_tokens": context.get("max_tokens", 1024),
+                "top_p": context.get("top_p", 0.9)
+            }
+            
+            # Call Perplexity API
+            response = await self.perplexity_client.chat_completion(
+                messages=messages,
+                **model_params
+            )
+            
+            # Extract structured information
+            structured_analysis = self._extract_structured_information(response.content)
+            
+            # Create comprehensive response
+            result = {
+                "description": response.content,
+                "structured_analysis": structured_analysis,
+                "processed_at": datetime.utcnow().isoformat(),
+                "model_used": self.model_config.get("model"),
+                "citations": [
+                    {
+                        "text": citation.text,
+                        "url": citation.metadata.url,
+                        "title": citation.metadata.title
+                    } 
+                    for citation in response.citations
+                ] if hasattr(response, "citations") else []
+            }
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Error querying vision agent: {str(e)}")
+            return {"error": f"Image analysis failed: {str(e)}"}
+
     def _encode_image(self, image_data: bytes) -> str:
         """Encode image data to base64.
         

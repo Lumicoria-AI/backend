@@ -1,9 +1,9 @@
 from typing import Optional, List, Dict, Any, Union
-from motor.motor_asyncio import ASCENDING, DESCENDING
+from pymongo import ASCENDING, DESCENDING
 from bson import ObjectId
 from datetime import datetime, timedelta
 from ..base_repository import BaseRepository
-from ...models.mongodb_models import (
+from backend.models.mongodb_models import (
     WellbeingData,
     WellbeingCreate,
     WellbeingMetric,
