@@ -29,7 +29,14 @@ async def get_current_user(
     """Get current user from token."""
     try:
         token_data = await verify_token(credentials)
-        user = await user_repository.get_user_by_firebase_uid(token_data["uid"])
+        
+        # Handle both Firebase and JWT tokens
+        user = None
+        if token_data.get("provider") == "firebase" and token_data.get("uid"):
+            user = await user_repository.get_user_by_firebase_uid(token_data["uid"])
+        elif token_data.get("provider") == "jwt" and token_data.get("uid"):
+            user = await user_repository.get_user_by_id(token_data["uid"])
+            
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -39,7 +46,7 @@ async def get_current_user(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting current user: {str(e)}")
+        logger.error(f"Error getting current user: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
@@ -74,7 +81,14 @@ async def get_current_user_id(
     """Get current user ID from token."""
     try:
         token_data = await verify_token(credentials)
-        user = await user_repository.get_user_by_firebase_uid(token_data["uid"])
+        
+        # Handle both Firebase and JWT tokens
+        user = None
+        if token_data.get("provider") == "firebase" and token_data.get("uid"):
+            user = await user_repository.get_user_by_firebase_uid(token_data["uid"])
+        elif token_data.get("provider") == "jwt" and token_data.get("uid"):
+            user = await user_repository.get_user_by_id(token_data["uid"])
+            
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -84,9 +98,9 @@ async def get_current_user_id(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error getting current user ID: {str(e)}")
+        logger.error(f"Error getting current user ID: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
-        ) 
+        )

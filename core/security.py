@@ -43,11 +43,21 @@ def create_access_token(
     return encoded_jwt
 
 async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+    if not credentials or not credentials.credentials:
+        logger.error("No credentials provided")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No credentials provided",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    token = credentials.credentials
+    
     try:
         # First try to verify as Firebase token
         try:
-            token = credentials.credentials
             decoded_token = auth.verify_id_token(token)
+            logger.info("Firebase token verified successfully")
             return {
                 "uid": decoded_token["uid"],
                 "email": decoded_token.get("email"),
@@ -58,7 +68,8 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
             
             # Fallback to JWT verification
             try:
-                payload = jwt.decode(credentials.credentials, settings.SECRET_KEY, algorithms=["HS256"])
+                payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
+                logger.info("JWT token verified successfully")
                 return {
                     "uid": payload["sub"],
                     "provider": "jwt"
@@ -70,6 +81,8 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
                     detail="Could not validate credentials",
                     headers={"WWW-Authenticate": "Bearer"},
                 )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Token verification failed", error=str(e))
         raise HTTPException(
@@ -114,4 +127,4 @@ def rate_limit(limit: int = settings.RATE_LIMIT_PER_MINUTE):
             
             return await func(request, *args, **kwargs)
         return wrapper
-    return decorator 
+    return decorator

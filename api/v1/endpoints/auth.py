@@ -99,7 +99,11 @@ async def login(
                 "full_name": user.full_name,
                 "is_active": user.is_active,
                 "created_at": str(user.created_at),
-                "updated_at": str(user.updated_at) if user.updated_at else None
+                "updated_at": str(user.updated_at) if user.updated_at else None,
+                "onboarding_completed": getattr(user, "onboarding_completed", False),
+                "job_title": getattr(user, "job_title", None),
+                "company": getattr(user, "company", None),
+                "avatar_url": getattr(user, "avatar_url", None)
             }
         }
     except Exception as e:
@@ -109,7 +113,7 @@ async def login(
             detail="Login failed"
         )
 
-@router.post("/signup", response_model=Token)
+@router.post("/signup", response_model=TokenResponse)
 async def signup(
     user_in: UserCreate,
     user_repository: UserRepository = Depends(get_user_repository)
@@ -117,34 +121,62 @@ async def signup(
     """
     Create new user.
     """
-    user = await user_repository.get_user_by_email(user_in.email)
-    if user:
-        raise HTTPException(
-            status_code=400,
-            detail="The user with this email already exists in the system.",
+    try:
+        # Check if user already exists
+        user = await user_repository.get_user_by_email(user_in.email)
+        if user:
+            raise HTTPException(
+                status_code=400,
+                detail="The user with this email already exists in the system.",
+            )
+        
+        # Hash the password
+        hashed_password = get_password_hash(user_in.password)
+          # Create new user with hashed password
+        user_data = UserCreate(
+            email=user_in.email,
+            full_name=user_in.full_name,
+            password=user_in.password,
+            hashed_password=hashed_password,  # Add the hashed password
+            onboarding_completed=False  # Explicitly set onboarding to incomplete for new users
         )
-    
-    # Hash the password
-    hashed_password = get_password_hash(user_in.password)
-    
-    # Create new user with hashed password
-    user_data = UserCreate(
-        email=user_in.email,
-        full_name=user_in.full_name,
-        password=user_in.password,
-        hashed_password=hashed_password  # Add the hashed password
-    )
-    
-    user = await user_repository.create_user(user_data)
-    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        str(user.id), expires_delta=access_token_expires
-    )
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "user": user
-    }
+        
+        user = await user_repository.create_user(user_data)
+        
+        # Generate tokens
+        access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(str(user.id), expires_delta=access_token_expires)
+        refresh_token = secrets.token_urlsafe(32)
+        
+        # Store refresh token
+        await user_repository.update_user(str(user.id), {"refresh_token": refresh_token})
+        
+        # Return standardized response
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "user": {
+                "id": str(user.id),
+                "email": user.email,
+                "full_name": user.full_name,
+                "is_active": user.is_active,
+                "created_at": str(user.created_at),
+                "updated_at": str(user.updated_at) if user.updated_at else None,
+                "onboarding_completed": False,  # New users always start with onboarding incomplete
+                "job_title": None,
+                "company": None,
+                "avatar_url": None
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Signup failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Signup failed"
+        )
 
 @router.post("/register", response_model=TokenResponse)
 @rate_limit()
@@ -194,33 +226,65 @@ async def register(
 @router.post("/refresh", response_model=TokenResponse)
 @rate_limit()
 async def refresh_token(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    request: Request,
     user_repository: UserRepository = Depends(get_user_repository)
 ) -> Any:
     try:
-        # Verify the Firebase ID token
-        token_data = await verify_token(credentials) # Assuming verify_token verifies Firebase ID tokens
-        
-        # Fetch user from database using firebase_uid
-        user = await user_repository.get_user_by_firebase_uid(token_data["uid"])
-        if not user:
+        # Try to parse the request body
+        try:
+            body = await request.json()
+            refresh_token = body.get("refresh_token")
+        except:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
+                status_code=400,
+                detail="Invalid request format"
             )
+            
+        if not refresh_token:
+            raise HTTPException(
+                status_code=400,
+                detail="Refresh token is required"
+            )
+            
+        # Find user with this refresh token
+        users_collection = user_repository.collection
+        user_data = await users_collection.find_one({"refresh_token": refresh_token})
         
-        custom_token = auth.create_custom_token(token_data["uid"])
+        if not user_data:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid refresh token"
+            )
+            
+        user = UserInDB(**user_data)
+        
+        # Generate new tokens
+        access_token = create_access_token(str(user.id))
+        new_refresh_token = secrets.token_urlsafe(32)
+        
+        # Update refresh token in database
+        await user_repository.update_user(str(user.id), {"refresh_token": new_refresh_token})
         
         return {
-            "access_token": custom_token.decode(),
+            "access_token": access_token,
+            "refresh_token": new_refresh_token,
             "token_type": "bearer",
-            "user": user # Return the full user object
+            "user": {
+                "id": str(user.id),
+                "email": user.email,
+                "full_name": user.full_name,
+                "is_active": user.is_active,
+                "created_at": str(user.created_at),
+                "updated_at": str(user.updated_at) if user.updated_at else None
+            }
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Token refresh failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token"
+            detail="Token refresh failed"
         )
 
 @router.post("/google", response_model=TokenResponse)
@@ -250,31 +314,40 @@ async def google_sign_in(
                 email=email,
                 display_name=name,
                 email_verified=True  # Since it's verified by Google
-            )
-
-        # Check if user exists in your database using the Firebase UID
+            )        # Check if user exists in your database using the Firebase UID
         user = await user_repository.get_user_by_firebase_uid(firebase_user.uid)
         if not user:
             # Create new user in your database using the UserCreateOAuth model
             user_data = UserCreateOAuth(
                 email=email,
                 full_name=name,
-                firebase_uid=firebase_user.uid
+                firebase_uid=firebase_user.uid,
+                onboarding_completed=False  # Explicitly set onboarding to incomplete for new users
             )
             user = await user_repository.create_user_oauth(user_data)
         
-        # Instead of creating a custom token, we'll reuse the original ID token
-        # since it's already verified and contains the correct claims
+        # Generate refresh token
+        refresh_token = secrets.token_urlsafe(32)
+        
+        # Store refresh token
+        await user_repository.update_user(str(user.id), {"refresh_token": refresh_token})
         return {
             "access_token": google_data.id_token,  # Use the original ID token
+            "refresh_token": refresh_token,
             "token_type": "bearer",
-            "user": {
-                "id": str(user.id),
+            "user": {                "id": str(user.id),
                 "email": user.email,
                 "full_name": user.full_name,
                 "is_active": user.is_active,
-                "created_at": user.created_at,
-                "updated_at": user.updated_at
+                "created_at": str(user.created_at),
+                "updated_at": str(user.updated_at) if user.updated_at else None,
+                "onboarding_completed": getattr(user, "onboarding_completed", False),
+                "job_title": getattr(user, "job_title", None),
+                "company": getattr(user, "company", None),
+                "avatar_url": getattr(user, "avatar_url", None),
+                "onboarding_completed": getattr(user, "onboarding_completed", False),
+                "job_title": getattr(user, "job_title", None),
+                "company": getattr(user, "company", None)
             }
         }
     except ValueError as e:
@@ -299,17 +372,27 @@ async def get_current_user(
     user_repository: UserRepository = Depends(get_user_repository)
 ) -> Any:
     try:
-        # Verify the Firebase ID token
-        token_data = await verify_token(credentials) # Assuming verify_token verifies Firebase ID tokens
+        # Verify the token (either Firebase ID token or JWT)
+        token_data = await verify_token(credentials)
         
-        # Fetch user from database using firebase_uid
-        user = await user_repository.get_user_by_firebase_uid(token_data["uid"])
+        # Fetch user based on token provider
+        user = None
+        if token_data.get("provider") == "firebase" and token_data.get("uid"):
+            # For Firebase auth
+            user = await user_repository.get_user_by_firebase_uid(token_data["uid"])
+        elif token_data.get("provider") == "jwt" and token_data.get("uid"):
+            # For JWT auth
+            user = await user_repository.get_user_by_id(token_data["uid"])
+            
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="User not found"
             )
+        
         return user
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Get current user failed", error=str(e))
         raise HTTPException(
@@ -324,13 +407,25 @@ async def logout(
     user_repository: UserRepository = Depends(get_user_repository)
 ) -> Any:
     try:
-        # In Firebase, revoking the server-side token isn't usually necessary for simple logout
-        # The client discards the tokens.
-        # If using refresh tokens, you might invalidate them here if needed.
+        # Verify token to get user info
+        token_data = await verify_token(credentials)
+        
+        # Determine which user to logout based on token provider
+        user = None
+        if token_data.get("provider") == "firebase" and token_data.get("uid"):
+            user = await user_repository.get_user_by_firebase_uid(token_data["uid"])
+        elif token_data.get("provider") == "jwt" and token_data.get("uid"):
+            user = await user_repository.get_user_by_id(token_data["uid"])
+        
+        if user:
+            # Invalidate refresh token by setting it to None
+            await user_repository.update_user(str(user.id), {"refresh_token": None})
+            
         return {"message": "Successfully logged out"}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Logout failed", error=str(e))
-        
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token"

@@ -1,8 +1,8 @@
-from typing import Optional, List, Dict, Any, Type, TypeVar
+from typing import Optional, List, Dict, Any, Type, TypeVar, Union
 from pymongo import ASCENDING
 from backend.db.mongodb.base_repository import BaseRepository
-from backend.models.user import UserCreateOAuth
-from backend.db.mongodb.models.user import UserInDB, UserCreate, UserUpdate, UserProfile, UserSettings
+from backend.models.user import UserCreateOAuth, UserProfile, UserSettings
+from backend.db.mongodb.models.user import UserInDB, UserCreate, UserUpdate
 import structlog
 from datetime import datetime
 from bson import ObjectId
@@ -93,10 +93,13 @@ class UserRepository(BaseRepository[UserInDB]):
         user_dict = await self.collection.find_one({"firebase_uid": firebase_uid})
         if user_dict:
             return UserInDB(**user_dict)
-        return None
-
-    async def update_user(self, user_id: str, user_update: UserUpdate) -> Optional[UserInDB]:
-        update_data = user_update.model_dump(exclude_unset=True)
+        return None    
+    async def update_user(self, user_id: str, user_update: Union[UserUpdate, dict]) -> Optional[UserInDB]:
+        if isinstance(user_update, dict):
+            update_data = user_update
+        else:
+            update_data = user_update.model_dump(exclude_unset=True)
+            
         if update_data:
             update_data["updated_at"] = datetime.utcnow()
             result = await self.collection.find_one_and_update(

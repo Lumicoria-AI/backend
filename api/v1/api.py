@@ -25,7 +25,8 @@ from backend.api.v1.endpoints import (
     rag,
     lumicoria_chat,
     agent_studio,
-    workflow_execution
+    workflow_execution,
+    onboarding
 )
 
 api_router = APIRouter()
@@ -93,6 +94,20 @@ api_router.include_router(
     vision.router,
     prefix="/vision",
     tags=["vision"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Onboarding endpoints
+api_router.include_router(
+    onboarding.router,
+    prefix="/onboarding",
+    tags=["onboarding"],
     responses={
         200: {"description": "Success"},
         400: {"description": "Bad Request"},
