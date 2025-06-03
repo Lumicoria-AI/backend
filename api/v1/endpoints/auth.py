@@ -7,6 +7,7 @@ from backend.core.security import verify_token, rate_limit, create_access_token,
 from backend.db.mongodb.repositories.user_repository import UserRepository, get_user_repository
 from backend.models.user import UserCreate, Token, UserInDB, TokenResponse, GoogleSignInRequest, UserResponse, UserCreateOAuth
 from pydantic import BaseModel, EmailStr, Field
+from backend.core.config import settings  
 import structlog
 from datetime import datetime, timedelta
 from fastapi.security import HTTPAuthorizationCredentials
@@ -24,33 +25,89 @@ security = HTTPBearer()
 # Your Google OAuth Client ID (Web application type)
 GOOGLE_CLIENT_ID = "757874659613-lafmptc8bpjkktnlrn6eanh3v4778m62.apps.googleusercontent.com"
 
-@router.post("/login", response_model=Token)
+class LoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+@router.post("/login", response_model=TokenResponse)
 async def login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
-    user_repository: UserRepository = Depends(get_user_repository)
+    request: Request,
+    user_repo: UserRepository = Depends(get_user_repository),
+    form_data: Optional[OAuth2PasswordRequestForm] = Depends(None)
 ) -> Any:
     """
-    OAuth2 compatible token login, get an access token for future requests
+    Login endpoint that accepts both form data and JSON.
     """
-    user = await user_repository.get_user_by_email(form_data.username)
-    if not user or not verify_password(form_data.password, user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    if not user.is_active:
-        raise HTTPException(status_code=400, detail="Inactive user")
+    try:
+        content_type = request.headers.get("content-type", "").lower()
+        
+        if "application/json" in content_type:
+            try:
+                body = await request.json()
+                email = body.get("email")
+                password = body.get("password")
+            except:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid JSON format"
+                )
+        elif form_data:
+            email = form_data.username  # OAuth2 form uses 'username' for email
+            password = form_data.password
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Unsupported content type. Use application/json or application/x-www-form-urlencoded"
+            )
+            
+        if not email or not password:
+            raise HTTPException(
+                status_code=400,
+                detail="Email and password are required"
+            )
 
-    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        str(user.id), expires_delta=access_token_expires
-    )
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-        "user": user
-    }
+        # Get user from database
+        user = await user_repo.get_by_email(email)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or password"
+            )
+
+        # Verify password
+        if not verify_password(password, user.hashed_password):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or password"
+            )
+
+        # Generate tokens
+        access_token = create_access_token(user.id)
+        refresh_token = secrets.token_urlsafe(32)
+        
+        # Store refresh token
+        await user_repo.update_user(user.id, {"refresh_token": refresh_token})
+        
+        # Return response that matches frontend's AuthResponse type
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "user": {
+                "id": str(user.id),
+                "email": user.email,
+                "full_name": user.full_name,
+                "is_active": user.is_active,
+                "created_at": str(user.created_at),
+                "updated_at": str(user.updated_at) if user.updated_at else None
+            }
+        }
+    except Exception as e:
+        logger.error("Login failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Login failed"
+        )
 
 @router.post("/signup", response_model=Token)
 async def signup(
@@ -67,7 +124,18 @@ async def signup(
             detail="The user with this email already exists in the system.",
         )
     
-    user = await user_repository.create_user(user_in)
+    # Hash the password
+    hashed_password = get_password_hash(user_in.password)
+    
+    # Create new user with hashed password
+    user_data = UserCreate(
+        email=user_in.email,
+        full_name=user_in.full_name,
+        password=user_in.password,
+        hashed_password=hashed_password  # Add the hashed password
+    )
+    
+    user = await user_repository.create_user(user_data)
     access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
         str(user.id), expires_delta=access_token_expires
@@ -98,8 +166,7 @@ async def register(
         db_user = await user_repository.create_user(user_data)
         
         # Get Firebase custom token
-        custom_token = auth.create_custom_token(firebase_user.uid)
-        
+        custom_token = auth.create_custom_token(firebase_user.uid)            
         return {
             "access_token": custom_token.decode(),
             "token_type": "bearer",
@@ -107,7 +174,9 @@ async def register(
                 "id": str(db_user.id),
                 "email": db_user.email,
                 "full_name": db_user.full_name,
-                "is_active": db_user.is_active
+                "is_active": db_user.is_active,
+                "created_at": db_user.created_at,
+                "updated_at": db_user.updated_at
             }
         }
     except auth.EmailAlreadyExistsError:
@@ -163,7 +232,6 @@ async def google_sign_in(
 ) -> Any:
     try:
         # Verify the Google ID token using google-auth library
-        # Use the specific Google OAuth Client ID for verification
         idinfo = id_token.verify_oauth2_token(
             google_data.id_token, requests.Request(), GOOGLE_CLIENT_ID)
 
@@ -172,30 +240,41 @@ async def google_sign_in(
         email = idinfo.get('email')
         name = idinfo.get('name')
 
-        # Check if user exists in your database using the Google user ID as firebase_uid
-        user = await user_repository.get_user_by_firebase_uid(google_user_id)
+        try:
+            # Try to get existing Firebase user
+            firebase_user = auth.get_user_by_email(email)
+        except auth.UserNotFoundError:
+            # Create new Firebase user if not found
+            firebase_user = auth.create_user(
+                uid=google_user_id,  # Use Google ID as Firebase UID
+                email=email,
+                display_name=name,
+                email_verified=True  # Since it's verified by Google
+            )
+
+        # Check if user exists in your database using the Firebase UID
+        user = await user_repository.get_user_by_firebase_uid(firebase_user.uid)
         if not user:
             # Create new user in your database using the UserCreateOAuth model
             user_data = UserCreateOAuth(
                 email=email,
                 full_name=name,
-                firebase_uid=google_user_id  # Use Google user ID as firebase_uid
+                firebase_uid=firebase_user.uid
             )
-            # Use the new create_user_oauth method
             user = await user_repository.create_user_oauth(user_data)
         
-        # Create a Firebase Custom Token for this user
-        # The uid for the custom token should be the same ID used to identify the user in Firebase
-        firebase_custom_token = auth.create_custom_token(google_user_id)
-        
+        # Instead of creating a custom token, we'll reuse the original ID token
+        # since it's already verified and contains the correct claims
         return {
-            "access_token": firebase_custom_token.decode(), # Frontend will use this to sign in with Firebase
+            "access_token": google_data.id_token,  # Use the original ID token
             "token_type": "bearer",
             "user": {
                 "id": str(user.id),
                 "email": user.email,
                 "full_name": user.full_name,
-                "is_active": user.is_active
+                "is_active": user.is_active,
+                "created_at": user.created_at,
+                "updated_at": user.updated_at
             }
         }
     except ValueError as e:
@@ -215,6 +294,7 @@ async def google_sign_in(
 @router.get("/me", response_model=UserResponse)
 @rate_limit()
 async def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(security),
     user_repository: UserRepository = Depends(get_user_repository)
 ) -> Any:
@@ -250,9 +330,10 @@ async def logout(
         return {"message": "Successfully logged out"}
     except Exception as e:
         logger.error("Logout failed", error=str(e))
+        
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token"
         )
 
-print(secrets.token_urlsafe(32)) 
+print(secrets.token_urlsafe(32))

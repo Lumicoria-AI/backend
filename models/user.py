@@ -15,10 +15,16 @@ class UserBase(BaseModel):
     timezone: str = "UTC"
     preferred_language: str = "en"
 
+    model_config = ConfigDict(
+        populate_by_name=True,
+        alias_generator=lambda x: "fullName" if x == "full_name" else x
+    )
+
 class UserCreate(UserBase):
     """Model for creating a new user with password."""
     password: str
     firebase_uid: Optional[str] = None
+    hashed_password: Optional[str] = None  # Allow setting hashed_password
 
 class UserCreateOAuth(UserBase):
     """Model for creating a new user from OAuth (e.g., Google)."""
