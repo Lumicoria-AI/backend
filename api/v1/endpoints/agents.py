@@ -430,7 +430,7 @@ async def create_custom_agent_prompt(
     # Check if user has permission to customize agents
     has_permission = await permission_repository.check_permission(
         user_id=current_user.id,
-            organization_id=current_user.organization_id,
+        organization_id=current_user.organization_id,
         resource_type="AGENT",
         resource_id="*",
         permission_type="CREATE"
@@ -552,13 +552,12 @@ The prompt should be detailed, specific, and tailored to the user's needs as a {
             messages=messages,
             model=model
         )
-        
+
         return {
             "generated_prompt": response.content,
             "agent_type": prompt_request.agent_type,
             "model_used": model
         }
-        
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

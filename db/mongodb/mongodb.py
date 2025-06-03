@@ -33,8 +33,11 @@ class MongoDB:
 
     @classmethod
     async def get_database(cls) -> AsyncIOMotorDatabase:
-        if not cls.db:
+        if cls.db is None:
             await cls.connect()
+        # Ensure cls.db is not None after connect call
+        if cls.db is None:
+             raise ConnectionError("Failed to connect to MongoDB database")
         return cls.db
 
     @classmethod
@@ -43,8 +46,8 @@ class MongoDB:
         return db[collection_name]
 
 
-async def get_mongodb() -> MongoDB:
-    return MongoDB()
+async def get_mongodb() -> AsyncIOMotorDatabase:
+    return await MongoDB.get_database()
 
 # Add wrapper functions for FastAPI startup/shutdown events
 async def init_mongodb() -> None:

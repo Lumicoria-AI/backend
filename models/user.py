@@ -16,9 +16,13 @@ class UserBase(BaseModel):
     preferred_language: str = "en"
 
 class UserCreate(UserBase):
-    """Model for creating a new user."""
+    """Model for creating a new user with password."""
     password: str
     firebase_uid: Optional[str] = None
+
+class UserCreateOAuth(UserBase):
+    """Model for creating a new user from OAuth (e.g., Google)."""
+    firebase_uid: str # firebase_uid is required for OAuth users
 
 class UserUpdate(BaseModel):
     """Model for updating an existing user."""

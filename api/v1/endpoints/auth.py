@@ -4,8 +4,8 @@ from typing import Any, Optional
 import firebase_admin
 from firebase_admin import auth
 from backend.core.security import verify_token, rate_limit, create_access_token, get_password_hash, verify_password
-from backend.db.mongodb.repositories.user_repository import user_repository
-from backend.models.user import UserCreate, Token, UserInDB, TokenResponse, GoogleSignInRequest, UserResponse
+from backend.db.mongodb.repositories.user_repository import UserRepository, get_user_repository
+from backend.models.user import UserCreate, Token, UserInDB, TokenResponse, GoogleSignInRequest, UserResponse, UserCreateOAuth
 from pydantic import BaseModel, EmailStr, Field
 import structlog
 from datetime import datetime, timedelta
@@ -13,13 +13,21 @@ from fastapi.security import HTTPAuthorizationCredentials
 import secrets
 import uuid
 
+# Import Google Auth libraries
+from google.oauth2 import id_token
+from google.auth.transport import requests
+
 logger = structlog.get_logger()
 router = APIRouter()
 security = HTTPBearer()
 
+# Your Google OAuth Client ID (Web application type)
+GOOGLE_CLIENT_ID = "757874659613-lafmptc8bpjkktnlrn6eanh3v4778m62.apps.googleusercontent.com"
+
 @router.post("/login", response_model=Token)
 async def login(
-    form_data: OAuth2PasswordRequestForm = Depends()
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    user_repository: UserRepository = Depends(get_user_repository)
 ) -> Any:
     """
     OAuth2 compatible token login, get an access token for future requests
@@ -47,6 +55,7 @@ async def login(
 @router.post("/signup", response_model=Token)
 async def signup(
     user_in: UserCreate,
+    user_repository: UserRepository = Depends(get_user_repository)
 ) -> Any:
     """
     Create new user.
@@ -74,6 +83,7 @@ async def signup(
 async def register(
     request: Request,
     user_data: UserCreate,
+    user_repository: UserRepository = Depends(get_user_repository)
 ) -> Any:
     try:
         # Create user in Firebase
@@ -116,15 +126,26 @@ async def register(
 @rate_limit()
 async def refresh_token(
     credentials: HTTPAuthorizationCredentials = Depends(security),
+    user_repository: UserRepository = Depends(get_user_repository)
 ) -> Any:
     try:
-        token_data = await verify_token(credentials)
+        # Verify the Firebase ID token
+        token_data = await verify_token(credentials) # Assuming verify_token verifies Firebase ID tokens
+        
+        # Fetch user from database using firebase_uid
+        user = await user_repository.get_user_by_firebase_uid(token_data["uid"])
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
         custom_token = auth.create_custom_token(token_data["uid"])
         
         return {
             "access_token": custom_token.decode(),
             "token_type": "bearer",
-            "user": token_data
+            "user": user # Return the full user object
         }
     except Exception as e:
         logger.error("Token refresh failed", error=str(e))
@@ -138,32 +159,37 @@ async def refresh_token(
 async def google_sign_in(
     request: Request,
     google_data: GoogleSignInRequest,
+    user_repository: UserRepository = Depends(get_user_repository)
 ) -> Any:
     try:
-        # Verify the Google ID token
-        decoded_token = auth.verify_id_token(google_data.id_token)
-        
-        # Extract user information
-        google_id = decoded_token.get("sub")
-        email = decoded_token.get("email")
-        name = decoded_token.get("name")
-        
-        # Check if user exists
-        user = await user_repository.get_user_by_firebase_uid(google_id)
+        # Verify the Google ID token using google-auth library
+        # Use the specific Google OAuth Client ID for verification
+        idinfo = id_token.verify_oauth2_token(
+            google_data.id_token, requests.Request(), GOOGLE_CLIENT_ID)
+
+        # Extract user information from the verified token
+        google_user_id = idinfo['sub']
+        email = idinfo.get('email')
+        name = idinfo.get('name')
+
+        # Check if user exists in your database using the Google user ID as firebase_uid
+        user = await user_repository.get_user_by_firebase_uid(google_user_id)
         if not user:
-            # Create new user
-            user_data = UserCreate(
+            # Create new user in your database using the UserCreateOAuth model
+            user_data = UserCreateOAuth(
                 email=email,
                 full_name=name,
-                firebase_uid=google_id
+                firebase_uid=google_user_id  # Use Google user ID as firebase_uid
             )
-            user = await user_repository.create_user(user_data)
+            # Use the new create_user_oauth method
+            user = await user_repository.create_user_oauth(user_data)
         
-        # Create custom token
-        custom_token = auth.create_custom_token(google_id)
+        # Create a Firebase Custom Token for this user
+        # The uid for the custom token should be the same ID used to identify the user in Firebase
+        firebase_custom_token = auth.create_custom_token(google_user_id)
         
         return {
-            "access_token": custom_token.decode(),
+            "access_token": firebase_custom_token.decode(), # Frontend will use this to sign in with Firebase
             "token_type": "bearer",
             "user": {
                 "id": str(user.id),
@@ -172,20 +198,31 @@ async def google_sign_in(
                 "is_active": user.is_active
             }
         }
+    except ValueError as e:
+        # Invalid token
+        logger.error("Google ID token verification failed", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Google ID token"
+        )
     except Exception as e:
         logger.error("Google sign-in failed", error=str(e))
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Google token"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Google sign-in failed"
         )
 
 @router.get("/me", response_model=UserResponse)
 @rate_limit()
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
+    user_repository: UserRepository = Depends(get_user_repository)
 ) -> Any:
     try:
-        token_data = await verify_token(credentials)
+        # Verify the Firebase ID token
+        token_data = await verify_token(credentials) # Assuming verify_token verifies Firebase ID tokens
+        
+        # Fetch user from database using firebase_uid
         user = await user_repository.get_user_by_firebase_uid(token_data["uid"])
         if not user:
             raise HTTPException(
@@ -203,11 +240,13 @@ async def get_current_user(
 @router.post("/logout")
 @rate_limit()
 async def logout(
-    credentials: HTTPAuthorizationCredentials = Depends(security)
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    user_repository: UserRepository = Depends(get_user_repository)
 ) -> Any:
     try:
-        # In Firebase, we don't need to do anything special for logout
-        # The client should just delete the token
+        # In Firebase, revoking the server-side token isn't usually necessary for simple logout
+        # The client discards the tokens.
+        # If using refresh tokens, you might invalidate them here if needed.
         return {"message": "Successfully logged out"}
     except Exception as e:
         logger.error("Logout failed", error=str(e))

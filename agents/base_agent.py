@@ -12,9 +12,15 @@ logger = structlog.get_logger(__name__)
 class BaseAgent(ABC):
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        # Access the global AI models config from the main app settings if available
-        # Otherwise, expect agent_model_config to be passed in the agent's config
-        self.model_config = config.get("agent_model_config", {}) or self._get_global_model_config(config.get("model"))
+        # Prioritize the agent_model_config passed from AgentService
+        if "agent_model_config" in config:
+            self.model_config = config["agent_model_config"]
+        elif config.get("model"):
+             # Fallback to global model config if model name is provided
+            self.model_config = self._get_global_model_config(config["model"])
+        else:
+            self.model_config = {}
+
         self.perplexity_client: Optional[PerplexityClient] = None
         self.initialize_models()
 

@@ -1,41 +1,78 @@
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Type, TypeVar
 from pymongo import ASCENDING
 from backend.db.mongodb.base_repository import BaseRepository
+from backend.models.user import UserCreateOAuth
 from backend.db.mongodb.models.user import UserInDB, UserCreate, UserUpdate, UserProfile, UserSettings
 import structlog
 from datetime import datetime
 from bson import ObjectId
-from motor.motor_asyncio import AsyncIOMotorDatabase
-from backend.db.mongodb.mongodb import get_mongodb
+from motor.motor_asyncio import AsyncIOMotorDatabase, AsyncIOMotorCollection
+from backend.models.mongodb_models import MongoBaseModel
+from ..mongodb import MongoDB
+from pymongo import UpdateOne
 
 logger = structlog.get_logger()
 
-class UserRepository(BaseRepository[UserInDB]):
-    def __init__(self, db: AsyncIOMotorDatabase):
-        super().__init__("users", UserInDB)
-        self.db = db
-        self.profile_collection = db.user_profiles
-        self.settings_collection = db.user_settings
+T = TypeVar('T', bound=MongoBaseModel)
 
-    @classmethod
-    async def create(cls) -> 'UserRepository':
-        db = await get_mongodb()
-        return cls(db)
+class UserRepository(BaseRepository[UserInDB]):
+    def __init__(
+        self,
+        collection: AsyncIOMotorCollection,
+        model_class: Type[UserInDB],
+        profile_collection: AsyncIOMotorCollection,
+        settings_collection: AsyncIOMotorCollection
+    ):
+        super().__init__(collection, model_class)
+        self.profile_collection = profile_collection
+        self.settings_collection = settings_collection
 
     async def _create_indexes(self):
-        collection = await self.collection
-        await collection.create_index("email", unique=True)
-        await collection.create_index("created_at")
-        await collection.create_index("organization_ids")
-        await collection.create_index("role_ids")
-        await collection.create_index([("full_name", ASCENDING), ("email", ASCENDING)])
+        await super()._create_indexes()
+        await self.collection.create_index("email", unique=True)
+        await self.collection.create_index("created_at")
+        await self.collection.create_index("organization_ids")
+        await self.collection.create_index("role_ids")
+        await self.collection.create_index([("full_name", ASCENDING), ("email", ASCENDING)])
+        
+        await self.profile_collection.create_index("user_id", unique=True)
+        await self.settings_collection.create_index("user_id", unique=True)
 
     async def create_user(self, user: UserCreate) -> UserInDB:
+        """Create a new user with a password."""
+        # Access collection directly
         user_dict = user.model_dump(exclude={"password"})
         user_dict["created_at"] = datetime.utcnow()
+        # The hashed_password is required by UserInDB
+        user_dict["hashed_password"] = user.hashed_password # Ensure hashed_password is set from UserCreate
+        # Ensure firebase_uid is set even if None initially
+        user_dict["firebase_uid"] = user_dict.get("firebase_uid") # Explicitly get or set None
+        
+        # Use self.collection explicitly
         result = await self.collection.insert_one(user_dict)
-        user_dict["_id"] = result.inserted_id
-        return UserInDB(**user_dict)
+        # Use self.collection explicitly for find_one
+        created_doc = await self.collection.find_one({"_id": result.inserted_id})
+        if created_doc:
+             return self.model_class(**created_doc)
+        # Handle case where insert_one succeeds but find_one fails immediately after
+        raise Exception("Failed to retrieve user after creation")
+
+    async def create_user_oauth(self, user: UserCreateOAuth) -> UserInDB:
+        """Create a new user from OAuth provider (no password)."""
+        user_dict = user.model_dump()
+        user_dict["created_at"] = datetime.utcnow()
+        # Store a placeholder for hashed_password for OAuth users
+        user_dict["hashed_password"] = "OAUTH_USER"
+        # firebase_uid is required for UserCreateOAuth and will be in user_dict
+        
+        # Use self.collection explicitly
+        result = await self.collection.insert_one(user_dict)
+        # Use self.collection explicitly for find_one
+        created_doc = await self.collection.find_one({"_id": result.inserted_id})
+        if created_doc:
+             return self.model_class(**created_doc)
+        # Handle case where insert_one succeeds but find_one fails immediately after
+        raise Exception("Failed to retrieve OAuth user after creation")
 
     async def get_user_by_email(self, email: str) -> Optional[UserInDB]:
         user_dict = await self.collection.find_one({"email": email})
@@ -77,7 +114,10 @@ class UserRepository(BaseRepository[UserInDB]):
         profile_dict["created_at"] = datetime.utcnow()
         result = await self.profile_collection.insert_one(profile_dict)
         profile_dict["_id"] = result.inserted_id
-        return UserProfile(**profile_dict)
+        created_profile_dict = await self.profile_collection.find_one({"_id": result.inserted_id})
+        if created_profile_dict:
+             return UserProfile(**created_profile_dict)
+        raise Exception("Failed to retrieve user profile after creation")
 
     async def get_user_profile(self, user_id: str) -> Optional[UserProfile]:
         profile_dict = await self.profile_collection.find_one({"user_id": ObjectId(user_id)})
@@ -91,7 +131,10 @@ class UserRepository(BaseRepository[UserInDB]):
         settings_dict["created_at"] = datetime.utcnow()
         result = await self.settings_collection.insert_one(settings_dict)
         settings_dict["_id"] = result.inserted_id
-        return UserSettings(**settings_dict)
+        created_settings_dict = await self.settings_collection.find_one({"_id": result.inserted_id})
+        if created_settings_dict:
+            return UserSettings(**created_settings_dict)
+        raise Exception("Failed to retrieve user settings after creation")
 
     async def get_user_settings(self, user_id: str) -> Optional[UserSettings]:
         settings_dict = await self.settings_collection.find_one({"user_id": ObjectId(user_id)})
@@ -181,11 +224,22 @@ class UserRepository(BaseRepository[UserInDB]):
             sort=[("created_at", ASCENDING)]
         )
 
-# Create a singleton instance
+# Create a singleton instance (remains None initially, managed by dependency)
 user_repository: Optional[UserRepository] = None
 
 async def get_user_repository() -> UserRepository:
     global user_repository
     if user_repository is None:
-        user_repository = await UserRepository.create()
+        user_collection = await MongoDB.get_collection("users")
+        user_profile_collection = await MongoDB.get_collection("user_profiles")
+        user_settings_collection = await MongoDB.get_collection("user_settings")
+        user_repository = UserRepository(
+            user_collection,
+            UserInDB,
+            user_profile_collection,
+            user_settings_collection
+        )
+
+        await user_repository._create_indexes()
+
     return user_repository 
