@@ -10,6 +10,10 @@ from motor.motor_asyncio import AsyncIOMotorDatabase, AsyncIOMotorCollection
 from backend.models.mongodb_models import MongoBaseModel
 from ..mongodb import MongoDB
 from pymongo import UpdateOne
+from fastapi import UploadFile
+import os
+import uuid
+from backend.core.config import settings
 
 logger = structlog.get_logger()
 
@@ -217,8 +221,7 @@ class UserRepository(BaseRepository[UserInDB]):
             skip=skip,
             limit=limit,
             sort=[("created_at", ASCENDING)]
-        )
-
+        )    
     async def get_superusers(self, skip: int = 0, limit: int = 100) -> List[UserInDB]:
         return await self.find_many(
             {"is_superuser": True},
@@ -226,6 +229,43 @@ class UserRepository(BaseRepository[UserInDB]):
             limit=limit,
             sort=[("created_at", ASCENDING)]
         )
+        
+    async def upload_avatar(self, user_id: str, file: UploadFile) -> str:
+        """Upload user avatar and return the URL.
+        
+        Args:
+            user_id: The ID of the user
+            file: The uploaded file
+            
+        Returns:
+            The URL of the uploaded avatar
+        """
+        # Create uploads directory if it doesn't exist 
+        upload_dir = os.path.join(settings.UPLOAD_DIR, "avatars")
+        os.makedirs(upload_dir, exist_ok=True)
+        
+        # Generate unique filename
+        file_ext = os.path.splitext(file.filename)[1]
+        unique_filename = f"{user_id}_{uuid.uuid4()}{file_ext}"
+        file_path = os.path.join(upload_dir, unique_filename)
+        
+        # Save file
+        contents = await file.read()
+        with open(file_path, "wb") as f:
+            f.write(contents)
+        
+        # Generate URL for the avatar - This path will be served by the static files middleware
+        # Ensure the URL starts with / to make it relative to the server root
+        avatar_url = f"/uploads/avatars/{unique_filename}"
+        
+        logger.info("Avatar uploaded", 
+                   user_id=user_id, 
+                   file_path=file_path, 
+                   url=avatar_url, 
+                   file_size=len(contents),
+                   content_type=file.content_type)
+                   
+        return avatar_url
 
 # Create a singleton instance (remains None initially, managed by dependency)
 user_repository: Optional[UserRepository] = None
@@ -233,16 +273,23 @@ user_repository: Optional[UserRepository] = None
 async def get_user_repository() -> UserRepository:
     global user_repository
     if user_repository is None:
-        user_collection = await MongoDB.get_collection("users")
-        user_profile_collection = await MongoDB.get_collection("user_profiles")
-        user_settings_collection = await MongoDB.get_collection("user_settings")
-        user_repository = UserRepository(
-            user_collection,
-            UserInDB,
-            user_profile_collection,
-            user_settings_collection
-        )
+        try:
+            logger.info("Initializing user repository")
+            user_collection = await MongoDB.get_collection("users")
+            user_profile_collection = await MongoDB.get_collection("user_profiles")
+            user_settings_collection = await MongoDB.get_collection("user_settings")
+            user_repository = UserRepository(
+                user_collection,
+                UserInDB,
+                user_profile_collection,
+                user_settings_collection
+            )
 
-        await user_repository._create_indexes()
+            await user_repository._create_indexes()
+            logger.info("User repository initialized successfully")
+        except Exception as e:
+            logger.error("Failed to initialize user repository", error=str(e), exc_info=True)
+            # Re-raise the exception to prevent silent failures
+            raise
 
-    return user_repository 
+    return user_repository

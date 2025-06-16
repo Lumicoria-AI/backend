@@ -125,8 +125,11 @@ app.add_middleware(
     max_age=3600,
 )
 
-# Mount static files for user uploads
-app.mount("/uploads", StaticFiles(directory=str(Path(settings.UPLOAD_DIR))), name="uploads")
+# Mount static files for user uploads with proper content types
+app.mount("/uploads", StaticFiles(
+    directory=str(Path(settings.UPLOAD_DIR)),
+    html=False,  # Do not serve HTML files for security
+), name="uploads")
 
 # Request logging middleware
 @app.middleware("http")

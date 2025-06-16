@@ -37,6 +37,7 @@ class OnboardingCompleteRequest(BaseModel):
 @router.post("/profile")
 @rate_limit()
 async def update_onboarding_profile(
+    request: Request,
     profile_data: OnboardingProfileRequest,
     user_repository: UserRepository = Depends(get_user_repository),
     current_user_id: str = Depends(get_current_user_id)
@@ -83,6 +84,7 @@ async def update_onboarding_profile(
 @router.post("/preferences")
 @rate_limit()
 async def update_onboarding_preferences(
+    request: Request,
     preferences_data: OnboardingPreferencesRequest,
     user_repository: UserRepository = Depends(get_user_repository),
     current_user_id: str = Depends(get_current_user_id)
@@ -126,6 +128,7 @@ async def update_onboarding_preferences(
 @router.post("/complete")
 @rate_limit()
 async def complete_onboarding(
+    request: Request,
     onboarding_data: OnboardingCompleteRequest,
     user_repository: UserRepository = Depends(get_user_repository),
     current_user_id: str = Depends(get_current_user_id)
@@ -180,12 +183,16 @@ async def complete_onboarding(
 @router.post("/avatar")
 @rate_limit()
 async def upload_avatar(
+    request: Request,
     file: UploadFile = File(...),
     user_repository: UserRepository = Depends(get_user_repository),
     current_user_id: str = Depends(get_current_user_id)
 ) -> Any:
-    """Upload user avatar image."""
+    """Upload user avatar image."""    
     try:
+        # Log the beginning of avatar upload
+        logger.info("Starting avatar upload process", user_id=current_user_id, file_name=file.filename)
+        
         # Check file type
         if not file.content_type.startswith('image/'):
             raise HTTPException(
@@ -193,43 +200,51 @@ async def upload_avatar(
                 detail="File must be an image"
             )
             
-        # Create uploads directory if it doesn't exist
-        upload_dir = os.path.join("uploads", "avatars")
-        os.makedirs(upload_dir, exist_ok=True)
-        
-        # Generate unique filename
-        file_ext = os.path.splitext(file.filename)[1]
-        unique_filename = f"{current_user_id}_{uuid.uuid4()}{file_ext}"
-        file_path = os.path.join(upload_dir, unique_filename)
-        
-        # Save file
-        with open(file_path, "wb") as f:
-            f.write(await file.read())
-        
-        # Generate URL for the avatar
-        avatar_url = f"/uploads/avatars/{unique_filename}"
-        
-        # Update user with avatar URL
-        updated_user = await user_repository.update_user(
-            current_user_id, 
-            {"avatar_url": avatar_url}
-        )
-        
-        if not updated_user:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="User not found"
+        # Use the dedicated upload_avatar method from user_repository
+        try:
+            # This handles all the file saving logic internally
+            avatar_url = await user_repository.upload_avatar(current_user_id, file)
+            
+            # Update user with avatar URL
+            updated_user = await user_repository.update_user(
+                current_user_id, 
+                {"avatar_url": avatar_url}
             )
+            
+            if not updated_user:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="User not found"
+                )
+            
+            logger.info("Avatar upload completed successfully", 
+                      user_id=current_user_id, 
+                      avatar_url=avatar_url)
+                      
+            return {
+                "message": "Avatar uploaded successfully",
+                "avatar_url": avatar_url
+            }
+        except Exception as e:
+            logger.error("Error during avatar upload processing", 
+                       error=str(e), 
+                       user_id=current_user_id,
+                       exc_info=True)
+            raise
         
-        return {
-            "message": "Avatar uploaded successfully",
-            "avatar_url": avatar_url
-        }
-    except HTTPException:
+    except HTTPException as http_ex:
+        logger.error("HTTP exception in avatar upload", 
+                  status_code=http_ex.status_code, 
+                  detail=http_ex.detail)
         raise
     except Exception as e:
-        logger.error("Failed to upload avatar", error=str(e), exc_info=True)
+        logger.error("Failed to upload avatar", 
+                  error=str(e), 
+                  error_type=type(e).__name__, 
+                  user_id=current_user_id,
+                  exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to upload avatar"
+            detail="Failed to upload avatar: " + str(e)
         )
+

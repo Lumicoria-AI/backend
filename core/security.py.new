@@ -157,7 +157,8 @@ async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(secur
                                     return {
                                         "uid": uid,
                                         "email": unverified_payload.get("email"),
-                                        "provider": "custom_token"                                    }
+                                        "provider": "custom_token"
+                                    }
                             except:
                                 pass
                         raise e

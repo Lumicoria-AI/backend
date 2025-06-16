@@ -6,8 +6,8 @@ from firebase_admin import auth
 from backend.core.security import verify_token, rate_limit, create_access_token, get_password_hash, verify_password
 from backend.db.mongodb.repositories.user_repository import UserRepository, get_user_repository
 from backend.models.user import UserCreate, Token, UserInDB, TokenResponse, GoogleSignInRequest, UserResponse, UserCreateOAuth
+from backend.core.config import settings
 from pydantic import BaseModel, EmailStr, Field
-from backend.core.config import settings  
 import structlog
 from datetime import datetime, timedelta
 from fastapi.security import HTTPAuthorizationCredentials
@@ -25,93 +25,66 @@ security = HTTPBearer()
 # Your Google OAuth Client ID (Web application type)
 GOOGLE_CLIENT_ID = "757874659613-lafmptc8bpjkktnlrn6eanh3v4778m62.apps.googleusercontent.com"
 
-class LoginRequest(BaseModel):
-    email: EmailStr
-    password: str
-
 @router.post("/login", response_model=TokenResponse)
 async def login(
-    request: Request,
-    user_repo: UserRepository = Depends(get_user_repository),
-    form_data: Optional[OAuth2PasswordRequestForm] = Depends(None)
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    user_repository: UserRepository = Depends(get_user_repository)
 ) -> Any:
     """
-    Login endpoint that accepts both form data and JSON.
+    OAuth2 compatible token login, get an access token for future requests
     """
-    try:
-        content_type = request.headers.get("content-type", "").lower()
-        
-        if "application/json" in content_type:
-            try:
-                body = await request.json()
-                email = body.get("email")
-                password = body.get("password")
-            except:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Invalid JSON format"
-                )
-        elif form_data:
-            email = form_data.username  # OAuth2 form uses 'username' for email
-            password = form_data.password
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail="Unsupported content type. Use application/json or application/x-www-form-urlencoded"
-            )
-            
-        if not email or not password:
-            raise HTTPException(
-                status_code=400,
-                detail="Email and password are required"
-            )
-
-        # Get user from database
-        user = await user_repo.get_by_email(email)
-        if not user:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid email or password"
-            )
-
-        # Verify password
-        if not verify_password(password, user.hashed_password):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid email or password"
-            )
-
-        # Generate tokens
-        access_token = create_access_token(user.id)
-        refresh_token = secrets.token_urlsafe(32)
-        
-        # Store refresh token
-        await user_repo.update_user(user.id, {"refresh_token": refresh_token})
-        
-        # Return response that matches frontend's AuthResponse type
-        return {
-            "access_token": access_token,
-            "refresh_token": refresh_token,
-            "token_type": "bearer",
-            "user": {
-                "id": str(user.id),
-                "email": user.email,
-                "full_name": user.full_name,
-                "is_active": user.is_active,
-                "created_at": str(user.created_at),
-                "updated_at": str(user.updated_at) if user.updated_at else None,
-                "onboarding_completed": getattr(user, "onboarding_completed", False),
-                "job_title": getattr(user, "job_title", None),
-                "company": getattr(user, "company", None),
-                "avatar_url": getattr(user, "avatar_url", None)
-            }
-        }
-    except Exception as e:
-        logger.error("Login failed", error=str(e))
+    user = await user_repository.get_user_by_email(form_data.username)
+    if not user or not verify_password(form_data.password, user.hashed_password):
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Login failed"
-        )
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect email or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )    
+    if not user.is_active:
+        raise HTTPException(status_code=400, detail="Inactive user")
+
+    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+      # Include essential user info in the token for faster authentication
+    user_info = {
+        "email": user.email,
+        "full_name": user.full_name,
+        "firebase_uid": getattr(user, "firebase_uid", None),
+        "is_active": user.is_active,
+        # Include any other essential fields that don't change frequently
+        "onboarding_completed": getattr(user, "onboarding_completed", False)
+    }
+    
+    access_token = create_access_token(
+        str(user.id), expires_delta=access_token_expires, user_data=user_info
+    )
+    
+    # Generate or reuse refresh token
+    refresh_token = getattr(user, "refresh_token", None)
+    if not refresh_token:
+        refresh_token = secrets.token_urlsafe(32)
+        # Update user with refresh token
+        await user_repository.update_user(str(user.id), {"refresh_token": refresh_token})
+        # Refresh user data
+        user = await user_repository.get_user_by_id(str(user.id))
+    
+    # Get created_at time
+    created_at = getattr(user, "created_at", datetime.utcnow())
+    
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "user": {
+            "id": str(user.id),
+            "email": user.email,
+            "full_name": user.full_name,
+            "is_active": user.is_active,
+            "avatar_url": getattr(user, "avatar_url", None),
+            "onboarding_completed": getattr(user, "onboarding_completed", False),
+            "created_at": created_at,
+            "updated_at": getattr(user, "updated_at", None)
+        }
+    }
 
 @router.post("/signup", response_model=TokenResponse)
 async def signup(
@@ -121,62 +94,43 @@ async def signup(
     """
     Create new user.
     """
-    try:
-        # Check if user already exists
-        user = await user_repository.get_user_by_email(user_in.email)
-        if user:
-            raise HTTPException(
-                status_code=400,
-                detail="The user with this email already exists in the system.",
-            )
-        
-        # Hash the password
-        hashed_password = get_password_hash(user_in.password)
-          # Create new user with hashed password
-        user_data = UserCreate(
-            email=user_in.email,
-            full_name=user_in.full_name,
-            password=user_in.password,
-            hashed_password=hashed_password,  # Add the hashed password
-            onboarding_completed=False  # Explicitly set onboarding to incomplete for new users
-        )
-        
-        user = await user_repository.create_user(user_data)
-        
-        # Generate tokens
-        access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = create_access_token(str(user.id), expires_delta=access_token_expires)
-        refresh_token = secrets.token_urlsafe(32)
-        
-        # Store refresh token
-        await user_repository.update_user(str(user.id), {"refresh_token": refresh_token})
-        
-        # Return standardized response
-        return {
-            "access_token": access_token,
-            "refresh_token": refresh_token,
-            "token_type": "bearer",
-            "user": {
-                "id": str(user.id),
-                "email": user.email,
-                "full_name": user.full_name,
-                "is_active": user.is_active,
-                "created_at": str(user.created_at),
-                "updated_at": str(user.updated_at) if user.updated_at else None,
-                "onboarding_completed": False,  # New users always start with onboarding incomplete
-                "job_title": None,
-                "company": None,
-                "avatar_url": None
-            }
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("Signup failed", error=str(e))
+    user = await user_repository.get_user_by_email(user_in.email)
+    if user:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Signup failed"
+            status_code=400,
+            detail="The user with this email already exists in the system.",
         )
+    
+    user = await user_repository.create_user(user_in)
+    access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        str(user.id), expires_delta=access_token_expires
+    )
+    
+    # Create a refresh token
+    refresh_token = secrets.token_urlsafe(32)
+    
+    # Update the user's refresh token in the database
+    await user_repository.update_user(str(user.id), {"refresh_token": refresh_token})
+    
+    # Get created_at time
+    created_at = getattr(user, "created_at", datetime.utcnow())
+    
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "bearer",
+        "user": {
+            "id": str(user.id),
+            "email": user.email,
+            "full_name": user.full_name,
+            "is_active": user.is_active,
+            "avatar_url": getattr(user, "avatar_url", None),
+            "onboarding_completed": getattr(user, "onboarding_completed", False),
+            "created_at": created_at,
+            "updated_at": getattr(user, "updated_at", None)
+        }
+    }
 
 @router.post("/register", response_model=TokenResponse)
 @rate_limit()
@@ -198,17 +152,30 @@ async def register(
         db_user = await user_repository.create_user(user_data)
         
         # Get Firebase custom token
-        custom_token = auth.create_custom_token(firebase_user.uid)            
+        custom_token = auth.create_custom_token(firebase_user.uid)
+        
+        # Create a refresh token (this is required by the TokenResponse model)
+        refresh_token = secrets.token_urlsafe(32)
+        
+        # Update the user's refresh token in the database
+        await user_repository.update_user(str(db_user.id), {"refresh_token": refresh_token})
+        
+        # Get created_at time
+        created_at = getattr(db_user, "created_at", datetime.utcnow())
+        
         return {
             "access_token": custom_token.decode(),
+            "refresh_token": refresh_token,
             "token_type": "bearer",
             "user": {
                 "id": str(db_user.id),
                 "email": db_user.email,
                 "full_name": db_user.full_name,
                 "is_active": db_user.is_active,
-                "created_at": db_user.created_at,
-                "updated_at": db_user.updated_at
+                "avatar_url": getattr(db_user, "avatar_url", None),
+                "onboarding_completed": getattr(db_user, "onboarding_completed", False),
+                "created_at": created_at,
+                "updated_at": getattr(db_user, "updated_at", None)
             }
         }
     except auth.EmailAlreadyExistsError:
@@ -226,65 +193,76 @@ async def register(
 @router.post("/refresh", response_model=TokenResponse)
 @rate_limit()
 async def refresh_token(
-    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
     user_repository: UserRepository = Depends(get_user_repository)
 ) -> Any:
     try:
-        # Try to parse the request body
-        try:
-            body = await request.json()
-            refresh_token = body.get("refresh_token")
-        except:
+        # Verify the token (could be Firebase ID token or our JWT)
+        token_data = await verify_token(credentials)
+        logger.info("Token verified for refresh", token_keys=list(token_data.keys()))
+        
+        # Check if we have a user_id directly (JWT) or need to use the uid (Firebase)
+        user = None
+        if "user_id" in token_data:
+            logger.info("Using user_id to refresh token", user_id=token_data["user_id"])
+            user = await user_repository.get_user_by_id(token_data["user_id"])
+        elif "uid" in token_data:
+            logger.info("Using uid to refresh token", uid=token_data["uid"])
+            user = await user_repository.get_user_by_firebase_uid(token_data["uid"])
+        
+        if not user:
+            logger.error("User not found during token refresh", token_data=token_data)
             raise HTTPException(
-                status_code=400,
-                detail="Invalid request format"
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
             )
-            
+          # Create our own JWT token instead of Firebase custom token
+        access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        
+        # Include essential user info in the token
+        user_info = {
+            "email": user.email,
+            "full_name": user.full_name,
+            "firebase_uid": user.firebase_uid,
+            "is_active": user.is_active
+        }
+        
+        access_token = create_access_token(
+            str(user.id), expires_delta=access_token_expires, user_data=user_info
+        )
+        
+        # Generate a new refresh token or reuse existing one
+        refresh_token = getattr(user, "refresh_token", None)
         if not refresh_token:
-            raise HTTPException(
-                status_code=400,
-                detail="Refresh token is required"
-            )
-            
-        # Find user with this refresh token
-        users_collection = user_repository.collection
-        user_data = await users_collection.find_one({"refresh_token": refresh_token})
+            refresh_token = secrets.token_urlsafe(32)
+            # Update user with new refresh token
+            await user_repository.update_user(str(user.id), {"refresh_token": refresh_token})
+            # Refresh user data
+            user = await user_repository.get_user_by_id(str(user.id))
         
-        if not user_data:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid refresh token"
-            )
-            
-        user = UserInDB(**user_data)
-        
-        # Generate new tokens
-        access_token = create_access_token(str(user.id))
-        new_refresh_token = secrets.token_urlsafe(32)
-        
-        # Update refresh token in database
-        await user_repository.update_user(str(user.id), {"refresh_token": new_refresh_token})
+        # Get created_at time
+        created_at = getattr(user, "created_at", datetime.utcnow())
         
         return {
             "access_token": access_token,
-            "refresh_token": new_refresh_token,
+            "refresh_token": refresh_token,
             "token_type": "bearer",
             "user": {
                 "id": str(user.id),
                 "email": user.email,
                 "full_name": user.full_name,
                 "is_active": user.is_active,
-                "created_at": str(user.created_at),
-                "updated_at": str(user.updated_at) if user.updated_at else None
+                "avatar_url": getattr(user, "avatar_url", None),
+                "onboarding_completed": getattr(user, "onboarding_completed", False),
+                "created_at": created_at,
+                "updated_at": getattr(user, "updated_at", None)
             }
         }
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error("Token refresh failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token refresh failed"
+            detail="Invalid token"
         )
 
 @router.post("/google", response_model=TokenResponse)
@@ -293,61 +271,80 @@ async def google_sign_in(
     request: Request,
     google_data: GoogleSignInRequest,
     user_repository: UserRepository = Depends(get_user_repository)
-) -> Any:
+) -> TokenResponse:
     try:
         # Verify the Google ID token using google-auth library
+        # Use the specific Google OAuth Client ID for verification
         idinfo = id_token.verify_oauth2_token(
-            google_data.id_token, requests.Request(), GOOGLE_CLIENT_ID)
-
-        # Extract user information from the verified token
+            google_data.id_token, requests.Request(), GOOGLE_CLIENT_ID)        # Extract user information from the verified token
         google_user_id = idinfo['sub']
         email = idinfo.get('email')
         name = idinfo.get('name')
+        picture = idinfo.get('picture')  # Get profile picture URL from Google token
+        
+        logger.info("Google sign-in information", 
+                   user_id=google_user_id, 
+                   email=email, 
+                   has_picture=bool(picture))
 
-        try:
-            # Try to get existing Firebase user
-            firebase_user = auth.get_user_by_email(email)
-        except auth.UserNotFoundError:
-            # Create new Firebase user if not found
-            firebase_user = auth.create_user(
-                uid=google_user_id,  # Use Google ID as Firebase UID
-                email=email,
-                display_name=name,
-                email_verified=True  # Since it's verified by Google
-            )        # Check if user exists in your database using the Firebase UID
-        user = await user_repository.get_user_by_firebase_uid(firebase_user.uid)
+        # Check if user exists in your database using the Google user ID as firebase_uid
+        user = await user_repository.get_user_by_firebase_uid(google_user_id)
         if not user:
             # Create new user in your database using the UserCreateOAuth model
             user_data = UserCreateOAuth(
                 email=email,
                 full_name=name,
-                firebase_uid=firebase_user.uid,
-                onboarding_completed=False  # Explicitly set onboarding to incomplete for new users
+                firebase_uid=google_user_id,  # Use Google user ID as firebase_uid
+                avatar_url=picture,  # Use Google profile picture if available
+                onboarding_completed=False
             )
+            # Use the new create_user_oauth method
             user = await user_repository.create_user_oauth(user_data)
+        elif picture and not getattr(user, "avatar_url", None):
+            # Update existing user with Google profile picture if they don't have an avatar
+            logger.info("Updating user avatar from Google", 
+                       user_id=str(user.id), 
+                       google_picture_url=picture)
+            await user_repository.update_user(str(user.id), {"avatar_url": picture})
+            # Refresh user data after update
+            user = await user_repository.get_user_by_id(str(user.id))        # Create a JWT token for our backend authentication using our own secret key
+        # This is more reliable than using Firebase custom tokens for our backend
+        access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
         
-        # Generate refresh token
+        # Include essential user info in the token
+        user_info = {
+            "email": user.email,
+            "full_name": user.full_name,
+            "firebase_uid": user.firebase_uid,
+            "is_active": user.is_active
+        }
+        
+        access_token = create_access_token(
+            str(user.id), expires_delta=access_token_expires, user_data=user_info
+        )
+        
+        # Create a refresh token (this is required by the TokenResponse model)
         refresh_token = secrets.token_urlsafe(32)
         
-        # Store refresh token
+        # Update the user's refresh token in the database
         await user_repository.update_user(str(user.id), {"refresh_token": refresh_token})
+        
+        # Get the necessary fields for UserResponse
+        created_at = getattr(user, "created_at", datetime.utcnow())
+        
         return {
-            "access_token": google_data.id_token,  # Use the original ID token
-            "refresh_token": refresh_token,
+            "access_token": access_token, # Using our own JWT token instead of Firebase custom token
+            "refresh_token": refresh_token,  # Add refresh token
             "token_type": "bearer",
-            "user": {                "id": str(user.id),
+            "user": {
+                "id": str(user.id),
                 "email": user.email,
                 "full_name": user.full_name,
                 "is_active": user.is_active,
-                "created_at": str(user.created_at),
-                "updated_at": str(user.updated_at) if user.updated_at else None,
-                "onboarding_completed": getattr(user, "onboarding_completed", False),
-                "job_title": getattr(user, "job_title", None),
-                "company": getattr(user, "company", None),
                 "avatar_url": getattr(user, "avatar_url", None),
                 "onboarding_completed": getattr(user, "onboarding_completed", False),
-                "job_title": getattr(user, "job_title", None),
-                "company": getattr(user, "company", None)
+                "created_at": created_at,  # Add created_at field
+                "updated_at": getattr(user, "updated_at", None)  # Add updated_at field
             }
         }
     except ValueError as e:
@@ -372,17 +369,15 @@ async def get_current_user(
     user_repository: UserRepository = Depends(get_user_repository)
 ) -> Any:
     try:
-        # Verify the token (either Firebase ID token or JWT)
+        # Verify the token (handles both JWT and Firebase tokens)
         token_data = await verify_token(credentials)
         
-        # Fetch user based on token provider
-        user = None
-        if token_data.get("provider") == "firebase" and token_data.get("uid"):
-            # For Firebase auth
+        # Check if we have a user_id directly (JWT) or need to use the uid (Firebase)
+        if "user_id" in token_data:
+            user = await user_repository.get_user_by_id(token_data["user_id"])
+        else:
+            # Fallback to Firebase uid
             user = await user_repository.get_user_by_firebase_uid(token_data["uid"])
-        elif token_data.get("provider") == "jwt" and token_data.get("uid"):
-            # For JWT auth
-            user = await user_repository.get_user_by_id(token_data["uid"])
             
         if not user:
             raise HTTPException(
@@ -390,9 +385,19 @@ async def get_current_user(
                 detail="User not found"
             )
         
-        return user
-    except HTTPException:
-        raise
+        # Ensure the response has all required fields
+        return {
+            "id": str(user.id),
+            "email": user.email,
+            "full_name": user.full_name,
+            "is_active": user.is_active,
+            "avatar_url": getattr(user, "avatar_url", None),
+            "created_at": getattr(user, "created_at", datetime.utcnow()),
+            "updated_at": getattr(user, "updated_at", None),
+            "onboarding_completed": getattr(user, "onboarding_completed", False),
+            "job_title": getattr(user, "job_title", None),
+            "company": getattr(user, "company", None)
+        }
     except Exception as e:
         logger.error("Get current user failed", error=str(e))
         raise HTTPException(
@@ -403,27 +408,22 @@ async def get_current_user(
 @router.post("/logout")
 @rate_limit()
 async def logout(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(security),
     user_repository: UserRepository = Depends(get_user_repository)
 ) -> Any:
     try:
-        # Verify token to get user info
+        # Verify the token to get the user
         token_data = await verify_token(credentials)
         
-        # Determine which user to logout based on token provider
-        user = None
-        if token_data.get("provider") == "firebase" and token_data.get("uid"):
-            user = await user_repository.get_user_by_firebase_uid(token_data["uid"])
-        elif token_data.get("provider") == "jwt" and token_data.get("uid"):
-            user = await user_repository.get_user_by_id(token_data["uid"])
-        
-        if user:
-            # Invalidate refresh token by setting it to None
-            await user_repository.update_user(str(user.id), {"refresh_token": None})
+        # For JWT tokens with user_id, we can invalidate the refresh token
+        if "user_id" in token_data:
+            user_id = token_data["user_id"]
+            # Clear the refresh token
+            await user_repository.update_user(user_id, {"refresh_token": None})
             
+        # For both JWT and Firebase, we let the client discard the tokens
         return {"message": "Successfully logged out"}
-    except HTTPException:
-        raise
     except Exception as e:
         logger.error("Logout failed", error=str(e))
         raise HTTPException(
@@ -431,4 +431,4 @@ async def logout(
             detail="Invalid token"
         )
 
-print(secrets.token_urlsafe(32))
+print(secrets.token_urlsafe(32)) 
