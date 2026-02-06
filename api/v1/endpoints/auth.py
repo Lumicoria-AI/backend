@@ -22,8 +22,8 @@ logger = structlog.get_logger()
 router = APIRouter()
 security = HTTPBearer()
 
-# Your Google OAuth Client ID (Web application type)
-GOOGLE_CLIENT_ID = "757874659613-lafmptc8bpjkktnlrn6eanh3v4778m62.apps.googleusercontent.com"
+# Google OAuth Client ID loaded from centralized settings (no hardcoded value)
+GOOGLE_CLIENT_ID = settings.GOOGLE_OAUTH_CLIENT_ID
 
 @router.post("/login", response_model=TokenResponse)
 async def login(
@@ -361,6 +361,33 @@ async def google_sign_in(
             detail="Google sign-in failed"
         )
 
+async def handle_onboarding_status_update(user, request, user_repository):
+    """Helper function to update onboarding status in DB if needed.
+    Returns information about what was updated.
+    """
+    result = {
+        "updated": False,
+        "previous_status": getattr(user, "onboarding_completed", False),
+    }
+    
+    # Check if we need to force update the onboarding status
+    if (request.headers.get("X-Onboarding-Completed") == "true" and 
+        not getattr(user, "onboarding_completed", False)):
+        try:
+            logger.info(f"Updating onboarding status in DB for user {str(user.id)}")
+            # Update the user record in the database
+            await user_repository.update_user(
+                str(user.id),
+                {"onboarding_completed": True, "onboarding_completed_at": datetime.utcnow()}
+            )
+            result["updated"] = True
+            logger.info(f"Successfully updated onboarding status to True for user {str(user.id)}")
+        except Exception as e:
+            logger.error(f"Failed to update onboarding status: {str(e)}")
+            result["error"] = str(e)
+    
+    return result
+
 @router.get("/me", response_model=UserResponse)
 @rate_limit()
 async def get_current_user(
@@ -384,20 +411,37 @@ async def get_current_user(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="User not found"
             )
-        
+          # Log the user data for debugging
+        logger.info("Retrieved current user", 
+                  user_id=str(user.id), 
+                  onboarding_completed=getattr(user, "onboarding_completed", False))
+                  
         # Ensure the response has all required fields
-        return {
+        response_data = {
             "id": str(user.id),
             "email": user.email,
             "full_name": user.full_name,
             "is_active": user.is_active,
             "avatar_url": getattr(user, "avatar_url", None),
             "created_at": getattr(user, "created_at", datetime.utcnow()),
-            "updated_at": getattr(user, "updated_at", None),
-            "onboarding_completed": getattr(user, "onboarding_completed", False),
-            "job_title": getattr(user, "job_title", None),
-            "company": getattr(user, "company", None)
+            "updated_at": getattr(user, "updated_at", None),        # Always include onboarding status - special handling
+        # Some database records might not have this field, so explicitly check for its existence
+        # If the user is coming from onboarding completion, we force this to be True
+        "onboarding_completed": True if request.headers.get("X-Onboarding-Completed") == "true" 
+                              else getattr(user, "onboarding_completed", False),
+                              
+        # If X-Onboarding-Completed header is set, also update the user record in DB to ensure consistency
+        # This handles cases where the frontend thinks onboarding is completed but backend doesn't
+        "onboarding_info": await handle_onboarding_status_update(user, request, user_repository),
+        "job_title": getattr(user, "job_title", None),
+        "company": getattr(user, "company", None)
         }
+        
+        logger.info("Returning user response", 
+                   user_id=str(user.id), 
+                   onboarding_completed=response_data["onboarding_completed"])
+        
+        return response_data
     except Exception as e:
         logger.error("Get current user failed", error=str(e))
         raise HTTPException(
@@ -431,4 +475,4 @@ async def logout(
             detail="Invalid token"
         )
 
-print(secrets.token_urlsafe(32)) 
+# print(secrets.token_urlsafe(32))  # Removed — do not leak secrets in stdout

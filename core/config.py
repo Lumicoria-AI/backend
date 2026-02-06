@@ -1,3 +1,14 @@
+"""
+Lumicoria AI — Centralized Configuration Module
+
+ALL configuration flows through this module. No other module should read
+os.environ directly. Settings are validated at import time — if a required
+variable is missing, the application refuses to start.
+
+Environment variables are loaded from .env (via pydantic-settings) and can
+be overridden by actual environment variables in production.
+"""
+
 from typing import List, Optional, Dict, Any, Union
 from pydantic_settings import BaseSettings
 from pydantic import AnyHttpUrl, validator, Field, HttpUrl, ConfigDict
@@ -5,10 +16,15 @@ import secrets
 from functools import lru_cache
 from pathlib import Path
 import os
+import sys
 
+
+# ---------------------------------------------------------------------------
+# Database Settings (nested)
+# ---------------------------------------------------------------------------
 
 class DatabaseSettings(BaseSettings):
-    model_config = ConfigDict(extra='allow', case_sensitive=True)
+    model_config = ConfigDict(extra="allow", case_sensitive=True)
 
     # MongoDB Settings
     MONGODB_URI: str = "mongodb://localhost:27017"
@@ -25,57 +41,128 @@ class DatabaseSettings(BaseSettings):
 
     # Vector Store Settings
     VECTOR_STORE_TYPE: str = "weaviate"  # weaviate, qdrant, or chroma
-    VECTOR_STORE_URL: Optional[str] = "http://localhost:8080"
+    VECTOR_STORE_URL: Optional[str] = "http://localhost:8081"
     VECTOR_STORE_API_KEY: Optional[str] = None
     VECTOR_STORE_COLLECTION: str = "documents"
     VECTOR_STORE_DIMENSION: int = 1536  # Default for OpenAI embeddings
+    VECTOR_STORE_ENABLED: bool = True
 
+    # Cassandra Settings (optional)
+    CASSANDRA_ENABLED: bool = False
+    CASSANDRA_HOSTS: List[str] = Field(default_factory=lambda: ["localhost"])
+    CASSANDRA_PORT: int = 9042
+    CASSANDRA_KEYSPACE: str = "lumicoria"
+    CASSANDRA_REPLICATION_FACTOR: int = 1
+    CASSANDRA_USERNAME: Optional[str] = None
+    CASSANDRA_PASSWORD: Optional[str] = None
+    CASSANDRA_CONNECT_TIMEOUT: int = 5
+
+
+# ---------------------------------------------------------------------------
+# Rate Limiting Settings
+# ---------------------------------------------------------------------------
+
+class RateLimitSettings(BaseSettings):
+    """Per-tier rate-limiting thresholds (requests per window)."""
+    model_config = ConfigDict(extra="allow", case_sensitive=True)
+
+    # Global defaults
+    ENABLED: bool = True
+    WINDOW_SECONDS: int = 60
+
+    # Endpoint-specific limits (per IP per window)
+    DEFAULT_LIMIT: int = 60
+    AUTH_LIMIT: int = 10         # login / signup / refresh
+    AI_AGENT_LIMIT: int = 20    # agent chat / execution
+    UPLOAD_LIMIT: int = 10       # file uploads
+    BURST_LIMIT: int = 5         # max burst within 5 seconds
+
+
+# ---------------------------------------------------------------------------
+# Main Application Settings
+# ---------------------------------------------------------------------------
 
 class Settings(BaseSettings):
-    """Application settings."""
-    
-    # API Settings
+    """Application settings — validated at startup."""
+
+    model_config = ConfigDict(
+        extra="allow",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+    )
+
+    # ── API ─────────────────────────────────────────────────────────────
     API_V1_STR: str = "/api/v1"
     PROJECT_NAME: str = "Lumicoria AI"
-    VERSION: str = "0.1.0"
+    VERSION: str = "1.0.0"
     DESCRIPTION: str = "AI-powered platform for personalized learning and productivity"
-    
-    # Security
-    SECRET_KEY: str = "your-secret-key-here"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
+
+    # ── Security (REQUIRED — no safe defaults) ──────────────────────────
+    SECRET_KEY: str = Field(
+        ...,
+        description=(
+            "JWT signing key. MUST be set via env var. "
+            "Generate: python -c \"import secrets; print(secrets.token_hex(32))\""
+        ),
+    )
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30       # 30 min (was 7 days)
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     ALGORITHM: str = "HS256"
-    
-    # Database
-    MONGODB_URL: str = "mongodb://localhost:27017"
-    MONGODB_DB_NAME: str = "lumicoria"
-    
-    # OpenAI
+
+    # ── AI / LLM Keys (REQUIRED for core functionality) ─────────────────
+    PERPLEXITY_API_KEY: str = Field(
+        ...,
+        description="Perplexity Sonar API key. MUST be set via env var.",
+    )
     OPENAI_API_KEY: Optional[str] = None
     OPENAI_MODEL: str = "gpt-4-turbo-preview"
-    
-    # Notion
-    NOTION_API_KEY: Optional[str] = None
-    
-    # Google Workspace
-    GOOGLE_CREDENTIALS_FILE: Optional[str] = None
-    GOOGLE_TOKEN_FILE: Optional[str] = None
-    
-    # Slack
-    SLACK_BOT_TOKEN: Optional[str] = None
-    SLACK_APP_TOKEN: Optional[str] = None
-    SLACK_SIGNING_SECRET: Optional[str] = None
-      # Logging
-    LOG_LEVEL: str = "INFO"
-    
-    model_config = ConfigDict(extra='allow', env_file=".env", case_sensitive=True)
 
-    # CORS Configuration
-    BACKEND_CORS_ORIGINS: List[str] = [
-        "http://localhost:8080",  # Frontend development server
-        "http://localhost:3000",  # Alternative frontend port
-        "http://127.0.0.1:8080",
-        "http://127.0.0.1:3000",
-    ]
+    # ── Google OAuth ────────────────────────────────────────────────────
+    GOOGLE_OAUTH_CLIENT_ID: str = Field(
+        default="",
+        description="Google OAuth 2.0 Client ID (web). Required for Google Sign-In.",
+    )
+
+    # ── Firebase ────────────────────────────────────────────────────────
+    FIREBASE_CREDENTIALS_PATH: str = Field(
+        default_factory=lambda: str(Path(__file__).parent.parent / "firebase-credentials.json"),
+        description="Path to Firebase Admin SDK service account JSON.",
+    )
+
+    # ── Database (backward-compat aliases — prefer db.* for new code) ──
+    MONGODB_URL: str = "mongodb://localhost:27017"
+    MONGODB_DB_NAME: str = "lumicoria"
+
+    # ── Nested database config ─────────────────────────────────────────
+    db: DatabaseSettings = Field(default_factory=DatabaseSettings)
+
+    # ── PostgreSQL / SQLAlchemy (optional) ─────────────────────────────
+    POSTGRES_ENABLED: bool = False
+    POSTGRES_HOST: str = "localhost"
+    POSTGRES_PORT: int = 5432
+    POSTGRES_USER: str = "postgres"
+    POSTGRES_PASSWORD: str = ""
+    POSTGRES_DB: str = "lumicoria"
+    SQLALCHEMY_DATABASE_URI: Optional[str] = None
+    SQLALCHEMY_ECHO: bool = False
+    SQLALCHEMY_POOL_SIZE: int = 5
+    SQLALCHEMY_MAX_OVERFLOW: int = 10
+
+    # ── Rate Limiting ──────────────────────────────────────────────────
+    RATE_LIMIT_PER_MINUTE: int = 60
+    rate_limit: RateLimitSettings = Field(default_factory=RateLimitSettings)
+
+    # ── CORS ───────────────────────────────────────────────────────────
+    BACKEND_CORS_ORIGINS: List[str] = Field(
+        default=[
+            "http://localhost:8080",
+            "http://localhost:3000",
+            "http://127.0.0.1:8080",
+            "http://127.0.0.1:3000",
+        ],
+        description="Allowed CORS origins. In production set to your actual domains.",
+    )
 
     @validator("BACKEND_CORS_ORIGINS", pre=True)
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> Union[List[str], str]:
@@ -87,69 +174,123 @@ class Settings(BaseSettings):
                 except json.JSONDecodeError:
                     return [i.strip() for i in v.split(",")]
             return [i.strip() for i in v.split(",")]
-        return v or [
-            "http://localhost:8080",
-            "http://localhost:3000",
-            "http://127.0.0.1:8080",
-            "http://127.0.0.1:3000",
-        ]
+        return v or []
 
-    # Firebase Configuration
-    FIREBASE_CREDENTIALS_PATH: str = str(Path(__file__).parent.parent / "firebase-credentials.json")
-    
-    # Database Configuration
-    db: DatabaseSettings = Field(default_factory=DatabaseSettings)
+    @validator("SQLALCHEMY_DATABASE_URI", pre=True)
+    def assemble_sqlalchemy_uri(cls, v: Optional[str], values: Dict[str, Any]) -> Optional[str]:
+        if v:
+            return v
+        host = values.get("POSTGRES_HOST")
+        port = values.get("POSTGRES_PORT")
+        user = values.get("POSTGRES_USER")
+        password = values.get("POSTGRES_PASSWORD")
+        db = values.get("POSTGRES_DB")
+        if not host or not user or not db:
+            return None
+        if password:
+            return f"postgresql://{user}:{password}@{host}:{port}/{db}"
+        return f"postgresql://{user}@{host}:{port}/{db}"
 
-    # Rate Limiting
-    RATE_LIMIT_PER_MINUTE: int = 60
-
-    # Sentry Configuration
-    SENTRY_DSN: Optional[str] = None
-
-    # Environment
+    # ── Environment ────────────────────────────────────────────────────
     ENVIRONMENT: str = "development"
-    DEBUG: bool = True  # Will be overridden by environment variable if set
+    DEBUG: bool = False  # Default OFF — opt-in only
 
     @validator("DEBUG", pre=True)
     def set_debug(cls, v: Optional[bool], values: Dict[str, Any]) -> bool:
         if v is not None:
-            return v
-        return values.get("ENVIRONMENT", "development") == "development"
+            return bool(v)
+        return values.get("ENVIRONMENT", "production") == "development"
 
-    # Logging
+    # ── Observability ──────────────────────────────────────────────────
+    LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    SENTRY_DSN: Optional[str] = None
+    SENTRY_TRACES_SAMPLE_RATE: float = Field(
+        default=0.1,
+        description="Sentry performance traces sample rate (0.0-1.0). Use 1.0 only in dev.",
+    )
 
-    # File Upload
+    # ── File Upload ────────────────────────────────────────────────────
     UPLOAD_DIR: str = str(Path(__file__).parent.parent / "uploads")
-    MAX_UPLOAD_SIZE: int = 10 * 1024 * 1024  # 10MB
-    ALLOWED_EXTENSIONS: set[str] = {"jpg", "jpeg", "png", "gif"}
+    MAX_UPLOAD_SIZE: int = 10 * 1024 * 1024  # 10 MB
+    ALLOWED_EXTENSIONS: set[str] = {"jpg", "jpeg", "png", "gif", "pdf", "doc", "docx"}
 
-    # Email Settings
+    # ── Email (SMTP) — credentials via env vars only ───────────────────
     SMTP_SERVER: str = "smtp.gmail.com"
     SMTP_PORT: int = 587
-    SMTP_USERNAME: str = "jacobasuquo199@gmail.com"
-    SMTP_PASSWORD: str = "yesrqkhohhivjdkp"
+    SMTP_USERNAME: str = ""        # Set via SMTP_USERNAME env var
+    SMTP_PASSWORD: str = ""        # Set via SMTP_PASSWORD env var
     SMTP_FROM_EMAIL: str = "noreply@lumicoria.ai"
     SMTP_FROM_NAME: str = "Lumicoria.ai"
 
-    # Azure
+    # ── External Integrations (all optional) ───────────────────────────
+    NOTION_API_KEY: Optional[str] = None
+    GOOGLE_CREDENTIALS_FILE: Optional[str] = None
+    GOOGLE_TOKEN_FILE: Optional[str] = None
+    SLACK_BOT_TOKEN: Optional[str] = None
+    SLACK_APP_TOKEN: Optional[str] = None
+    SLACK_SIGNING_SECRET: Optional[str] = None
+
+    # ── Cloud Providers (optional) ─────────────────────────────────────
     AZURE_OPENAI_API_KEY: Optional[str] = None
     AZURE_OPENAI_ENDPOINT: Optional[str] = None
     AZURE_OPENAI_API_VERSION: str = "2023-05-15"
-
-    # Google Cloud
     GOOGLE_CLOUD_PROJECT: Optional[str] = None
     GOOGLE_APPLICATION_CREDENTIALS: Optional[str] = None
-
-    # AWS
     AWS_ACCESS_KEY_ID: Optional[str] = None
     AWS_SECRET_ACCESS_KEY: Optional[str] = None
     AWS_REGION: str = "us-east-1"
 
+    # ── Encryption ─────────────────────────────────────────────────────
+    INTEGRATION_ENCRYPTION_KEY: Optional[str] = Field(
+        default=None,
+        description=(
+            "Fernet key for encrypting integration credentials. "
+            "Generate: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        ),
+    )
+
+    # ── Convenience helpers ────────────────────────────────────────────
+
+    @property
+    def is_production(self) -> bool:
+        return self.ENVIRONMENT == "production"
+
+    @property
+    def is_development(self) -> bool:
+        return self.ENVIRONMENT == "development"
+
+    @property
+    def docs_enabled(self) -> bool:
+        """Disable Swagger/ReDoc in production unless DEBUG is on."""
+        return not self.is_production or self.DEBUG
+
+
+# ---------------------------------------------------------------------------
+# Singleton accessor
+# ---------------------------------------------------------------------------
 
 @lru_cache()
 def get_settings() -> Settings:
-    return Settings()
+    """
+    Create and cache the Settings singleton.
+
+    Pydantic will raise a ValidationError at this point if any required
+    field (SECRET_KEY, PERPLEXITY_API_KEY) is missing from the environment.
+    This is intentional — fail fast, fail loud.
+    """
+    try:
+        return Settings()
+    except Exception as e:
+        print(f"\n{'='*60}", file=sys.stderr)
+        print("FATAL: Application configuration is invalid.", file=sys.stderr)
+        print(f"{'='*60}", file=sys.stderr)
+        print(f"\n{e}\n", file=sys.stderr)
+        print("Required environment variables:", file=sys.stderr)
+        print("  SECRET_KEY         — JWT signing key (64+ hex chars)", file=sys.stderr)
+        print("  PERPLEXITY_API_KEY — Perplexity Sonar API key", file=sys.stderr)
+        print("\nSee backend/.env.example for the full list.\n", file=sys.stderr)
+        sys.exit(1)
 
 
 settings = get_settings()

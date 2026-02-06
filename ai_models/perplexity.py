@@ -567,8 +567,9 @@ def create_perplexity_client(
     Returns:
         PerplexityClient instance
     """
-    # Get API key from environment if not provided
-    final_api_key = api_key or os.environ.get("PERPLEXITY_API_KEY")
+    # Get API key from centralized settings if not provided directly
+    from backend.core.config import settings as app_settings
+    final_api_key = api_key or (config or {}).get("api_key") or app_settings.PERPLEXITY_API_KEY
     
     # Create config
     if config is None:

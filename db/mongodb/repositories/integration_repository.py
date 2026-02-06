@@ -11,15 +11,23 @@ from backend.models.mongodb_models import (
 import structlog
 import json
 from cryptography.fernet import Fernet
-import os
+from backend.core.config import settings as app_settings
 
 logger = structlog.get_logger()
 
 class IntegrationRepository(BaseRepository[Integration]):
     def __init__(self):
         super().__init__("integrations", Integration)
-        # Initialize encryption key for sensitive data
-        self._encryption_key = os.getenv("INTEGRATION_ENCRYPTION_KEY", Fernet.generate_key())
+        # Use encryption key from centralized settings — NEVER generate a random key
+        # at startup (that makes all previously encrypted data unreadable after restart).
+        enc_key = app_settings.INTEGRATION_ENCRYPTION_KEY
+        if not enc_key:
+            logger.warning(
+                "INTEGRATION_ENCRYPTION_KEY not set — generating ephemeral key. "
+                "Integration credentials will NOT survive restarts!"
+            )
+            enc_key = Fernet.generate_key().decode()
+        self._encryption_key = enc_key if isinstance(enc_key, bytes) else enc_key.encode()
         self._cipher_suite = Fernet(self._encryption_key)
 
     async def _create_indexes(self):

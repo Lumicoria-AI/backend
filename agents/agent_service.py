@@ -517,6 +517,11 @@ async def setup_agent_service() -> None:
             with open(config_path, "r") as f:
                 config = yaml.safe_load(f)
         
+        # Inject API key from centralized settings into the loaded config
+        from backend.core.config import settings as app_settings
+        if "ai_models" in config and "perplexity" in config["ai_models"]:
+            config["ai_models"]["perplexity"]["api_key"] = app_settings.PERPLEXITY_API_KEY
+
         # Create agent service with loaded configuration
         _agent_service = AgentService(config)
         logger.info("Agent service configured successfully")

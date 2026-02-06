@@ -1,16 +1,12 @@
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.ext.declarative import declarative_base
+"""
+Legacy SQLAlchemy session module.
 
-from backend.core.config import settings
+This file now delegates to backend/db/postgres.py to avoid duplicated
+configuration and to support optional Postgres usage.
+"""
 
-engine = create_engine(settings.SQLALCHEMY_DATABASE_URI, pool_pre_ping=True)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+from backend.db.postgres import get_db, get_sync_sessionmaker
 
-# Dependency
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close() 
+# Do not instantiate the sessionmaker at import time to avoid
+# requiring Postgres configuration in environments that don't use it.
+SessionLocal = None

@@ -102,6 +102,8 @@ class UserResponse(BaseModel):
     onboarding_completed: bool = False
     job_title: Optional[str] = None
     company: Optional[str] = None
+    # Additional fields that may be included but not required in responses
+    onboarding_info: Optional[dict] = None
 
 class UserProfile(BaseModel):
     """Model for user profile data."""

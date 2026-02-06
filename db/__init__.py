@@ -1,7 +1,7 @@
 # MongoDB, Redis, Vector Store, and Cassandra imports
 from .mongodb.mongodb import get_mongodb, MongoDB
 from .redis.redis import get_redis, RedisClient
-from .vector_stores import get_vector_store, VectorStore
+from .vector_stores import get_vector_store
 from .cassandra.cassandra import get_cassandra, CassandraClient
 
 __all__ = [
@@ -10,7 +10,6 @@ __all__ = [
     'get_redis',
     'RedisClient',
     'get_vector_store',
-    'VectorStore',
     'get_cassandra',
     'CassandraClient'
 ] 

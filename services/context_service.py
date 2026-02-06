@@ -11,8 +11,9 @@ import structlog
 from datetime import datetime, timedelta
 import json
 
-from ..db.vector_stores.weaviate import weaviate_store
+from ..db.vector_stores import get_vector_store
 from ..services.document_processor import document_processor
+from ..core.config import settings
 from ..ai_models.perplexity import PerplexityClient, create_perplexity_client, create_perplexity_client_async
 
 logger = structlog.get_logger(__name__)
@@ -75,7 +76,11 @@ class ContextService:
             
         # Search vector store
         try:
-            results = await weaviate_store.similarity_search(
+            if not settings.db.VECTOR_STORE_ENABLED:
+                return {"context": [], "error": "Vector store disabled"}
+
+            vector_store = get_vector_store()
+            results = await vector_store.similarity_search(
                 query_vector=query_embedding[0],
                 k=k,
                 filters=search_filters
@@ -275,7 +280,11 @@ class ContextService:
             filters["created_before"] = cutoff_date
             
         try:
-            success = await weaviate_store.delete_documents(filters=filters)
+            if not settings.db.VECTOR_STORE_ENABLED:
+                return {"success": False, "error": "Vector store disabled", "filters": filters}
+
+            vector_store = get_vector_store()
+            success = await vector_store.delete_documents(filters=filters)
             
             return {
                 "success": success,
@@ -427,10 +436,21 @@ class ContextService:
             
         try:
             # Get document count for pagination info
-            total_count = await weaviate_store.get_document_count(filters=filters)
+            if not settings.db.VECTOR_STORE_ENABLED:
+                return {
+                    "documents": [],
+                    "total": 0,
+                    "unique_count": 0,
+                    "limit": limit,
+                    "offset": offset,
+                    "error": "Vector store disabled"
+                }
+
+            vector_store = get_vector_store()
+            total_count = await vector_store.get_document_count(filters=filters)
             
             # Get document metadata from vector store
-            documents = await weaviate_store.get_documents(
+            documents = await vector_store.get_documents(
                 filters=filters,
                 limit=limit,
                 offset=offset
@@ -533,7 +553,11 @@ class ContextService:
                 source_filters["source"] = source
                 
                 # Search vector store
-                results = await weaviate_store.similarity_search(
+                if not settings.db.VECTOR_STORE_ENABLED:
+                    continue
+
+                vector_store = get_vector_store()
+                results = await vector_store.similarity_search(
                     query_vector=query_embedding[0],
                     k=max_results_per_source,
                     filters=source_filters

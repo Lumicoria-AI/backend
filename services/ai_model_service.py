@@ -1,6 +1,5 @@
 from typing import Any, Dict, List, Optional
 import structlog
-import os
 
 # Assuming client libraries for various AI models are available or will be implemented
 # from backend.services.ai_clients.gemini_client import GeminiClient
@@ -9,16 +8,16 @@ from backend.services.ai_clients.perplexity_client import PerplexityClient
 # from backend.services.ai_clients.ocr_client import OCRClient
 # from backend.services.ai_clients.stt_client import STTClient
 # from backend.services.ai_clients.image_analysis_client import ImageAnalysisClient
+from backend.core.config import settings as app_settings
 
 logger = structlog.get_logger()
 
 class AIModeService:
     def __init__(self):
-        # Initialize clients for various AI models
-        # In a real application, these would be properly initialized with config/keys.
-        perplexity_api_key = os.getenv("PERPLEXITY_API_KEY")
+        # Initialize clients using centralized settings (no direct os.getenv)
+        perplexity_api_key = app_settings.PERPLEXITY_API_KEY
         if not perplexity_api_key:
-            logger.warning("PERPLEXITY_API_KEY not found. Perplexity client will not be functional.")
+            logger.warning("PERPLEXITY_API_KEY not configured. Perplexity client will not be functional.")
             self.perplexity_client = None
         else:
             self.perplexity_client = PerplexityClient(api_key=perplexity_api_key)

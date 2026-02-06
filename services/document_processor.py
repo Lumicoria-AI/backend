@@ -30,7 +30,7 @@ from langchain_community.document_loaders import (
 )
 from langchain_core.documents import Document as LangchainDocument
 
-from ..db.vector_stores.weaviate import weaviate_store
+from ..db.vector_stores import get_vector_store
 from ..core.config import settings
 from ..ai_models.perplexity import create_perplexity_client, PerplexityClient
 
@@ -413,11 +413,16 @@ class DocumentProcessor:
                     await asyncio.sleep(0.5)
             
             # Step 3: Store in vector database with metadata
-            vector_ids = await weaviate_store.add_documents(
-                texts=texts,
-                embeddings=all_embeddings,
-                metadatas=all_metadata
-            )
+            if not settings.db.VECTOR_STORE_ENABLED:
+                logger.warning("Vector store disabled; skipping storage")
+                vector_ids = []
+            else:
+                vector_store = get_vector_store()
+                vector_ids = await vector_store.add_documents(
+                    texts=texts,
+                    embeddings=all_embeddings,
+                    metadatas=all_metadata
+                )
             
             # Step 4: Return processing result
             return ProcessedDocument(

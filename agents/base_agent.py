@@ -1,8 +1,9 @@
 from typing import Dict, Any, Optional
 from abc import ABC, abstractmethod
-import os # Import os for accessing environment variables
+import os
 # Import necessary libraries for AI models
 from backend.ai_models.perplexity import create_perplexity_client, PerplexityClient
+from backend.core.config import settings as app_settings
 import structlog
 import asyncio
 
@@ -31,14 +32,11 @@ class BaseAgent(ABC):
             if not self.model_config and self.config.get("model"):
                 self.model_config = self._get_global_model_config(self.config["model"])
             
-            # Ensure we have the API key
+            # Ensure we have the API key — use centralized settings
             if not self.model_config.get("api_key"):
-                # Try to get it from environment variables
                 model_name = self.model_config.get("model", "").lower()
                 if "perplexity" in model_name or "sonar" in model_name:
-                    api_key = os.environ.get("PERPLEXITY_API_KEY")
-                    if api_key:
-                        self.model_config["api_key"] = api_key
+                    self.model_config["api_key"] = app_settings.PERPLEXITY_API_KEY
             
             if not self.model_config.get("api_key"):
                 raise ValueError("Perplexity API key not found in configuration or environment variables")
@@ -90,8 +88,8 @@ class BaseAgent(ABC):
         actual_model_name = model_name or self.get_model_name()
         model_config = self._get_global_model_config(actual_model_name)
         
-        # It's recommended to load API keys from environment variables for production
-        api_key = os.environ.get(f"{actual_model_name.upper()}_API_KEY") or model_config.get("api_key")
+        # Load API keys from centralized settings
+        api_key = model_config.get("api_key") or getattr(app_settings, f"{actual_model_name.upper()}_API_KEY", None) or getattr(app_settings, "PERPLEXITY_API_KEY", None)
 
         if not api_key:
             logger.warning(f"API key not found for model {actual_model_name}")
@@ -174,8 +172,8 @@ class BaseAgent(ABC):
         actual_model_name = model_name or self.get_model_name()
         model_config = self._get_global_model_config(actual_model_name)
         
-        # It's recommended to load API keys from environment variables for production
-        api_key = os.environ.get(f"{actual_model_name.upper()}_API_KEY") or model_config.get("api_key")
+        # Load API keys from centralized settings
+        api_key = model_config.get("api_key") or getattr(app_settings, f"{actual_model_name.upper()}_API_KEY", None) or getattr(app_settings, "PERPLEXITY_API_KEY", None)
 
         if not api_key:
             logger.warning(f"API key not found for model {actual_model_name}")

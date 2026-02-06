@@ -1,6 +1,6 @@
 ai_models:
   perplexity:
-    api_key: pplx-uxk1yZxYX03pKtM1mVglOexNhvYHeM1q9xRFxxqDssY8490Ms
+    # api_key: loaded from PERPLEXITY_API_KEY env var via settings (never hardcode)
     model: "sonar-large-online"
 
 

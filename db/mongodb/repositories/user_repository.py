@@ -105,14 +105,33 @@ class UserRepository(BaseRepository[UserInDB]):
             update_data = user_update.model_dump(exclude_unset=True)
             
         if update_data:
+            # Add updated timestamp
             update_data["updated_at"] = datetime.utcnow()
+            
+            # Special handling for onboarding_completed field
+            if "onboarding_completed" in update_data and update_data["onboarding_completed"] is True:
+                logger.info("Setting onboarding_completed to True for user", user_id=user_id)
+                # Ensure onboarding_completed_at is also set
+                if "onboarding_completed_at" not in update_data:
+                    update_data["onboarding_completed_at"] = datetime.utcnow()
+            
+            # Perform the update
             result = await self.collection.find_one_and_update(
                 {"_id": ObjectId(user_id)},
                 {"$set": update_data},
                 return_document=True
             )
+            
             if result:
-                return UserInDB(**result)
+                # Make sure we properly construct the UserInDB object
+                user = UserInDB(**result)
+                
+                # Log confirmation of onboarding status
+                if "onboarding_completed" in update_data:
+                    logger.info("User updated with onboarding status", 
+                               user_id=user_id, 
+                               onboarding_completed=getattr(user, "onboarding_completed", False))
+                return user
         return None
 
     async def create_user_profile(self, user_id: str, profile: UserProfile) -> UserProfile:
