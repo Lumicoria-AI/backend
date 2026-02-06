@@ -6,6 +6,8 @@ from datetime import datetime
 from backend.api.deps import get_current_active_user
 from backend.models.user import User
 from backend.db.mongodb.repositories.activity_repository import activity_repository
+from backend.db.cassandra.activity_repository import cassandra_activity_repository
+from backend.core.config import settings
 
 router = APIRouter()
 
@@ -18,6 +20,12 @@ class ActivityEntry(BaseModel):
     details: Dict[str, Any] # Specific details about the activity
     related_resource_type: Optional[str] # e.g., 'DOCUMENT', 'AGENT', 'TASK'
     related_resource_id: Optional[str]
+
+class ActivitySummaryResponse(BaseModel):
+    total_events: int
+    by_type: Dict[str, int]
+    by_severity: Dict[str, int]
+    time_range: Dict[str, Optional[datetime]]
 
 @router.get("/recent", response_model=List[ActivityEntry])
 async def get_recent_activity(
@@ -34,14 +42,66 @@ async def get_recent_activity(
     # For now, returning dummy data
     # print(f"Fetching recent activity for user {current_user.id} in organization {current_user.organization_id}")
 
+    if settings.db.CASSANDRA_ENABLED:
+        activities = await cassandra_activity_repository.get_recent_activity(
+            organization_id=current_user.organization_id,
+            user_id=current_user.id,
+            activity_type=activity_type,
+            limit=limit,
+            skip=skip
+        )
+    else:
+        activities = await activity_repository.get_recent_activity(
+            organization_id=current_user.organization_id,
+            user_id=current_user.id, # Assuming the feed is primarily for the current user
+            activity_type=activity_type,
+            limit=limit,
+            skip=skip
+        )
+    return activities
+
+@router.get("/summary", response_model=ActivitySummaryResponse)
+async def get_activity_summary(
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """
+    Get aggregate summary of activity logs.
+    """
+    if settings.db.CASSANDRA_ENABLED:
+        summary = await cassandra_activity_repository.get_activity_summary(
+            organization_id=current_user.organization_id,
+            user_id=current_user.id,
+            start_date=start_date,
+            end_date=end_date
+        )
+        return summary
+
     activities = await activity_repository.get_recent_activity(
         organization_id=current_user.organization_id,
-        user_id=current_user.id, # Assuming the feed is primarily for the current user
-        activity_type=activity_type,
-        limit=limit,
-        skip=skip
+        user_id=current_user.id,
+        limit=500,
+        skip=0
     )
-    return activities
+    by_type: Dict[str, int] = {}
+    by_severity: Dict[str, int] = {}
+    for entry in activities:
+        ts = entry.timestamp
+        if start_date and ts < start_date:
+            continue
+        if end_date and ts > end_date:
+            continue
+        by_type[entry.activity_type] = by_type.get(entry.activity_type, 0) + 1
+        severity = getattr(entry, "severity", "info")
+        by_severity[severity] = by_severity.get(severity, 0) + 1
+
+    return {
+        "total_events": sum(by_type.values()),
+        "by_type": by_type,
+        "by_severity": by_severity,
+        "time_range": {"start": start_date, "end": end_date},
+    }
 
 # You might also want endpoints for creating activity logs from different parts of the application
 # For example, an internal endpoint called by other services/repositories

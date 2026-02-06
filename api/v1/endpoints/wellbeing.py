@@ -7,6 +7,9 @@ import structlog
 
 from backend.api.deps import get_current_active_user, get_current_user_id
 from backend.db.mongodb.repositories.wellbeing_repository import WellbeingRepository, wellbeing_repository
+from backend.db.mongodb.repositories.wellbeing_goal_repository import wellbeing_goal_repository
+from backend.db.cassandra.wellbeing_repository import cassandra_wellbeing_repository
+from backend.core.config import settings
 from backend.db.mongodb.repositories.permission_repository import permission_repository
 from backend.models.user import User
 from backend.models.wellbeing import (
@@ -60,6 +63,11 @@ class BreakRecommendationResponse(BaseModel):
     suggested_activities: List[str]
     metadata: Optional[Dict[str, Any]]
 
+class WellbeingMetricsSummaryResponse(BaseModel):
+    total_points: int
+    by_metric_type: Dict[str, Dict[str, Any]]
+    time_range: Dict[str, Optional[datetime]]
+
 @router.post("/metrics", response_model=WellbeingMetricResponse)
 async def record_wellbeing_metric(
     metric_in: WellbeingMetricCreate,
@@ -69,6 +77,29 @@ async def record_wellbeing_metric(
     Record a new wellbeing metric.
     """
     try:
+        if settings.db.CASSANDRA_ENABLED:
+            metric = await cassandra_wellbeing_repository.create_metric(
+                organization_id=current_user.organization_id,
+                user_id=current_user.id,
+                metric_type=metric_in.metric_type,
+                value=metric_in.value,
+                metadata=metric_in.metadata,
+                source=metric_in.source
+            )
+            if settings.db.CASSANDRA_DUAL_WRITE:
+                try:
+                    await wellbeing_repository.create_metric(
+                        user_id=current_user.id,
+                        organization_id=current_user.organization_id,
+                        metric_type=metric_in.metric_type,
+                        value=metric_in.value,
+                        metadata=metric_in.metadata,
+                        source=metric_in.source
+                    )
+                except Exception:
+                    pass
+            return metric
+        # Fallback to MongoDB implementation if Cassandra is disabled
         metric = await wellbeing_repository.create_metric(
             user_id=current_user.id,
             organization_id=current_user.organization_id,
@@ -94,14 +125,79 @@ async def get_wellbeing_metrics(
     """
     Get wellbeing metrics for the current user.
     """
+    if settings.db.CASSANDRA_ENABLED:
+        metrics = await cassandra_wellbeing_repository.get_user_metrics(
+            organization_id=current_user.organization_id,
+            user_id=current_user.id,
+            metric_type=metric_type,
+            start_date=start_date,
+            end_date=end_date
+        )
+    else:
+        metrics = await wellbeing_repository.get_user_metrics(
+            user_id=current_user.id,
+            organization_id=current_user.organization_id,
+            metric_type=metric_type,
+            start_date=start_date,
+            end_date=end_date
+        )
+    return metrics
+
+@router.get("/metrics/summary", response_model=WellbeingMetricsSummaryResponse)
+async def get_wellbeing_metrics_summary(
+    metric_type: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """
+    Get aggregate summary statistics for wellbeing metrics.
+    """
+    if settings.db.CASSANDRA_ENABLED:
+        summary = await cassandra_wellbeing_repository.get_metrics_summary(
+            organization_id=current_user.organization_id,
+            user_id=current_user.id,
+            metric_type=metric_type,
+            start_date=start_date,
+            end_date=end_date
+        )
+        return summary
+
     metrics = await wellbeing_repository.get_user_metrics(
         user_id=current_user.id,
         organization_id=current_user.organization_id,
         metric_type=metric_type,
         start_date=start_date,
-        end_date=end_date
+        end_date=end_date,
+        limit=1000
     )
-    return metrics
+    by_type: Dict[str, Dict[str, Any]] = {}
+    for m in metrics:
+        mtype = m.get("metric_type") or "unknown"
+        entry = by_type.setdefault(mtype, {
+            "count": 0,
+            "sum": 0.0,
+            "min": None,
+            "max": None,
+            "latest": None
+        })
+        value = float(m.get("value") or 0)
+        entry["count"] += 1
+        entry["sum"] += value
+        entry["min"] = value if entry["min"] is None else min(entry["min"], value)
+        entry["max"] = value if entry["max"] is None else max(entry["max"], value)
+        if entry["latest"] is None or (m.get("timestamp") and m.get("timestamp") > entry["latest"]["timestamp"]):
+            entry["latest"] = {"value": value, "timestamp": m.get("timestamp")}
+
+    for entry in by_type.values():
+        entry["avg"] = (entry["sum"] / entry["count"]) if entry["count"] else 0.0
+        entry.pop("sum", None)
+
+    return {
+        "total_points": len(metrics),
+        "by_metric_type": by_type,
+        "time_range": {"start": start_date, "end": end_date},
+    }
 
 @router.post("/goals", response_model=WellbeingGoalResponse)
 async def create_wellbeing_goal(
@@ -112,7 +208,7 @@ async def create_wellbeing_goal(
     Create a new wellbeing goal.
     """
     try:
-        goal = await wellbeing_repository.create_goal(
+        goal = await wellbeing_goal_repository.create_goal(
             user_id=current_user.id,
             organization_id=current_user.organization_id,
             goal_type=goal_in.goal_type,
@@ -136,7 +232,7 @@ async def get_wellbeing_goals(
     """
     Get wellbeing goals for the current user.
     """
-    goals = await wellbeing_repository.get_user_goals(
+    goals = await wellbeing_goal_repository.get_user_goals(
         user_id=current_user.id,
         organization_id=current_user.organization_id,
         status=status
@@ -151,7 +247,7 @@ async def get_wellbeing_goal(
     """
     Get a specific wellbeing goal.
     """
-    goal = await wellbeing_repository.get_goal_by_id(
+    goal = await wellbeing_goal_repository.get_goal_by_id(
         goal_id=goal_id,
         organization_id=current_user.organization_id
     )
@@ -171,7 +267,7 @@ async def update_wellbeing_goal(
     """
     Update a wellbeing goal.
     """
-    goal = await wellbeing_repository.update_goal(
+    goal = await wellbeing_goal_repository.update_goal(
         goal_id=goal_id,
         organization_id=current_user.organization_id,
         update_data=update_data
@@ -193,10 +289,29 @@ async def get_wellbeing_recommendations(
     """
     try:
         # First get user metrics and data from repository
-        user_data = await wellbeing_repository.get_user_wellbeing_data(
-            user_id=current_user.id,
-            organization_id=current_user.organization_id
-        )
+        if settings.db.CASSANDRA_ENABLED:
+            metrics = await cassandra_wellbeing_repository.get_user_metrics(
+                organization_id=current_user.organization_id,
+                user_id=current_user.id,
+                limit=50
+            )
+            latest_metrics = {}
+            for metric in metrics:
+                mtype = metric.get("metric_type")
+                if mtype and mtype not in latest_metrics:
+                    latest_metrics[mtype] = metric.get("value")
+            user_data = {
+                "latest_metrics": latest_metrics,
+                "activity_log": [],
+                "screen_time": 0,
+                "breaks_taken": 0,
+                "focus_sessions": 0
+            }
+        else:
+            user_data = await wellbeing_repository.get_user_wellbeing_data(
+                user_id=current_user.id,
+                organization_id=current_user.organization_id
+            )
         
         # Get recent metrics
         recent_metrics = await wellbeing_repository.get_user_metrics(

@@ -24,6 +24,7 @@ redis
 cassandra-driver
 sqlalchemy
 asyncpg
+alembic
 
 # Vector Store Dependencies
 numpy

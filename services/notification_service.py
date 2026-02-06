@@ -7,26 +7,102 @@ from jinja2 import Environment, FileSystemLoader
 from pathlib import Path
 import json
 from pydantic import BaseModel, EmailStr
+import structlog
+
 from ..core.config import settings
-from ..db.mongodb.repositories.notification_repository import notification_repository
-from ..db.mongodb.models.notification import Notification, NotificationType, NotificationPriority
+from ..db.mongodb.repositories.notification_repository import (
+    get_notification_repository,
+    NotificationRepository
+)
+from ..db.mongodb.models.notification import (
+    Notification, 
+    NotificationType, 
+    NotificationPriority
+)
+
+logger = structlog.get_logger()
+
 
 class NotificationTemplate(BaseModel):
     subject: str
     body: str
     template_name: str
 
+
+# WebSocket connection manager for real-time notifications
+class ConnectionManager:
+    """Manages WebSocket connections for real-time notification delivery."""
+    
+    def __init__(self):
+        # Map of user_id -> list of WebSocket connections
+        self.active_connections: Dict[str, List[Any]] = {}
+    
+    async def connect(self, websocket, user_id: str):
+        """Accept and store a WebSocket connection for a user."""
+        await websocket.accept()
+        if user_id not in self.active_connections:
+            self.active_connections[user_id] = []
+        self.active_connections[user_id].append(websocket)
+        logger.info("websocket_connected", user_id=user_id)
+    
+    def disconnect(self, websocket, user_id: str):
+        """Remove a WebSocket connection for a user."""
+        if user_id in self.active_connections:
+            if websocket in self.active_connections[user_id]:
+                self.active_connections[user_id].remove(websocket)
+            if not self.active_connections[user_id]:
+                del self.active_connections[user_id]
+        logger.info("websocket_disconnected", user_id=user_id)
+    
+    async def send_to_user(self, user_id: str, message: dict):
+        """Send a message to all connections for a specific user."""
+        if user_id in self.active_connections:
+            for connection in self.active_connections[user_id]:
+                try:
+                    await connection.send_json(message)
+                except Exception as e:
+                    logger.error("websocket_send_error", user_id=user_id, error=str(e))
+    
+    async def broadcast(self, message: dict):
+        """Broadcast a message to all connected users."""
+        for user_id, connections in self.active_connections.items():
+            for connection in connections:
+                try:
+                    await connection.send_json(message)
+                except Exception as e:
+                    logger.error("websocket_broadcast_error", user_id=user_id, error=str(e))
+    
+    def is_user_connected(self, user_id: str) -> bool:
+        """Check if a user has any active connections."""
+        return user_id in self.active_connections and len(self.active_connections[user_id]) > 0
+
+
+# Global connection manager instance
+connection_manager = ConnectionManager()
+
+
 class NotificationService:
+    """Service for managing notifications across all channels."""
+    
     def __init__(self):
         self.email_templates_dir = Path(__file__).parent / "templates" / "email"
         self.jinja_env = Environment(loader=FileSystemLoader(str(self.email_templates_dir)))
         
         # Email settings from config
-        self.smtp_server = settings.SMTP_SERVER
-        self.smtp_port = settings.SMTP_PORT
-        self.smtp_username = settings.SMTP_USERNAME
-        self.smtp_password = settings.SMTP_PASSWORD
-        self.smtp_from_email = settings.SMTP_FROM_EMAIL
+        self.smtp_server = getattr(settings, 'SMTP_SERVER', 'smtp.gmail.com')
+        self.smtp_port = getattr(settings, 'SMTP_PORT', 587)
+        self.smtp_username = getattr(settings, 'SMTP_USERNAME', '')
+        self.smtp_password = getattr(settings, 'SMTP_PASSWORD', '')
+        self.smtp_from_email = getattr(settings, 'SMTP_FROM_EMAIL', 'noreply@lumicoria.ai')
+        
+        # Repository will be lazily initialized
+        self._repository: Optional[NotificationRepository] = None
+
+    async def _get_repository(self) -> NotificationRepository:
+        """Get or initialize the notification repository."""
+        if self._repository is None:
+            self._repository = await get_notification_repository()
+        return self._repository
 
     async def send_email_notification(
         self,
@@ -65,10 +141,10 @@ class NotificationService:
                 metadata={"template": template_name, "template_data": template_data}
             )
             
+            logger.info("email_notification_sent", to_email=to_email, template=template_name)
             return True
         except Exception as e:
-            # Log error and return False
-            print(f"Error sending email notification: {str(e)}")
+            logger.error("email_notification_error", to_email=to_email, error=str(e))
             return False
 
     async def create_in_app_notification(
@@ -78,9 +154,11 @@ class NotificationService:
         content: str,
         notification_type: NotificationType,
         priority: NotificationPriority = NotificationPriority.NORMAL,
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        send_realtime: bool = True,
+        send_push: bool = True
     ) -> Notification:
-        """Create and store an in-app notification."""
+        """Create and store an in-app notification with optional real-time and push delivery."""
         notification = await self._store_notification(
             notification_type=notification_type,
             title=title,
@@ -89,7 +167,46 @@ class NotificationService:
             priority=priority,
             metadata=metadata
         )
+        
+        # Send real-time WebSocket notification
+        if send_realtime and connection_manager.is_user_connected(user_id):
+            await connection_manager.send_to_user(user_id, {
+                "type": "notification",
+                "data": {
+                    "id": str(notification.id),
+                    "title": notification.title,
+                    "content": notification.content,
+                    "notification_type": notification.notification_type.value,
+                    "priority": notification.priority.value,
+                    "created_at": notification.created_at.isoformat(),
+                    "metadata": notification.metadata
+                }
+            })
+        
+        # Send push notification if enabled
+        if send_push:
+            await self._send_push_notification(user_id, title, content, metadata)
+        
         return notification
+
+    async def _send_push_notification(
+        self,
+        user_id: str,
+        title: str,
+        body: str,
+        data: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """Send a push notification via Firebase Cloud Messaging."""
+        try:
+            # Import here to avoid circular imports and only if FCM is needed
+            from .push_notification_service import push_notification_service
+            return await push_notification_service.send_to_user(user_id, title, body, data)
+        except ImportError:
+            logger.warning("push_notification_service_not_available")
+            return False
+        except Exception as e:
+            logger.error("push_notification_error", user_id=user_id, error=str(e))
+            return False
 
     async def get_user_notifications(
         self,
@@ -99,12 +216,35 @@ class NotificationService:
         skip: int = 0
     ) -> List[Notification]:
         """Get notifications for a user."""
-        return await notification_repository.get_user_notifications(
+        repository = await self._get_repository()
+        return await repository.get_user_notifications(
             user_id=user_id,
             unread_only=unread_only,
             limit=limit,
             skip=skip
         )
+
+    async def get_notifications_by_type(
+        self,
+        user_id: str,
+        notification_type: NotificationType,
+        limit: int = 50,
+        skip: int = 0
+    ) -> List[Notification]:
+        """Get notifications of a specific type for a user."""
+        repository = await self._get_repository()
+        return await repository.get_notifications_by_type(
+            user_id=user_id,
+            notification_type=notification_type,
+            limit=limit,
+            skip=skip
+        )
+
+    async def get_unread_count(self, user_id: str) -> Dict[str, int]:
+        """Get count of unread notifications for a user."""
+        repository = await self._get_repository()
+        count = await repository.get_unread_count(user_id)
+        return {"unread_count": count}
 
     async def mark_notification_as_read(
         self,
@@ -112,17 +252,37 @@ class NotificationService:
         user_id: str
     ) -> bool:
         """Mark a notification as read."""
-        return await notification_repository.mark_as_read(
+        repository = await self._get_repository()
+        success = await repository.mark_as_read(
             notification_id=notification_id,
             user_id=user_id
         )
+        
+        # Notify connected clients about the read status change
+        if success and connection_manager.is_user_connected(user_id):
+            await connection_manager.send_to_user(user_id, {
+                "type": "notification_read",
+                "data": {"notification_id": notification_id}
+            })
+        
+        return success
 
     async def mark_all_notifications_as_read(
         self,
         user_id: str
-    ) -> bool:
+    ) -> Dict[str, int]:
         """Mark all notifications as read for a user."""
-        return await notification_repository.mark_all_as_read(user_id=user_id)
+        repository = await self._get_repository()
+        count = await repository.mark_all_as_read(user_id=user_id)
+        
+        # Notify connected clients
+        if connection_manager.is_user_connected(user_id):
+            await connection_manager.send_to_user(user_id, {
+                "type": "all_notifications_read",
+                "data": {"marked_count": count}
+            })
+        
+        return {"marked_count": count}
 
     async def delete_notification(
         self,
@@ -130,10 +290,26 @@ class NotificationService:
         user_id: str
     ) -> bool:
         """Delete a notification."""
-        return await notification_repository.delete_notification(
+        repository = await self._get_repository()
+        success = await repository.delete_notification(
             notification_id=notification_id,
             user_id=user_id
         )
+        
+        # Notify connected clients
+        if success and connection_manager.is_user_connected(user_id):
+            await connection_manager.send_to_user(user_id, {
+                "type": "notification_deleted",
+                "data": {"notification_id": notification_id}
+            })
+        
+        return success
+
+    async def delete_all_notifications(self, user_id: str) -> Dict[str, int]:
+        """Delete all notifications for a user."""
+        repository = await self._get_repository()
+        count = await repository.delete_all_notifications(user_id)
+        return {"deleted_count": count}
 
     async def _store_notification(
         self,
@@ -146,6 +322,7 @@ class NotificationService:
         metadata: Optional[Dict[str, Any]] = None
     ) -> Notification:
         """Store a notification in the database."""
+        repository = await self._get_repository()
         notification = Notification(
             user_id=user_id,
             user_email=user_email,
@@ -157,7 +334,80 @@ class NotificationService:
             created_at=datetime.utcnow(),
             read=False
         )
-        return await notification_repository.create_notification(notification)
+        return await repository.create_notification(notification)
+
+    async def send_wellbeing_reminder(
+        self,
+        user_id: str,
+        reminder_type: str,
+        message: str
+    ) -> Notification:
+        """Send a wellbeing reminder notification."""
+        return await self.create_in_app_notification(
+            user_id=user_id,
+            title=f"Wellbeing Reminder: {reminder_type}",
+            content=message,
+            notification_type=NotificationType.WELLBEING,
+            priority=NotificationPriority.NORMAL,
+            metadata={"reminder_type": reminder_type}
+        )
+
+    async def send_task_notification(
+        self,
+        user_id: str,
+        task_id: str,
+        action: str,
+        task_title: str
+    ) -> Notification:
+        """Send a task-related notification."""
+        action_titles = {
+            "created": "New Task Created",
+            "completed": "Task Completed",
+            "due_soon": "Task Due Soon",
+            "overdue": "Task Overdue"
+        }
+        return await self.create_in_app_notification(
+            user_id=user_id,
+            title=action_titles.get(action, "Task Update"),
+            content=f"Task '{task_title}' has been {action}",
+            notification_type=NotificationType.TASK,
+            priority=NotificationPriority.HIGH if action in ["due_soon", "overdue"] else NotificationPriority.NORMAL,
+            metadata={"task_id": task_id, "action": action}
+        )
+
+    async def send_document_notification(
+        self,
+        user_id: str,
+        document_id: str,
+        action: str,
+        document_name: str
+    ) -> Notification:
+        """Send a document-related notification."""
+        return await self.create_in_app_notification(
+            user_id=user_id,
+            title=f"Document {action.title()}",
+            content=f"Document '{document_name}' has been {action}",
+            notification_type=NotificationType.DOCUMENT,
+            priority=NotificationPriority.NORMAL,
+            metadata={"document_id": document_id, "action": action}
+        )
+
+    async def send_system_notification(
+        self,
+        user_id: str,
+        title: str,
+        content: str,
+        priority: NotificationPriority = NotificationPriority.NORMAL
+    ) -> Notification:
+        """Send a system notification."""
+        return await self.create_in_app_notification(
+            user_id=user_id,
+            title=title,
+            content=content,
+            notification_type=NotificationType.SYSTEM,
+            priority=priority
+        )
+
 
 # Create singleton instance
-notification_service = NotificationService() 
+notification_service = NotificationService()

@@ -26,7 +26,9 @@ from backend.api.v1.endpoints import (
     lumicoria_chat,
     agent_studio,
     workflow_execution,
-    onboarding
+    onboarding,
+    websocket,
+    device_tokens
 )
 
 api_router = APIRouter()
@@ -87,6 +89,20 @@ api_router.include_router(
     notifications.router,
     prefix="/notifications",
     tags=["notifications"]
+)
+
+# WebSocket endpoints for real-time notifications
+api_router.include_router(
+    websocket.router,
+    prefix="/ws",
+    tags=["websocket"]
+)
+
+# Device token endpoints for push notifications
+api_router.include_router(
+    device_tokens.router,
+    prefix="/device-tokens",
+    tags=["device-tokens"]
 )
 
 # Vision endpoints

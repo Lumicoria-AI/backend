@@ -1,62 +1,79 @@
-from typing import TypeVar, Generic, Optional, List, Dict, Any, Type
+from typing import TypeVar, Generic, Optional, List, Dict, Any, Type, Union
 from motor.motor_asyncio import AsyncIOMotorCollection
 from bson import ObjectId
 from datetime import datetime
 from backend.models.mongodb_models import MongoBaseModel
-# Remove MongoDB import as it will be handled in the dependency
-# from .mongodb import MongoDB
 import structlog
-# Import UpdateOne for bulk_update
 from pymongo import UpdateOne
 
 logger = structlog.get_logger()
 
 T = TypeVar('T', bound=MongoBaseModel)
 
-class BaseRepository(Generic[T]):
-    # Accept collection instance in constructor
-    def __init__(self, collection: AsyncIOMotorCollection, model_class: Type[T]):
-        self.collection = collection
-        self.model_class = model_class
-        # Remove _collection and collection_name
-        # self.collection_name = collection_name
-        # self._collection: Optional[AsyncIOMotorCollection] = None
+class _CollectionAccessor:
+    def __init__(self, repo: "BaseRepository"):
+        self._repo = repo
 
-    # Remove the async collection property
-    # @property
-    # async def collection(self) -> AsyncIOMotorCollection:
-    #     if not self._collection:
-    #         self._collection = await MongoDB.get_collection(self.collection_name)
-    #         # Create indexes
-    #         await self._create_indexes()
-    #     return self._collection
+    def __await__(self):
+        return self._repo._get_collection().__await__()
+
+    def __getattr__(self, item: str):
+        if self._repo._collection is None:
+            raise RuntimeError("MongoDB collection not initialized; use `await self.collection` first")
+        return getattr(self._repo._collection, item)
+
+
+class BaseRepository(Generic[T]):
+    """
+    Base repository supporting both legacy (collection name) and modern
+    (collection instance) initialization patterns.
+    """
+    def __init__(self, collection: Union[str, AsyncIOMotorCollection], model_class: Type[T]):
+        self._collection_name: Optional[str] = None
+        self._collection: Optional[AsyncIOMotorCollection] = None
+        if isinstance(collection, AsyncIOMotorCollection):
+            self._collection = collection
+        else:
+            self._collection_name = str(collection)
+        self.model_class = model_class
+        # Expose a dual-mode accessor so both `await self.collection` and
+        # `self.collection.insert_one(...)` can work depending on initialization.
+        self.collection = _CollectionAccessor(self)
+
+    async def _get_collection(self) -> AsyncIOMotorCollection:
+        if self._collection is None:
+            if not self._collection_name:
+                raise RuntimeError("MongoDB collection is not configured")
+            from .mongodb import MongoDB
+            self._collection = await MongoDB.get_collection(self._collection_name)
+            await self._create_indexes()
+        return self._collection
 
     async def _create_indexes(self):
         """Override this method in child classes to create specific indexes"""
         pass
 
     async def create(self, data: Dict[str, Any]) -> T:
-        # Access collection directly
+        collection = await self._get_collection()
         data["created_at"] = datetime.utcnow()
-        result = await self.collection.insert_one(data)
-        # Use self.collection explicitly for find_one
-        created_doc = await self.collection.find_one({"_id": result.inserted_id})
+        result = await collection.insert_one(data)
+        created_doc = await collection.find_one({"_id": result.inserted_id})
         if created_doc:
             return self.model_class(**created_doc)
         # Handle case where insert_one succeeds but find_one fails immediately after
         raise Exception("Failed to retrieve document after creation")
 
     async def get_by_id(self, id: str) -> Optional[T]:
-        # Access collection directly
-        doc = await self.collection.find_one({"_id": ObjectId(id)})
+        collection = await self._get_collection()
+        doc = await collection.find_one({"_id": ObjectId(id)})
         return self.model_class(**doc) if doc else None
 
     async def update(self, id: str, data: Dict[str, Any]) -> Optional[T]:
-        # Access collection directly
+        collection = await self._get_collection()
         update_data = {k: v for k, v in data.items() if v is not None}
         if update_data:
             update_data["updated_at"] = datetime.utcnow()
-            await self.collection.update_one(
+            await collection.update_one(
                 {"_id": ObjectId(id)},
                 {"$set": update_data}
             )
@@ -64,8 +81,8 @@ class BaseRepository(Generic[T]):
         return await self.get_by_id(id)
 
     async def delete(self, id: str) -> bool:
-        # Access collection directly
-        result = await self.collection.delete_one({"_id": ObjectId(id)})
+        collection = await self._get_collection()
+        result = await collection.delete_one({"_id": ObjectId(id)})
         return result.deleted_count > 0
 
     async def list(
@@ -75,8 +92,7 @@ class BaseRepository(Generic[T]):
         filters: Optional[Dict[str, Any]] = None,
         sort: Optional[List[tuple]] = None
     ) -> List[T]:
-        # Access collection directly
-        collection = self.collection
+        collection = await self._get_collection()
         query = filters or {}
         cursor = collection.find(query)
         
@@ -88,23 +104,20 @@ class BaseRepository(Generic[T]):
         return [self.model_class(**doc) for doc in docs]
 
     async def count(self, filters: Optional[Dict[str, Any]] = None) -> int:
-        # Access collection directly
-        collection = self.collection
+        collection = await self._get_collection()
         query = filters or {}
         return await collection.count_documents(query)
 
     async def watch(self):
         """Watch for changes in the collection (real-time updates)"""
-        # Access collection directly
-        collection = self.collection
+        collection = await self._get_collection()
         # Ensure change streams are supported and properly configured
         async with collection.watch() as stream:
             async for change in stream:
                 yield change
 
     async def bulk_create(self, items: List[Dict[str, Any]]) -> List[T]:
-        # Access collection directly
-        collection = self.collection
+        collection = await self._get_collection()
         now = datetime.utcnow()
         for item in items:
             item["created_at"] = now
@@ -115,12 +128,9 @@ class BaseRepository(Generic[T]):
         return [self.model_class(**doc) for doc in docs]
 
     async def bulk_update(self, updates: List[Dict[str, Any]]) -> bool:
-        # Access collection directly
-        collection = self.collection
+        collection = await self._get_collection()
         now = datetime.utcnow()
         operations = []
-        # Import UpdateOne here if not globally imported in this file
-        from pymongo import UpdateOne
         for update in updates:
             id = update.pop("_id", None)
             if id and update:
@@ -137,15 +147,13 @@ class BaseRepository(Generic[T]):
         return False
 
     async def bulk_delete(self, ids: List[str]) -> bool:
-        # Access collection directly
-        collection = self.collection
+        collection = await self._get_collection()
         # Use ObjectId for _id in the delete filter
         result = await collection.delete_many({"_id": {"$in": [ObjectId(id) for id in ids]}})
         return result.deleted_count > 0
 
     async def find_one(self, filters: Dict[str, Any]) -> Optional[T]:
-        # Access collection directly
-        collection = self.collection
+        collection = await self._get_collection()
         doc = await collection.find_one(filters)
         return self.model_class(**doc) if doc else None
 
@@ -156,8 +164,7 @@ class BaseRepository(Generic[T]):
         limit: int = 100,
         sort: Optional[List[tuple]] = None
     ) -> List[T]:
-        # Access collection directly
-        collection = self.collection
+        collection = await self.collection
         cursor = collection.find(filters)
         
         if sort:
@@ -168,7 +175,6 @@ class BaseRepository(Generic[T]):
         return [self.model_class(**doc) for doc in docs]
 
     async def aggregate(self, pipeline: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        # Access collection directly
-        collection = self.collection
+        collection = await self.collection
         cursor = collection.aggregate(pipeline)
-        return await cursor.to_list(length=None) 
+        return await cursor.to_list(length=None)

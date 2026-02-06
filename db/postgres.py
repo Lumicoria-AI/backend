@@ -115,6 +115,16 @@ async def get_async_db() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
+async def get_optional_async_db() -> AsyncGenerator[Optional[AsyncSession], None]:
+    """Optional async DB dependency; yields None when Postgres is disabled."""
+    if not (settings.POSTGRES_ENABLED and settings.SQLALCHEMY_DATABASE_URI):
+        yield None
+        return
+    SessionLocal = get_async_sessionmaker()
+    async with SessionLocal() as session:
+        yield session
+
+
 async def init_postgres() -> None:
     """Initialize Postgres connection and validate connectivity."""
     if not (settings.POSTGRES_ENABLED and settings.SQLALCHEMY_DATABASE_URI):
@@ -153,4 +163,3 @@ async def check_postgres() -> bool:
         return True
     except Exception:
         return False
-

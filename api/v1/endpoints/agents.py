@@ -10,6 +10,8 @@ from backend.db.mongodb.repositories.agent_universe_repository import agent_univ
 from backend.db.mongodb.repositories.component_repository import component_repository
 from backend.db.mongodb.repositories.permission_repository import permission_repository
 from backend.models.user import User
+from backend.db.postgres import get_optional_async_db
+from backend.db.postgres_repositories.agent_execution_repository import PostgresAgentExecutionRepository
 from backend.models.mongodb_models import (
     Agent,
     AgentCreate,
@@ -19,6 +21,7 @@ from backend.models.mongodb_models import (
     AgentStatus
 )
 from backend.core.security import rate_limit
+from sqlalchemy.ext.asyncio import AsyncSession
 
 # Import the AgentService and agent implementations
 from backend.agents.agent_service import AgentService
@@ -609,50 +612,55 @@ async def get_agent_capabilities(
 @router.get("/analytics", response_model=Dict[str, Any])
 async def get_agent_analytics(
     time_range: str = Query("7d", pattern="^(1d|7d|30d|90d|1y)$"),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession | None = Depends(get_optional_async_db)
 ) -> Any:
     """
     Get agent analytics.
     """
-    # Placeholder for fetching agent analytics
-    analytics_data = {
+    if settings.POSTGRES_ENABLED and db is not None:
+        repo = PostgresAgentExecutionRepository(db)
+        return await repo.get_execution_stats(
+            organization_id=current_user.organization_id,
+            time_range=time_range
+        )
+    return {
         "time_range": time_range,
-        "total_executions": 1000, # Example data
-        "executions_by_agent_type": {
-            "document": 500,
-            "wellbeing": 200,
-            "vision": 150,
-            "meeting": 100,
-            "creative": 30,
-            "student": 20
-        },
-        "successful_executions": 950,
-        "failed_executions": 50
+        "total_executions": 0,
+        "executions_by_agent_type": {},
+        "successful_executions": 0,
+        "failed_executions": 0
     }
-    return analytics_data
 
 @router.get("/summary", response_model=AgentSummaryResponse)
 async def get_agent_summary(
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession | None = Depends(get_optional_async_db)
 ) -> Dict[str, Any]:
     """
     Get agent summary statistics.
     """
-    # Placeholder for fetching agent summary statistics
-    summary_data = {
-        "total_agents": 6, # Example data
-        "active_agents": 5,
-        "avg_success_rate": 0.93,
-        "avg_error_rate": 0.07,
-        "avg_response_time": 0.6,
-        "total_usage": 1200,
-        "capability_stats": {
-            "document_processing": 500,
-            "wellbeing_coaching": 200,
-            "vision_analysis": 150,
-            "meeting_summarization": 100,
-            "creative_generation": 30,
-            "student_assistance": 20
+    if settings.POSTGRES_ENABLED and db is not None:
+        repo = PostgresAgentExecutionRepository(db)
+        stats = await repo.get_execution_stats(
+            organization_id=current_user.organization_id,
+            time_range="30d"
+        )
+        return {
+            "total_agents": 0,
+            "active_agents": 0,
+            "avg_success_rate": stats.get("success_rate", 0.0),
+            "avg_error_rate": stats.get("error_rate", 0.0),
+            "avg_response_time": stats.get("avg_duration_ms", 0.0) / 1000.0 if stats.get("avg_duration_ms") else 0.0,
+            "total_usage": stats.get("total_executions", 0),
+            "capability_stats": stats.get("executions_by_agent_type", {})
         }
+    return {
+        "total_agents": 0,
+        "active_agents": 0,
+        "avg_success_rate": 0.0,
+        "avg_error_rate": 0.0,
+        "avg_response_time": 0.0,
+        "total_usage": 0,
+        "capability_stats": {}
     }
-    return summary_data

@@ -10,6 +10,11 @@ from backend.models.user import User
 from backend.models.mongodb_models import ComponentType, ComponentCategory
 from backend.db.mongodb.repositories.component_repository import component_repository
 from backend.agents.studio_service import StudioService, ComponentDefinition, ComponentInstance, AgentWorkflow
+from backend.db.postgres import get_optional_async_db
+from backend.db.postgres_repositories.workflow_repository import PostgresWorkflowRepository
+from backend.db.mongodb.repositories.workflow_repository import workflow_repository
+from backend.core.config import settings
+from sqlalchemy.ext.asyncio import AsyncSession
 from backend.agents.security import AgentSecurityContext, AgentPermission
 from backend.agents.factory import AgentFactory
 from backend.agents.security import AgentSecurityManager
@@ -21,10 +26,21 @@ logger = structlog.get_logger(__name__)
 router = APIRouter()
 
 # Initialize the StudioService - in production this should be handled via dependency injection
-def get_studio_service() -> StudioService:
+async def get_studio_service(
+    db: AsyncSession | None = Depends(get_optional_async_db)
+) -> StudioService:
     agent_factory = AgentFactory()
     security_manager = AgentSecurityManager(jwt_secret="temp-secret-for-dev")  # In production, load from environment
-    return StudioService(agent_factory, security_manager)
+    workflow_repo = None
+    if settings.POSTGRES_ENABLED and db is not None:
+        workflow_repo = PostgresWorkflowRepository(db)
+    return StudioService(
+        agent_factory,
+        security_manager,
+        workflow_repo=workflow_repo,
+        mongo_workflow_repo=workflow_repository,
+        dual_write=settings.POSTGRES_DUAL_WRITE
+    )
 
 # Pydantic models for request/response
 class ComponentDefinitionModel(BaseModel):
@@ -284,15 +300,7 @@ async def get_workflows(
             permissions=[AgentPermission.READ]
         )
         
-        workflows = []
-        
-        # Filter workflows based on security context
-        for workflow_id, workflow in studio_service._workflows.items():
-            # Show public workflows or those created by the current user
-            if (workflow.is_public or 
-                workflow.created_by == security_context.user_id or 
-                AgentPermission.ADMIN in security_context.permissions):
-                workflows.append(workflow)
+        workflows = await studio_service.list_workflows(security_context)
         
         # Convert to response model
         return [
@@ -321,6 +329,11 @@ async def get_workflows(
             for workflow in workflows
         ]
         
+    except PermissionError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e)
+        )
     except Exception as e:
         logger.error("Error getting workflows", error=str(e))
         raise HTTPException(
@@ -338,28 +351,17 @@ async def get_workflow(
     Get a specific workflow by ID.
     """
     try:
-        if workflow_id not in studio_service._workflows:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Workflow not found: {workflow_id}"
-            )
-            
-        workflow = studio_service._workflows[workflow_id]
-        
         # Check if user has permission to access this workflow
         security_context = AgentSecurityContext(
             user_id=str(current_user.id),
             organization_id=str(current_user.organization_id) if hasattr(current_user, "organization_id") else None,
             permissions=[AgentPermission.READ]
         )
-        
-        if (not workflow.is_public and 
-            workflow.created_by != security_context.user_id and 
-            AgentPermission.ADMIN not in security_context.permissions):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You don't have permission to access this workflow"
-            )
+
+        workflow = await studio_service.get_workflow(
+            workflow_id=workflow_id,
+            security_context=security_context
+        )
         
         return WorkflowResponse(
             id=workflow.id,
@@ -384,6 +386,16 @@ async def get_workflow(
             tags=workflow.tags
         )
         
+    except PermissionError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e)
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -404,12 +416,6 @@ async def update_workflow(
     Update an existing workflow.
     """
     try:
-        if workflow_id not in studio_service._workflows:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Workflow not found: {workflow_id}"
-            )
-            
         # Set up security context
         security_context = AgentSecurityContext(
             user_id=str(current_user.id),
@@ -475,6 +481,11 @@ async def update_workflow(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=str(e)
         )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
     except HTTPException:
         raise
     except Exception as e:
@@ -507,26 +518,27 @@ async def delete_workflow(
             permissions=[AgentPermission.DELETE]
         )
         
-        workflow = studio_service._workflows[workflow_id]
+        await studio_service.delete_workflow(
+            workflow_id=workflow_id,
+            security_context=security_context
+        )
         
-        # Check if user has permission to delete this workflow
-        if (workflow.created_by != security_context.user_id and 
-            AgentPermission.ADMIN not in security_context.permissions):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You don't have permission to delete this workflow"
-            )
-            
-        # Remove the workflow
-        async with studio_service._lock:
-            del studio_service._workflows[workflow_id]
-            
         logger.info(
             "workflow_deleted",
             workflow_id=workflow_id,
             user_id=security_context.user_id
         )
             
+    except PermissionError as e:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(e)
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
     except HTTPException:
         raise
     except Exception as e:

@@ -11,6 +11,8 @@ from backend.db.mongodb.repositories.agent_universe_repository import agent_univ
 # from backend.db.mongodb.repositories.live_interaction_repository import live_interaction_repository # Needs implementation
 from backend.services.ai_model_service import ai_model_service # Needs implementation
 # from backend.services.integration_service import integration_service # Needs implementation
+from backend.core.config import settings
+from backend.db.cassandra.live_telemetry_repository import cassandra_live_telemetry_repository
 
 # Initialize logger
 logger = get_logger("lumicoria.services.live_interaction")
@@ -56,6 +58,17 @@ class LiveInteractionService:
         processed_data = {}
 
         try:
+            # Log raw telemetry to Cassandra if enabled
+            if settings.db.CASSANDRA_ENABLED:
+                await cassandra_live_telemetry_repository.log_event(
+                    organization_id=organization_id,
+                    session_id=session_id,
+                    user_id=user_id,
+                    data_type=data_type,
+                    payload={"raw_content": content},
+                    metadata=metadata or {}
+                )
+
             # --- AI Processing Step ---
             if data_type == "image":
                 # Decode image content (base64)

@@ -386,6 +386,59 @@ class AgentService:
         if len(self.recent_executions) > self.max_execution_history:
             self.recent_executions = self.recent_executions[-self.max_execution_history:]
 
+        # Persist to Postgres if enabled
+        try:
+            from backend.core.config import settings as app_settings
+            if app_settings.POSTGRES_ENABLED and app_settings.SQLALCHEMY_DATABASE_URI:
+                loop = asyncio.get_event_loop()
+                loop.create_task(
+                    self._persist_execution_async(
+                        execution_id=execution_id,
+                        agent_name=agent_name,
+                        agent_type=agent_type,
+                        start_time=start_time,
+                        end_time=end_time,
+                        success=success,
+                        error_message=error_message,
+                        async_execution=async_execution,
+                    )
+                )
+        except Exception:
+            # Never fail request flow if persistence fails
+            pass
+
+    async def _persist_execution_async(
+        self,
+        execution_id: str,
+        agent_name: str,
+        agent_type: str,
+        start_time: datetime,
+        end_time: datetime,
+        success: bool,
+        error_message: Optional[str] = None,
+        async_execution: bool = False,
+    ) -> None:
+        try:
+            from backend.db.postgres import get_async_sessionmaker
+            from backend.db.postgres_repositories.agent_execution_repository import PostgresAgentExecutionRepository
+
+            SessionLocal = get_async_sessionmaker()
+            async with SessionLocal() as session:
+                repo = PostgresAgentExecutionRepository(session)
+                await repo.log_execution(
+                    execution_id=execution_id,
+                    agent_name=agent_name,
+                    agent_type=agent_type,
+                    started_at=start_time,
+                    ended_at=end_time,
+                    success=success,
+                    async_execution=async_execution,
+                    error_message=error_message,
+                    metadata={},
+                )
+        except Exception:
+            return
+
     async def process_research_mentor_request(
         self,
         mode: str,

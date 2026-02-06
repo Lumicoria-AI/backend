@@ -60,6 +60,10 @@ class CassandraClient:
         register_connection(str(cls.session), session=cls.session)
         set_default_connection(str(cls.session))
 
+        # Ensure tables exist
+        from .schema import ensure_cassandra_schema
+        ensure_cassandra_schema(cls.session)
+
     @classmethod
     async def disconnect(cls) -> None:
         if not settings.db.CASSANDRA_ENABLED:

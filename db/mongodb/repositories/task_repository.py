@@ -77,6 +77,84 @@ class TaskRepository(BaseRepository[Task]):
             )
             raise
 
+    async def create_task_with_postgres_id(
+        self,
+        task_data: TaskCreate,
+        creator_id: str,
+        organization_id: str,
+        postgres_id: str
+    ) -> Task:
+        """Create a new task and store the linked Postgres ID."""
+        task_dict = task_data.dict()
+        metadata = task_dict.get("metadata") or {}
+        metadata["postgres_id"] = postgres_id
+        task_dict["metadata"] = metadata
+        task_dict.update({
+            "created_by": ObjectId(creator_id),
+            "organization_id": ObjectId(organization_id),
+            "status": TaskStatus.TODO if not task_dict.get("status") else task_dict.get("status"),
+            "created_at": datetime.utcnow()
+        })
+
+        if task_dict.get("assigned_to"):
+            task_dict["assigned_to"] = ObjectId(task_dict["assigned_to"])
+
+        try:
+            return await self.create(task_dict)
+        except Exception as e:
+            logger.error(
+                "Failed to create task with postgres_id",
+                error=str(e),
+                creator_id=creator_id,
+                organization_id=organization_id,
+                postgres_id=postgres_id
+            )
+            raise
+
+    async def get_task_by_postgres_id(
+        self,
+        postgres_id: str,
+        organization_id: Optional[str] = None
+    ) -> Optional[Task]:
+        """Get a task by linked Postgres ID."""
+        collection = await self.collection
+        query: Dict[str, Any] = {"metadata.postgres_id": postgres_id}
+        if organization_id:
+            query["organization_id"] = ObjectId(organization_id)
+        doc = await collection.find_one(query)
+        return Task(**doc) if doc else None
+
+    async def update_task_by_postgres_id(
+        self,
+        postgres_id: str,
+        update_data: Dict[str, Any],
+        organization_id: Optional[str] = None
+    ) -> Optional[Task]:
+        """Update a task by linked Postgres ID."""
+        collection = await self.collection
+        query: Dict[str, Any] = {"metadata.postgres_id": postgres_id}
+        if organization_id:
+            query["organization_id"] = ObjectId(organization_id)
+        doc = await collection.find_one(query)
+        if not doc:
+            return None
+        return await self.update(str(doc["_id"]), update_data)
+
+    async def delete_task_by_postgres_id(
+        self,
+        postgres_id: str,
+        organization_id: Optional[str] = None
+    ) -> bool:
+        """Delete a task by linked Postgres ID."""
+        collection = await self.collection
+        query: Dict[str, Any] = {"metadata.postgres_id": postgres_id}
+        if organization_id:
+            query["organization_id"] = ObjectId(organization_id)
+        doc = await collection.find_one(query)
+        if not doc:
+            return False
+        return await self.delete(str(doc["_id"]))
+
     async def get_user_tasks(
         self,
         user_id: str,

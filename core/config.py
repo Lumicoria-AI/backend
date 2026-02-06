@@ -56,6 +56,7 @@ class DatabaseSettings(BaseSettings):
     CASSANDRA_USERNAME: Optional[str] = None
     CASSANDRA_PASSWORD: Optional[str] = None
     CASSANDRA_CONNECT_TIMEOUT: int = 5
+    CASSANDRA_DUAL_WRITE: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +140,7 @@ class Settings(BaseSettings):
 
     # ── PostgreSQL / SQLAlchemy (optional) ─────────────────────────────
     POSTGRES_ENABLED: bool = False
+    POSTGRES_DUAL_WRITE: bool = False
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432
     POSTGRES_USER: str = "postgres"

@@ -19,6 +19,13 @@ logger = structlog.get_logger()
 class WellbeingRepository(BaseRepository[WellbeingData]):
     def __init__(self):
         super().__init__("wellbeing", WellbeingData)
+        self._metrics_collection = None
+
+    async def _get_metrics_collection(self):
+        if self._metrics_collection is None:
+            from backend.db.mongodb.mongodb import MongoDB
+            self._metrics_collection = await MongoDB.get_collection("wellbeing_metrics")
+        return self._metrics_collection
 
     async def _create_indexes(self):
         collection = await self.collection
@@ -76,6 +83,102 @@ class WellbeingRepository(BaseRepository[WellbeingData]):
                 organization_id=organization_id
             )
             raise
+
+    async def create_metric(
+        self,
+        user_id: str,
+        organization_id: str,
+        metric_type: str,
+        value: float,
+        metadata: Optional[Dict[str, Any]],
+        source: str,
+        timestamp: Optional[datetime] = None
+    ) -> Dict[str, Any]:
+        collection = await self._get_metrics_collection()
+        doc = {
+            "user_id": ObjectId(user_id),
+            "organization_id": ObjectId(organization_id),
+            "metric_type": metric_type,
+            "value": value,
+            "metadata": metadata or {},
+            "source": source,
+            "timestamp": timestamp or datetime.utcnow(),
+            "created_at": datetime.utcnow()
+        }
+        result = await collection.insert_one(doc)
+        doc["_id"] = result.inserted_id
+        return {
+            "id": str(doc["_id"]),
+            "user_id": user_id,
+            "organization_id": organization_id,
+            "metric_type": metric_type,
+            "value": value,
+            "metadata": metadata or {},
+            "source": source,
+            "timestamp": doc["timestamp"],
+        }
+
+    async def get_user_metrics(
+        self,
+        user_id: str,
+        organization_id: str,
+        metric_type: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        collection = await self._get_metrics_collection()
+        query = {
+            "user_id": ObjectId(user_id),
+            "organization_id": ObjectId(organization_id)
+        }
+        if metric_type:
+            query["metric_type"] = metric_type
+        if start_date or end_date:
+            query["timestamp"] = {}
+            if start_date:
+                query["timestamp"]["$gte"] = start_date
+            if end_date:
+                query["timestamp"]["$lte"] = end_date
+        docs = await collection.find(query).sort("timestamp", -1).to_list(length=limit)
+        results = []
+        for doc in docs:
+            results.append({
+                "id": str(doc.get("_id")),
+                "user_id": str(doc.get("user_id")),
+                "organization_id": str(doc.get("organization_id")),
+                "metric_type": doc.get("metric_type"),
+                "value": doc.get("value"),
+                "metadata": doc.get("metadata", {}),
+                "source": doc.get("source"),
+                "timestamp": doc.get("timestamp"),
+            })
+        return results
+
+    async def get_user_wellbeing_data(
+        self,
+        user_id: str,
+        organization_id: str
+    ) -> Dict[str, Any]:
+        # Provide a minimal aggregate for agent context
+        latest_metrics = {}
+        metrics = await self.get_user_metrics(
+            user_id=user_id,
+            organization_id=organization_id,
+            limit=50
+        )
+        for metric in metrics:
+            mtype = metric.get("metric_type")
+            if mtype and mtype not in latest_metrics:
+                latest_metrics[mtype] = metric.get("value")
+
+        return {
+            "latest_metrics": latest_metrics,
+            "activity_log": [],
+            "screen_time": 0,
+            "breaks_taken": 0,
+            "focus_sessions": 0
+        }
 
     async def update_wellbeing_metrics(
         self,

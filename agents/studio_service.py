@@ -80,7 +80,10 @@ class StudioService:
         self,
         agent_factory: AgentFactory,
         security_manager: AgentSecurityManager,
-        cache: Optional[AgentCache] = None
+        cache: Optional[AgentCache] = None,
+        workflow_repo: Optional[Any] = None,
+        mongo_workflow_repo: Optional[Any] = None,
+        dual_write: bool = False
     ):
         """
         Initialize the studio service.
@@ -95,6 +98,9 @@ class StudioService:
         self.cache = cache
         self._component_definitions: Dict[str, ComponentDefinition] = {}
         self._workflows: Dict[str, AgentWorkflow] = {}
+        self._workflow_repo = workflow_repo
+        self._mongo_workflow_repo = mongo_workflow_repo
+        self._dual_write = dual_write
         self._lock = asyncio.Lock()
         
         # Register default components
@@ -178,6 +184,41 @@ class StudioService:
             component_name=component.name,
             component_type=component.type.value
         )
+
+    def _components_to_dicts(self, components: List[ComponentInstance]) -> List[Dict[str, Any]]:
+        return [c.__dict__ for c in components]
+
+    def _components_from_dicts(self, components: List[Dict[str, Any]]) -> List[ComponentInstance]:
+        return [
+            ComponentInstance(
+                id=c.get("id"),
+                component_id=c.get("component_id"),
+                name=c.get("name"),
+                config=c.get("config", {}),
+                position=c.get("position", {}),
+                connections=c.get("connections", []),
+            )
+            for c in (components or [])
+        ]
+
+    def _workflow_from_record(self, record: Any) -> AgentWorkflow:
+        if not isinstance(record, dict):
+            record = {
+                k: v for k, v in getattr(record, "__dict__", {}).items()
+                if not k.startswith("_sa_")
+            }
+        return AgentWorkflow(
+            id=str(record.get("id") or record.get("_id") or record.get("workflow_id")),
+            name=record.get("name"),
+            description=record.get("description"),
+            components=self._components_from_dicts(record.get("components", [])),
+            created_at=record.get("created_at") or datetime.utcnow(),
+            updated_at=record.get("updated_at") or datetime.utcnow(),
+            created_by=record.get("created_by"),
+            version=record.get("version", "1.0.0"),
+            is_public=record.get("is_public", False),
+            tags=record.get("tags", []) or [],
+        )
     
     async def create_workflow(
         self,
@@ -217,7 +258,74 @@ class StudioService:
                 is_public=is_public,
                 tags=tags or []
             )
-            
+
+            # Persist to Postgres if configured (primary), otherwise Mongo
+            if self._workflow_repo:
+                try:
+                    db_record = await self._workflow_repo.create_workflow({
+                        "name": workflow.name,
+                        "description": workflow.description,
+                        "components": self._components_to_dicts(workflow.components),
+                        "nodes": [],
+                        "connections": [],
+                        "organization_id": security_context.organization_id,
+                        "created_by": workflow.created_by,
+                        "version": workflow.version,
+                        "is_public": workflow.is_public,
+                        "tags": workflow.tags or [],
+                        "status": "draft",
+                    })
+                    # Sync IDs and timestamps with DB record
+                    workflow.id = str(db_record.id)
+                    workflow.created_at = db_record.created_at
+                    workflow.updated_at = db_record.updated_at
+                except Exception as e:
+                    logger.error("workflow_persist_failed", error=str(e))
+            elif self._mongo_workflow_repo:
+                try:
+                    mongo_record = await self._mongo_workflow_repo.create_workflow(
+                        {
+                            "name": workflow.name,
+                            "description": workflow.description,
+                            "components": self._components_to_dicts(workflow.components),
+                            "nodes": [],
+                            "connections": [],
+                            "version": workflow.version,
+                            "is_public": workflow.is_public,
+                            "tags": workflow.tags or [],
+                            "status": "draft",
+                        },
+                        organization_id=security_context.organization_id,
+                        created_by=workflow.created_by
+                    )
+                    workflow.id = str(mongo_record.get("id"))
+                    workflow.created_at = mongo_record.get("created_at") or workflow.created_at
+                    workflow.updated_at = mongo_record.get("updated_at") or workflow.updated_at
+                except Exception as e:
+                    logger.error("workflow_persist_failed_mongo", error=str(e))
+
+            # Dual-write to Mongo when Postgres is primary
+            if self._workflow_repo and self._dual_write and self._mongo_workflow_repo:
+                try:
+                    await self._mongo_workflow_repo.create_workflow(
+                        {
+                            "name": workflow.name,
+                            "description": workflow.description,
+                            "components": self._components_to_dicts(workflow.components),
+                            "nodes": [],
+                            "connections": [],
+                            "version": workflow.version,
+                            "is_public": workflow.is_public,
+                            "tags": workflow.tags or [],
+                            "status": "draft",
+                        },
+                        organization_id=security_context.organization_id,
+                        created_by=workflow.created_by,
+                        postgres_id=workflow.id
+                    )
+                except Exception as e:
+                    logger.error("workflow_dual_write_failed", error=str(e))
+
             self._workflows[workflow.id] = workflow
             
             logger.info(
@@ -250,10 +358,21 @@ class StudioService:
             raise PermissionError("Missing permission to update workflows")
         
         async with self._lock:
-            if workflow_id not in self._workflows:
+            workflow = self._workflows.get(workflow_id)
+            if workflow is None and self._workflow_repo:
+                record = await self._workflow_repo.get_workflow_by_id(workflow_id)
+                if record:
+                    workflow = self._workflow_from_record(record)
+                    self._workflows[workflow.id] = workflow
+            if workflow is None and self._mongo_workflow_repo:
+                record = await self._mongo_workflow_repo.get_workflow_by_id(
+                    workflow_id, organization_id=security_context.organization_id
+                )
+                if record:
+                    workflow = self._workflow_from_record(record)
+                    self._workflows[workflow.id] = workflow
+            if workflow is None:
                 raise ValueError(f"Workflow not found: {workflow_id}")
-            
-            workflow = self._workflows[workflow_id]
             
             # Check ownership or admin status
             if (workflow.created_by != security_context.user_id and 
@@ -272,8 +391,172 @@ class StudioService:
                 workflow_id=workflow_id,
                 user_id=security_context.user_id
             )
+
+            if self._workflow_repo:
+                try:
+                    db_updates = dict(updates)
+                    if "components" in db_updates:
+                        db_updates["components"] = self._components_to_dicts(db_updates["components"])
+                    await self._workflow_repo.update_workflow(
+                        workflow_id=workflow.id,
+                        updates=db_updates
+                    )
+                except Exception as e:
+                    logger.error("workflow_update_persist_failed", error=str(e))
+            elif self._mongo_workflow_repo:
+                try:
+                    mongo_updates = dict(updates)
+                    if "components" in mongo_updates:
+                        mongo_updates["components"] = self._components_to_dicts(mongo_updates["components"])
+                    await self._mongo_workflow_repo.update_workflow(
+                        workflow_id=workflow.id,
+                        update_data=mongo_updates,
+                        organization_id=security_context.organization_id
+                    )
+                except Exception as e:
+                    logger.error("workflow_update_persist_failed_mongo", error=str(e))
+
+            if self._workflow_repo and self._dual_write and self._mongo_workflow_repo:
+                try:
+                    mongo_updates = dict(updates)
+                    if "components" in mongo_updates:
+                        mongo_updates["components"] = self._components_to_dicts(mongo_updates["components"])
+                    await self._mongo_workflow_repo.update_workflow_by_postgres_id(
+                        postgres_id=workflow.id,
+                        update_data=mongo_updates,
+                        organization_id=security_context.organization_id
+                    )
+                except Exception as e:
+                    logger.error("workflow_dual_write_update_failed", error=str(e))
             
             return workflow
+
+    async def list_workflows(
+        self,
+        security_context: AgentSecurityContext,
+        skip: int = 0,
+        limit: int = 100
+    ) -> List[AgentWorkflow]:
+        if not self.security_manager.has_permission(security_context, AgentPermission.READ):
+            raise PermissionError("Missing permission to read workflows")
+
+        if self._workflow_repo:
+            try:
+                is_admin = AgentPermission.ADMIN in security_context.permissions
+                records = await self._workflow_repo.list_accessible_workflows(
+                    organization_id=security_context.organization_id,
+                    user_id=security_context.user_id,
+                    is_admin=is_admin,
+                    skip=skip,
+                    limit=limit,
+                )
+                workflows = [self._workflow_from_record(r) for r in records]
+                for wf in workflows:
+                    self._workflows[wf.id] = wf
+                return workflows
+            except Exception as e:
+                logger.error("workflow_list_failed", error=str(e))
+                raise
+
+        if self._mongo_workflow_repo:
+            records = await self._mongo_workflow_repo.list_workflows(
+                organization_id=security_context.organization_id,
+                created_by=None,
+                include_public=True,
+                skip=skip,
+                limit=limit
+            )
+            workflows = [self._workflow_from_record(r) for r in records]
+            for wf in workflows:
+                self._workflows[wf.id] = wf
+            return workflows
+
+        # Fallback to in-memory
+        workflows = []
+        for workflow_id, workflow in self._workflows.items():
+            if (workflow.is_public or
+                workflow.created_by == security_context.user_id or
+                AgentPermission.ADMIN in security_context.permissions):
+                workflows.append(workflow)
+        return workflows[skip:skip + limit]
+
+    async def get_workflow(
+        self,
+        workflow_id: str,
+        security_context: AgentSecurityContext
+    ) -> AgentWorkflow:
+        if not self.security_manager.has_permission(security_context, AgentPermission.READ):
+            raise PermissionError("Missing permission to read workflows")
+
+        workflow = self._workflows.get(workflow_id)
+        if workflow is None and self._workflow_repo:
+            record = await self._workflow_repo.get_workflow_by_id(workflow_id)
+            if record:
+                workflow = self._workflow_from_record(record)
+                self._workflows[workflow.id] = workflow
+        if workflow is None and self._mongo_workflow_repo:
+            record = await self._mongo_workflow_repo.get_workflow_by_id(
+                workflow_id, organization_id=security_context.organization_id
+            )
+            if record:
+                workflow = self._workflow_from_record(record)
+                self._workflows[workflow.id] = workflow
+        if workflow is None:
+            raise ValueError(f"Workflow not found: {workflow_id}")
+
+        if (not workflow.is_public and
+            workflow.created_by != security_context.user_id and
+            AgentPermission.ADMIN not in security_context.permissions):
+            raise PermissionError("Not authorized to access this workflow")
+
+        return workflow
+
+    async def delete_workflow(
+        self,
+        workflow_id: str,
+        security_context: AgentSecurityContext
+    ) -> None:
+        if not self.security_manager.has_permission(security_context, AgentPermission.DELETE):
+            raise PermissionError("Missing permission to delete workflows")
+
+        async with self._lock:
+            workflow = self._workflows.get(workflow_id)
+            if workflow is None and self._workflow_repo:
+                record = await self._workflow_repo.get_workflow_by_id(workflow_id)
+                if record:
+                    workflow = self._workflow_from_record(record)
+            if workflow is None and self._mongo_workflow_repo:
+                record = await self._mongo_workflow_repo.get_workflow_by_id(
+                    workflow_id, organization_id=security_context.organization_id
+                )
+                if record:
+                    workflow = self._workflow_from_record(record)
+            if workflow is None:
+                raise ValueError(f"Workflow not found: {workflow_id}")
+
+            if (workflow.created_by != security_context.user_id and
+                AgentPermission.ADMIN not in security_context.permissions):
+                raise PermissionError("Not authorized to delete this workflow")
+
+            # Persist delete
+            if self._workflow_repo:
+                await self._workflow_repo.delete_workflow(workflow_id)
+            elif self._mongo_workflow_repo:
+                await self._mongo_workflow_repo.delete_workflow(
+                    workflow_id, organization_id=security_context.organization_id
+                )
+
+            if self._workflow_repo and self._dual_write and self._mongo_workflow_repo:
+                try:
+                    await self._mongo_workflow_repo.delete_workflow_by_postgres_id(
+                        postgres_id=workflow_id,
+                        organization_id=security_context.organization_id
+                    )
+                except Exception as e:
+                    logger.error("workflow_dual_write_delete_failed", error=str(e))
+
+            if workflow_id in self._workflows:
+                del self._workflows[workflow_id]
     
     async def deploy_workflow(
         self,
