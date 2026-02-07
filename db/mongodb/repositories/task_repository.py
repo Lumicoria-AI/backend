@@ -30,6 +30,7 @@ class TaskRepository(BaseRepository[Task]):
         await collection.create_index("due_date")
         await collection.create_index("created_at")
         await collection.create_index("parent_task_id")
+        await collection.create_index("metadata.postgres_id")
         # Compound indexes for common queries
         await collection.create_index([
             ("organization_id", ASCENDING),

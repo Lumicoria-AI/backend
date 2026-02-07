@@ -1,9 +1,5 @@
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from jinja2 import Environment, FileSystemLoader
 from pathlib import Path
 import json
 from pydantic import BaseModel, EmailStr
@@ -86,17 +82,19 @@ class NotificationService:
     
     def __init__(self):
         self.email_templates_dir = Path(__file__).parent / "templates" / "email"
-        self.jinja_env = Environment(loader=FileSystemLoader(str(self.email_templates_dir)))
         
-        # Email settings from config
-        self.smtp_server = getattr(settings, 'SMTP_SERVER', 'smtp.gmail.com')
-        self.smtp_port = getattr(settings, 'SMTP_PORT', 587)
-        self.smtp_username = getattr(settings, 'SMTP_USERNAME', '')
-        self.smtp_password = getattr(settings, 'SMTP_PASSWORD', '')
-        self.smtp_from_email = getattr(settings, 'SMTP_FROM_EMAIL', 'noreply@lumicoria.ai')
+        # Email service will be lazily initialized
+        self._email_service = None
         
         # Repository will be lazily initialized
         self._repository: Optional[NotificationRepository] = None
+    
+    async def _get_email_service(self):
+        """Get or initialize the email service."""
+        if self._email_service is None:
+            from .email_service import get_email_service
+            self._email_service = await get_email_service()
+        return self._email_service
 
     async def _get_repository(self) -> NotificationRepository:
         """Get or initialize the notification repository."""
@@ -111,38 +109,52 @@ class NotificationService:
         template_data: Dict[str, Any],
         priority: NotificationPriority = NotificationPriority.NORMAL
     ) -> bool:
-        """Send an email notification using a template."""
+        """Send an email notification using a template via SendGrid/Resend."""
         try:
-            # Load and render email template
-            template = self.jinja_env.get_template(f"{template_name}.html")
-            html_content = template.render(**template_data)
+            # Get the email service
+            email_service = await self._get_email_service()
             
-            # Create email message
-            msg = MIMEMultipart()
-            msg['From'] = self.smtp_from_email
-            msg['To'] = to_email
-            msg['Subject'] = template_data.get('subject', 'Notification from Lumicoria.ai')
-            
-            msg.attach(MIMEText(html_content, 'html'))
-            
-            # Send email
-            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
-                server.starttls()
-                server.login(self.smtp_username, self.smtp_password)
-                server.send_message(msg)
-            
-            # Store notification in database
-            await self._store_notification(
-                notification_type=NotificationType.EMAIL,
-                title=msg['Subject'],
-                content=html_content,
-                user_email=to_email,
-                priority=priority,
-                metadata={"template": template_name, "template_data": template_data}
+            # Send email using the production email service
+            result = await email_service.send(
+                to=str(to_email),
+                subject=template_data.get('subject', 'Notification from Lumicoria.ai'),
+                template_name=template_name,
+                template_data=template_data,
             )
             
-            logger.info("email_notification_sent", to_email=to_email, template=template_name)
-            return True
+            if result.success:
+                # Store notification in database
+                await self._store_notification(
+                    notification_type=NotificationType.EMAIL,
+                    title=template_data.get('subject', 'Email Notification'),
+                    content=f"Email sent via {result.provider}",
+                    user_email=to_email,
+                    priority=priority,
+                    metadata={
+                        "template": template_name,
+                        "template_data": template_data,
+                        "provider": result.provider,
+                        "message_id": result.message_id,
+                    }
+                )
+                
+                logger.info(
+                    "email_notification_sent",
+                    to_email=to_email,
+                    template=template_name,
+                    provider=result.provider,
+                    message_id=result.message_id
+                )
+                return True
+            else:
+                logger.error(
+                    "email_notification_failed",
+                    to_email=to_email,
+                    error=result.error_message,
+                    error_code=result.error_code
+                )
+                return False
+                
         except Exception as e:
             logger.error("email_notification_error", to_email=to_email, error=str(e))
             return False

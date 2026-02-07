@@ -55,8 +55,8 @@ class PostgresTaskRepository:
             metadata=task_data.get("metadata", {}),
             progress=task_data.get("progress", 0),
             completed_at=task_data.get("completed_at"),
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
+            created_at=task_data.get("created_at") or datetime.utcnow(),
+            updated_at=task_data.get("updated_at") or datetime.utcnow(),
         )
         self.session.add(task)
         await self.session.commit()

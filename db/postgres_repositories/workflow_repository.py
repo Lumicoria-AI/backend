@@ -31,8 +31,8 @@ class PostgresWorkflowRepository:
             is_public=data.get("is_public", False),
             tags=data.get("tags", []),
             status=data.get("status", "draft"),
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
+            created_at=data.get("created_at") or datetime.utcnow(),
+            updated_at=data.get("updated_at") or datetime.utcnow(),
         )
         self.session.add(workflow)
         await self.session.commit()

@@ -23,6 +23,10 @@ class PostgresAgentExecutionRepository:
         success: bool,
         async_execution: bool = False,
         error_message: Optional[str] = None,
+        user_id: Optional[str] = None,
+        organization_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        workflow_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> AgentExecutionSQL:
         duration_ms = int((ended_at - started_at).total_seconds() * 1000)
@@ -30,6 +34,10 @@ class PostgresAgentExecutionRepository:
             id=execution_id,
             agent_name=agent_name,
             agent_type=agent_type,
+            agent_id=agent_id,
+            workflow_id=workflow_id,
+            user_id=user_id,
+            organization_id=organization_id,
             status="success" if success else "error",
             error_message=error_message,
             async_execution=async_execution,

@@ -46,6 +46,27 @@ aiohttp  # For async HTTP requests
 # Development Dependencies
 pytest
 pytest-asyncio
+
+# Vector Store Dependencies
+numpy
+weaviate-client
+qdrant-client
+chromadb
+
+# Monitoring and Logging
+prometheus-client
+structlog
+sentry-sdk
+
+# Utilities
+httpx
+tenacity
+python-jose[cryptography]
+aiohttp  # For async HTTP requests
+
+# Development Dependencies
+pytest
+pytest-asyncio
 pytest-cov
 black
 isort 
@@ -57,3 +78,7 @@ aiofiles
 langchain 
 langchain-text-splitters 
 langchain-community
+
+# Email Providers
+sendgrid>=6.10.0
+resend>=0.7.0

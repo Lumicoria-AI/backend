@@ -184,6 +184,11 @@ class AgentService:
         try:
             # Execute agent
             result = agent.process(input_data)
+
+            organization_id = input_data.get("organization_id") or input_data.get("org_id")
+            user_id = input_data.get("user_id")
+            workflow_id = input_data.get("workflow_id")
+            agent_id = input_data.get("agent_id") or agent.config.get("agent_id")
             
             # Record successful execution
             self._record_execution(
@@ -192,12 +197,21 @@ class AgentService:
                 agent_type=agent.config.get("type", "unknown"),
                 start_time=start_time,
                 end_time=datetime.utcnow(),
-                success=True
+                success=True,
+                organization_id=organization_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                workflow_id=workflow_id
             )
             
             return result
         
         except Exception as e:
+            organization_id = input_data.get("organization_id") or input_data.get("org_id")
+            user_id = input_data.get("user_id")
+            workflow_id = input_data.get("workflow_id")
+            agent_id = input_data.get("agent_id") or agent.config.get("agent_id")
+
             # Record failed execution
             self._record_execution(
                 execution_id=execution_id,
@@ -206,7 +220,11 @@ class AgentService:
                 start_time=start_time,
                 end_time=datetime.utcnow(),
                 success=False,
-                error_message=str(e)
+                error_message=str(e),
+                organization_id=organization_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                workflow_id=workflow_id
             )
             
             logger.error(f"Error executing agent {agent_name}: {str(e)}")
@@ -244,6 +262,11 @@ class AgentService:
         try:
             # Execute agent asynchronously
             result = await agent.process_async(input_data)
+
+            organization_id = input_data.get("organization_id") or input_data.get("org_id")
+            user_id = input_data.get("user_id")
+            workflow_id = input_data.get("workflow_id")
+            agent_id = input_data.get("agent_id") or agent.config.get("agent_id")
             
             # Record successful execution
             self._record_execution(
@@ -253,12 +276,21 @@ class AgentService:
                 start_time=start_time,
                 end_time=datetime.utcnow(),
                 success=True,
-                async_execution=True
+                async_execution=True,
+                organization_id=organization_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                workflow_id=workflow_id
             )
             
             return result
         
         except Exception as e:
+            organization_id = input_data.get("organization_id") or input_data.get("org_id")
+            user_id = input_data.get("user_id")
+            workflow_id = input_data.get("workflow_id")
+            agent_id = input_data.get("agent_id") or agent.config.get("agent_id")
+
             # Record failed execution
             self._record_execution(
                 execution_id=execution_id,
@@ -268,7 +300,11 @@ class AgentService:
                 end_time=datetime.utcnow(),
                 success=False,
                 error_message=str(e),
-                async_execution=True
+                async_execution=True,
+                organization_id=organization_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                workflow_id=workflow_id
             )
             
             logger.error(f"Error executing agent {agent_name} asynchronously: {str(e)}")
@@ -359,7 +395,11 @@ class AgentService:
                          end_time: datetime,
                          success: bool,
                          error_message: Optional[str] = None,
-                         async_execution: bool = False) -> None:
+                         async_execution: bool = False,
+                         organization_id: Optional[str] = None,
+                         user_id: Optional[str] = None,
+                         agent_id: Optional[str] = None,
+                         workflow_id: Optional[str] = None) -> None:
         """Record agent execution for monitoring."""
         # Calculate execution time in milliseconds
         execution_time_ms = int((end_time - start_time).total_seconds() * 1000)
@@ -373,7 +413,11 @@ class AgentService:
             "end_time": end_time.isoformat(),
             "execution_time_ms": execution_time_ms,
             "success": success,
-            "async": async_execution
+            "async": async_execution,
+            "organization_id": organization_id,
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "workflow_id": workflow_id
         }
         
         if error_message:
@@ -401,6 +445,10 @@ class AgentService:
                         success=success,
                         error_message=error_message,
                         async_execution=async_execution,
+                        organization_id=organization_id,
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        workflow_id=workflow_id,
                     )
                 )
         except Exception:
@@ -417,6 +465,10 @@ class AgentService:
         success: bool,
         error_message: Optional[str] = None,
         async_execution: bool = False,
+        organization_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        workflow_id: Optional[str] = None,
     ) -> None:
         try:
             from backend.db.postgres import get_async_sessionmaker
@@ -434,6 +486,10 @@ class AgentService:
                     success=success,
                     async_execution=async_execution,
                     error_message=error_message,
+                    organization_id=organization_id,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    workflow_id=workflow_id,
                     metadata={},
                 )
         except Exception:

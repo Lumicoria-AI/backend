@@ -91,6 +91,12 @@ class WorkflowResponse(BaseModel):
     is_public: bool
     tags: Optional[List[str]]
 
+class WorkflowSummaryResponse(BaseModel):
+    total_workflows: int
+    public_workflows: int
+    private_workflows: int
+    by_status: Dict[str, int]
+
 class DeploymentResponse(BaseModel):
     agent_id: str
     workflow_id: str
@@ -340,6 +346,43 @@ async def get_workflows(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get workflows: {str(e)}"
         )
+
+@router.get("/workflows/summary", response_model=WorkflowSummaryResponse)
+async def get_workflow_summary(
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession | None = Depends(get_optional_async_db)
+) -> Any:
+    """
+    Get summary statistics for workflows.
+    """
+    if settings.POSTGRES_ENABLED and db is not None:
+        repo = PostgresWorkflowRepository(db)
+        return await repo.get_workflow_stats(
+            organization_id=current_user.organization_id
+        )
+
+    # Fallback to MongoDB
+    records = await workflow_repository.list_workflows(
+        organization_id=current_user.organization_id,
+        created_by=None,
+        include_public=True,
+        skip=0,
+        limit=1000
+    )
+    by_status: Dict[str, int] = {}
+    public_count = 0
+    for r in records:
+        if r.get("is_public"):
+            public_count += 1
+        status = r.get("status") or "unknown"
+        by_status[status] = by_status.get(status, 0) + 1
+    total = len(records)
+    return {
+        "total_workflows": total,
+        "public_workflows": public_count,
+        "private_workflows": total - public_count,
+        "by_status": by_status,
+    }
 
 @router.get("/workflows/{workflow_id}", response_model=WorkflowResponse)
 async def get_workflow(

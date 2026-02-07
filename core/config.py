@@ -217,13 +217,17 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE: int = 10 * 1024 * 1024  # 10 MB
     ALLOWED_EXTENSIONS: set[str] = {"jpg", "jpeg", "png", "gif", "pdf", "doc", "docx"}
 
-    # ── Email (SMTP) — credentials via env vars only ───────────────────
-    SMTP_SERVER: str = "smtp.gmail.com"
-    SMTP_PORT: int = 587
-    SMTP_USERNAME: str = ""        # Set via SMTP_USERNAME env var
-    SMTP_PASSWORD: str = ""        # Set via SMTP_PASSWORD env var
-    SMTP_FROM_EMAIL: str = "noreply@lumicoria.ai"
-    SMTP_FROM_NAME: str = "Lumicoria.ai"
+    # ── Email Providers ───────────────────────────────────────────────
+    # SendGrid (primary) - Get key from https://sendgrid.com
+    SENDGRID_API_KEY: Optional[str] = None  # Set via SENDGRID_API_KEY env var
+    
+    # Resend (fallback) - Get key from https://resend.com
+    RESEND_API_KEY: Optional[str] = None  # Set via RESEND_API_KEY env var
+    
+    # Email configuration
+    EMAIL_FROM_ADDRESS: str = "noreply@lumicoria.ai"
+    EMAIL_FROM_NAME: str = "Lumicoria.ai"
+    EMAIL_SANDBOX_MODE: bool = False  # Set True to disable actual sending (testing)
 
     # ── External Integrations (all optional) ───────────────────────────
     NOTION_API_KEY: Optional[str] = None
