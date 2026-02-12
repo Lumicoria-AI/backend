@@ -1,42 +1,40 @@
 ai_models:
   # Provider-level defaults. The actual provider is selected by
   # DEFAULT_LLM_PROVIDER env var (or per-agent override below).
+  # API keys are loaded from env vars — never hardcode secrets here.
   perplexity:
-    # api_key: loaded from PERPLEXITY_API_KEY env var via settings (never hardcode)
     model: "sonar-large-online"
   gemini:
-    # api_key: loaded from GEMINI_API_KEY env var via settings (never hardcode)
     model: "gemini-2.0-flash"
+  openai:
+    model: "gpt-4o-mini"
+  anthropic:
+    model: "claude-3-5-sonnet-latest"
+  mistral:
+    model: "mistral-large-latest"
 
 
 agents:
+  # Agents use DEFAULT_LLM_PROVIDER unless 'provider' is explicitly set.
+  # To pin an agent to a specific provider, add:  provider: "openai"
   document_agent:
     type: "document"
-    # provider: uses DEFAULT_LLM_PROVIDER unless overridden  
-    model: "perplexity"  
   wellbeing_agent:
     type: "wellbeing"
-    model: "perplexity"
   vision_agent:
     type: "vision"
-    model: "perplexity"
     vision_tasks: ["text_extraction", "object_detection", "scene_analysis", "content_description"]
-    model_config:
-      model: "sonar-large-online"
   meeting_agent:
     type: "meeting"
-    model: "perplexity"
   creative_agent:
     type: "creative"
-    model: "gemini"  # Creative tasks benefit from Gemini's capabilities
+    # Optionally pin to a specific provider:
+    # provider: "gemini"
   student_agent:
     type: "student"
-    model: "perplexity"
   rag:
     type: "rag"
-    model: "perplexity"
     model_config:
-      model: "sonar-medium-online"
       temperature: 0.7
       max_tokens: 1024
     context_settings:

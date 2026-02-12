@@ -63,6 +63,12 @@ class BaseAgent(ABC):
             return "perplexity"
         if "gemini" in model_name:
             return "gemini"
+        if "gpt" in model_name or "openai" in model_name or model_name.startswith(("o1", "o3")):
+            return "openai"
+        if "claude" in model_name or "anthropic" in model_name:
+            return "anthropic"
+        if "mistral" in model_name or "codestral" in model_name or "pixtral" in model_name or "mixtral" in model_name:
+            return "mistral"
         
         # 3. Global default
         return None  # get_llm_client() will use DEFAULT_LLM_PROVIDER

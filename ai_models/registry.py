@@ -203,4 +203,14 @@ def _ensure_providers_loaded():
     except ImportError as e:
         logger.debug("openai_provider_import_skipped", error=str(e))
 
+    try:
+        from backend.ai_models.providers import anthropic_provider  # noqa: F401
+    except ImportError as e:
+        logger.debug("anthropic_provider_import_skipped", error=str(e))
+
+    try:
+        from backend.ai_models.providers import mistral_provider  # noqa: F401
+    except ImportError as e:
+        logger.debug("mistral_provider_import_skipped", error=str(e))
+
     _providers_loaded = True

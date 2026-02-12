@@ -63,6 +63,12 @@ class AIModeService:
             return "perplexity"
         if name in ("gemini",) or "gemini" in name:
             return "gemini"
+        if name in ("openai",) or "gpt" in name or name.startswith(("o1", "o3")):
+            return "openai"
+        if name in ("anthropic",) or "claude" in name:
+            return "anthropic"
+        if name in ("mistral",) or "codestral" in name or "pixtral" in name or "mixtral" in name:
+            return "mistral"
         # Fall back to default provider
         return None
 

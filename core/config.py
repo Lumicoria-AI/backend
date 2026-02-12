@@ -115,7 +115,7 @@ class Settings(BaseSettings):
     DEFAULT_LLM_PROVIDER: str = Field(
         default="perplexity",
         description=(
-            "Default LLM provider. Options: 'perplexity', 'gemini', 'openai'. "
+            "Default LLM provider. Options: 'perplexity', 'gemini', 'openai', 'anthropic', 'mistral'. "
             "Can be overridden per-request via the API."
         ),
     )
@@ -149,6 +149,18 @@ class Settings(BaseSettings):
             "Get from https://aistudio.google.com/apikey"
         ),
     )
+    GEMINI_MODEL: str = Field(
+        default="gemini-2.0-flash",
+        description=(
+            "Default Gemini chat model. Options: gemini-2.5-pro-preview-06-05, "
+            "gemini-2.5-flash-preview-05-20, gemini-2.0-pro, gemini-2.0-flash, "
+            "gemini-2.0-flash-lite, gemini-1.5-pro, gemini-1.5-flash."
+        ),
+    )
+    GEMINI_TIMEOUT: int = Field(
+        default=60,
+        description="HTTP timeout in seconds for Gemini API calls.",
+    )
     OPENAI_API_KEY: Optional[str] = Field(
         default=None,
         description=(
@@ -166,6 +178,43 @@ class Settings(BaseSettings):
     OPENAI_TIMEOUT: int = Field(
         default=30,
         description="HTTP timeout in seconds for OpenAI API calls.",
+    )
+    ANTHROPIC_API_KEY: Optional[str] = Field(
+        default=None,
+        description=(
+            "Anthropic API key. Required if DEFAULT_LLM_PROVIDER='anthropic'. "
+            "Get from https://console.anthropic.com/settings/keys"
+        ),
+    )
+    ANTHROPIC_MODEL: str = Field(
+        default="claude-3-5-sonnet-latest",
+        description=(
+            "Default Anthropic chat model. Options: claude-3-5-sonnet-latest, "
+            "claude-3-5-haiku-latest, claude-3-opus-latest, claude-sonnet-4-20250514."
+        ),
+    )
+    ANTHROPIC_TIMEOUT: int = Field(
+        default=60,
+        description="HTTP timeout in seconds for Anthropic API calls.",
+    )
+    MISTRAL_API_KEY: Optional[str] = Field(
+        default=None,
+        description=(
+            "Mistral AI API key. Required if DEFAULT_LLM_PROVIDER='mistral'. "
+            "Get from https://console.mistral.ai/api-keys"
+        ),
+    )
+    MISTRAL_MODEL: str = Field(
+        default="mistral-large-latest",
+        description=(
+            "Default Mistral chat model. Options: mistral-large-latest, "
+            "mistral-small-latest, open-mistral-nemo, codestral-latest, "
+            "pixtral-large-latest, mistral-saba-latest."
+        ),
+    )
+    MISTRAL_TIMEOUT: int = Field(
+        default=30,
+        description="HTTP timeout in seconds for Mistral API calls.",
     )
 
     # ── Google OAuth ────────────────────────────────────────────────────

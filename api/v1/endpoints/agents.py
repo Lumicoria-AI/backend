@@ -55,11 +55,8 @@ def get_agent_service() -> AgentService:
         logger.warning(f"Config file not found at {config_path}, using default configuration")
         config = {
             "ai_models": {
-                "perplexity": {
-                    "model": "sonar-medium-online",
-                    "temperature": 0.7,
-                    "max_tokens": 1024
-                }
+                # Provider-neutral defaults — actual provider is selected
+                # by DEFAULT_LLM_PROVIDER env var at runtime
             }
         }
     else:

@@ -46,6 +46,10 @@ aiofiles
 google-generativeai>=0.8.0
 # OpenAI (optional — only needed if DEFAULT_LLM_PROVIDER=openai)
 openai>=1.0.0
+# Anthropic (optional — only needed if DEFAULT_LLM_PROVIDER=anthropic)
+anthropic>=0.39.0
+# Mistral (optional — only needed if DEFAULT_LLM_PROVIDER=mistral)
+mistralai>=1.0.0
 
 # ── LangChain ──────────────────────────────────────────────────────────
 langchain

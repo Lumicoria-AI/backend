@@ -39,20 +39,39 @@ from backend.ai_models.registry import LLMRegistry
 
 logger = structlog.get_logger(__name__)
 
-# Gemini-specific constants
-GEMINI_MODELS = [
+# ═══════════════════════════════════════════════════════════════════════════
+# Constants
+# ═══════════════════════════════════════════════════════════════════════════
+
+_CHAT_MODELS: set[str] = {
+    # Gemini 2.5 series (latest)
+    "gemini-2.5-pro-preview-06-05",
+    "gemini-2.5-flash-preview-05-20",
+    # Gemini 2.0 series
+    "gemini-2.0-pro",
+    "gemini-2.0-pro-exp",
     "gemini-2.0-flash",
     "gemini-2.0-flash-lite",
+    "gemini-2.0-flash-thinking-exp",
+    # Gemini 1.5 series
     "gemini-1.5-pro",
+    "gemini-1.5-pro-latest",
     "gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
     "gemini-1.5-flash-8b",
+    # Legacy
     "gemini-1.0-pro",
-    # Embedding models
-    "text-embedding-004",
-]
+}
 
-DEFAULT_GEMINI_MODEL = "gemini-2.0-flash"
-GEMINI_EMBEDDING_MODEL = "text-embedding-004"
+_EMBEDDING_MODELS: set[str] = {
+    "text-embedding-004",
+}
+
+_DEFAULT_CHAT_MODEL = "gemini-2.0-flash"
+_DEFAULT_EMBEDDING_MODEL = "text-embedding-004"
+
+# Merged set for supported_models property
+_ALL_MODELS = _CHAT_MODELS | _EMBEDDING_MODELS
 
 # Gemini's role mapping (Gemini uses "model" instead of "assistant")
 _ROLE_MAP = {
@@ -125,11 +144,18 @@ class GeminiProvider(LLMClient):
 
     @property
     def default_model(self) -> str:
-        return DEFAULT_GEMINI_MODEL
+        try:
+            from backend.core.config import get_settings
+            model = getattr(get_settings(), "GEMINI_MODEL", None)
+            if model:
+                return model
+        except Exception:
+            pass
+        return _DEFAULT_CHAT_MODEL
 
     @property
     def supported_models(self) -> List[str]:
-        return list(GEMINI_MODELS)
+        return sorted(_ALL_MODELS)
 
     # ── Core methods ──────────────────────────────────────────────────
 
@@ -256,7 +282,7 @@ class GeminiProvider(LLMClient):
         if not texts:
             return []
 
-        embedding_model = model or GEMINI_EMBEDDING_MODEL
+        embedding_model = model or _DEFAULT_EMBEDDING_MODEL
 
         try:
             genai = self._get_sdk()

@@ -9,6 +9,8 @@ Supported providers:
 - Perplexity Sonar (default)
 - Google Gemini
 - OpenAI (GPT-4o, GPT-4 Turbo, GPT-3.5 Turbo, o1/o3 series)
+- Anthropic (Claude 4 Sonnet, Claude 3.5 Sonnet/Haiku, Claude 3 Opus)
+- Mistral AI (Mistral Large, Small, Nemo, Codestral, Pixtral)
 - (extensible — add new providers in providers/)
 
 Usage:
