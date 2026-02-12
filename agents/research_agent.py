@@ -1,4 +1,5 @@
 from .base_agent import BaseAgent
+from backend.ai_models import LLMConfig
 from typing import Dict, Any, List, Optional
 import json
 import structlog
@@ -10,7 +11,7 @@ import re
 logger = structlog.get_logger(__name__)
 
 class ResearchAgent(BaseAgent):
-    """Agent for conducting deep research using Perplexity AI.
+    """Agent for conducting deep research using LLM providers.
     
     This agent performs comprehensive research across various topics,
     leverages citations, compares information sources, and provides
@@ -103,12 +104,12 @@ class ResearchAgent(BaseAgent):
             return {"error": "No research query provided"}
             
         try:
-            # Ensure Perplexity client is initialized
-            if not self.perplexity_client:
+            # Ensure LLM client is initialized
+            if not self.llm_client:
                 self.initialize_models()
                 
-            if not self.perplexity_client:
-                return {"error": "Perplexity client not initialized"}
+            if not self.llm_client:
+                return {"error": "LLM client not initialized"}
             
             # For full research, we might want to run multiple queries and merge results
             if research_type == "comprehensive" and depth == "deep":
@@ -130,10 +131,12 @@ class ResearchAgent(BaseAgent):
                     ]
                     
                     # Get research plan
-                    planning_response = await self.perplexity_client.chat_completion(
-                        messages=planning_messages,
+                    planning_config = LLMConfig(
                         model=self.model_config.get("model"),
-                        temperature=0.3  # Lower temperature for more focused planning
+                        temperature=0.3,  # Lower temperature for more focused planning
+                    )
+                    planning_response = await self.llm_client.generate(
+                        planning_messages, config=planning_config
                     )
                     
                     # Extract sub-questions
@@ -142,20 +145,24 @@ class ResearchAgent(BaseAgent):
                     # Run parallel research on main question and each sub-question
                     research_tasks = []
                     
-                    # Main question research
-                    main_research_task = self.perplexity_client.academic_research(
-                        query=query,
-                        depth=depth,
-                        focus_areas=focus_areas
+                    # Build academic research prompt for main question
+                    main_research_messages = self._build_academic_research_messages(
+                        query=query, depth=depth, focus_areas=focus_areas
+                    )
+                    main_research_task = self.llm_client.generate(
+                        main_research_messages,
+                        config=LLMConfig(model=self.model_config.get("model"), temperature=0.4)
                     )
                     research_tasks.append(main_research_task)
                     
                     # Sub-questions research
                     for sub_q in sub_questions[:3]:  # Limit to 3 sub-questions
-                        sub_research_task = self.perplexity_client.academic_research(
-                            query=sub_q,
-                            depth="focused",  # Use focused depth for sub-questions
-                            focus_areas=focus_areas
+                        sub_messages = self._build_academic_research_messages(
+                            query=sub_q, depth="focused", focus_areas=focus_areas
+                        )
+                        sub_research_task = self.llm_client.generate(
+                            sub_messages,
+                            config=LLMConfig(model=self.model_config.get("model"), temperature=0.4)
                         )
                         research_tasks.append(sub_research_task)
                     
@@ -184,16 +191,18 @@ class ResearchAgent(BaseAgent):
                         {"role": "user", "content": synthesis_user_prompt}
                     ]
                     
-                    synthesis_response = await self.perplexity_client.chat_completion(
-                        messages=synthesis_messages,
+                    synthesis_config = LLMConfig(
                         model=self.model_config.get("model"),
-                        temperature=0.4
+                        temperature=0.4,
+                    )
+                    synthesis_response = await self.llm_client.generate(
+                        synthesis_messages, config=synthesis_config
                     )
                     
                     # Collect all citations from all responses
                     all_citations = []
                     for resp in research_responses:
-                        if hasattr(resp, "citations") and resp.citations:
+                        if resp.citations:
                             all_citations.extend(resp.citations)
                     
                     # Parse the synthesized findings
@@ -208,14 +217,7 @@ class ResearchAgent(BaseAgent):
                         "research_type": research_type,
                         "query": query,
                         "sub_questions": sub_questions,
-                        "citations": [
-                            {
-                                "text": citation.text,
-                                "url": citation.metadata.url,
-                                "title": citation.metadata.title
-                            }
-                            for citation in all_citations
-                        ] if all_citations else []
+                        "citations": all_citations if all_citations else []
                     }
                     
                     return response
@@ -228,18 +230,18 @@ class ResearchAgent(BaseAgent):
             # Standard research approach
             system_prompt, user_prompt = self._create_async_prompts(query, context, research_type, depth, focus_areas)
             
-            # Format messages for Perplexity API
+            # Format messages for LLM
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ]
             
-            # Call Perplexity API for research
-            response = await self.perplexity_client.chat_completion(
-                messages=messages,
+            # Call LLM via provider-agnostic interface
+            config = LLMConfig(
                 model=self.model_config.get("model"),
-                temperature=0.5
+                temperature=0.5,
             )
+            response = await self.llm_client.generate(messages, config=config)
             
             # Parse the findings
             parsed_findings = self._parse_research_findings(response.content, research_type)
@@ -255,15 +257,8 @@ class ResearchAgent(BaseAgent):
             }
             
             # Add citations if available
-            if hasattr(response, "citations") and response.citations:
-                result["citations"] = [
-                    {
-                        "text": citation.text,
-                        "url": citation.metadata.url,
-                        "title": citation.metadata.title
-                    }
-                    for citation in response.citations
-                ]
+            if response.citations:
+                result["citations"] = response.citations
             
             return result
             
@@ -271,6 +266,29 @@ class ResearchAgent(BaseAgent):
             logger.error(f"Error in async research processing: {str(e)}")
             return {"error": f"Async research processing failed: {str(e)}"}
     
+    def _build_academic_research_messages(
+        self, query: str, depth: str = "comprehensive", focus_areas: List[str] = None
+    ) -> List[Dict[str, str]]:
+        """Build messages for academic-style research (replaces Perplexity-specific academic_research)."""
+        focus_str = ""
+        if focus_areas:
+            focus_str = f"\n\nFocus areas: {', '.join(focus_areas)}"
+
+        system_prompt = (
+            "You are an expert academic researcher. Provide comprehensive, well-cited research "
+            "findings on the given topic. Include key findings, methodology overview where relevant, "
+            "different perspectives, and a critical analysis. Cite sources where possible."
+        )
+        user_prompt = (
+            f"Conduct {depth} academic research on the following topic:\n\n{query}"
+            f"{focus_str}\n\n"
+            "Provide findings with citations, key insights, and areas for further investigation."
+        )
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
     def _create_research_prompt(self, query: str, context: Dict[str, Any], 
                                research_type: str, depth: str) -> str:
         """Create prompt for conducting research."""

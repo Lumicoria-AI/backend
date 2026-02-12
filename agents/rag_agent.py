@@ -13,6 +13,7 @@ from datetime import datetime
 import uuid
 
 from .base_agent import BaseAgent
+from backend.ai_models import LLMConfig
 from ..services.context_service import context_service
 
 # Configure logger
@@ -20,7 +21,7 @@ logger = structlog.get_logger(__name__)
 
 class RAGAgent(BaseAgent):
     """
-    Agent that uses Retrieval Augmented Generation with Perplexity API
+    Agent that uses Retrieval Augmented Generation with provider-agnostic LLM
     to provide context-aware responses based on user documents and history.
     """
     
@@ -102,22 +103,22 @@ class RAGAgent(BaseAgent):
             # Create system prompt with context
             system_prompt = self.system_prompt_template.format(context=formatted_context)
             
-            # Create messages for Perplexity API
+            # Create messages for LLM
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": query}
             ]
             
-            # Call Perplexity API
-            response = await self.perplexity_client.chat_completion(
-                messages=messages,
-                model=self.model_config.get("model", "sonar-medium-online"),
+            # Call LLM via provider-agnostic interface
+            config = LLMConfig(
+                model=self.model_config.get("model"),
                 temperature=self.model_config.get("temperature", 0.7),
                 max_tokens=self.model_config.get("max_tokens", 1024),
             )
+            response = await self.llm_client.generate(messages, config=config)
             
             # Extract response text
-            ai_response = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+            ai_response = response.content
             
             # Calculate processing time
             end_time = datetime.utcnow()
@@ -246,12 +247,12 @@ class RAGAgent(BaseAgent):
             Dictionary containing retrieved information and response
         """
         try:
-            # Ensure Perplexity client is initialized
-            if not self.perplexity_client:
+            # Ensure LLM client is initialized
+            if not self.llm_client:
                 self.initialize_models()
                 
-            if not self.perplexity_client:
-                return {"error": "Perplexity client not initialized"}
+            if not self.llm_client:
+                return {"error": "LLM client not initialized"}
             
             # Get user and organization IDs from context
             user_id = context.get("user_id") if context else None
@@ -276,19 +277,19 @@ class RAGAgent(BaseAgent):
             # Create system prompt with context
             system_prompt = self.system_prompt_template.format(context=formatted_context)
             
-            # Create messages for Perplexity API
+            # Create messages for LLM
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": query}
             ]
             
-            # Call Perplexity API
-            response = await self.perplexity_client.chat_completion(
-                messages=messages,
-                model=self.model_config.get("model", "sonar-medium-online"),
+            # Call LLM via provider-agnostic interface
+            config = LLMConfig(
+                model=self.model_config.get("model"),
                 temperature=self.model_config.get("temperature", 0.7),
                 max_tokens=self.model_config.get("max_tokens", 1024),
             )
+            response = await self.llm_client.generate(messages, config=config)
             
             # Extract response text
             ai_response = response.content

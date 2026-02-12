@@ -1,4 +1,5 @@
 from .base_agent import BaseAgent
+from backend.ai_models import LLMConfig
 from typing import Dict, Any, List, Optional
 import json
 import structlog
@@ -10,10 +11,10 @@ import re
 logger = structlog.get_logger(__name__)
 
 class DocumentAgent(BaseAgent):
-    """Agent for processing documents using Perplexity AI.
+    """Agent for processing documents using LLM providers.
     
     This agent extracts key information, tasks, dates, and insights from 
-    documents using Perplexity's Sonar models.
+    documents using the provider-agnostic LLM interface.
     """
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
@@ -47,17 +48,17 @@ class DocumentAgent(BaseAgent):
         )
         
         try:
-            if self.perplexity_client:
+            if self.llm_client:
                 messages = [{"role": "user", "content": prompt}]
-                response = await self.perplexity_client.chat_completion(messages)
+                response = await self.llm_client.generate(messages)
                 return {
                     "response": response.content,
                     "query": query,
                     "document_id": context.get("document_id"),
-                    "confidence": response.metadata.get("confidence", 0.0) if response.metadata else 0.0
+                    "confidence": 0.0
                 }
             else:
-                return {"error": "Perplexity client not initialized"}
+                return {"error": "LLM client not initialized"}
         except Exception as e:
             logger.error(f"Error querying document: {str(e)}")
             return {"error": f"Failed to process query: {str(e)}"}
@@ -86,9 +87,9 @@ class DocumentAgent(BaseAgent):
                 f"Document content:\n{document_text[:8000]}..."  # Limit document length
             )
             
-            if self.perplexity_client:
+            if self.llm_client:
                 messages = [{"role": "user", "content": prompt}]
-                response = await self.perplexity_client.chat_completion(messages)
+                response = await self.llm_client.generate(messages)
                 
                 # Process and structure the response
                 return {
@@ -97,10 +98,10 @@ class DocumentAgent(BaseAgent):
                     "extraction_targets": self.extraction_targets,
                     "model_used": self.model_config.get("model", "unknown"),
                     "timestamp": datetime.utcnow().isoformat(),
-                    "confidence": response.metadata.get("confidence", 0.0) if response.metadata else 0.0
+                    "confidence": 0.0
                 }
             else:
-                return {"error": "Perplexity client not initialized"}
+                return {"error": "LLM client not initialized"}
                 
         except Exception as e:
             logger.error(f"Error processing document: {str(e)}")

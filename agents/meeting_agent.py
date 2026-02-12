@@ -1,4 +1,5 @@
 from .base_agent import BaseAgent
+from backend.ai_models import LLMConfig
 from typing import Dict, Any, List, Optional
 import json
 import structlog
@@ -10,7 +11,7 @@ import re
 logger = structlog.get_logger(__name__)
 
 class MeetingAgent(BaseAgent):
-    """Agent for processing meeting transcripts and notes using Perplexity AI.
+    """Agent for processing meeting transcripts and notes using LLM providers.
     
     This agent extracts key information, action items, decisions, and insights from 
     meeting content and generates structured summaries.
@@ -103,30 +104,30 @@ class MeetingAgent(BaseAgent):
             return {"error": "No meeting transcript provided"}
             
         try:
-            # Ensure Perplexity client is initialized
-            if not self.perplexity_client:
+            # Ensure LLM client is initialized
+            if not self.llm_client:
                 self.initialize_models()
                 
-            if not self.perplexity_client:
-                return {"error": "Perplexity client not initialized"}
+            if not self.llm_client:
+                return {"error": "LLM client not initialized"}
                 
             # Create system and user prompts
             system_prompt, user_prompt = self._create_async_prompts(
                 transcript, meeting_type, participants, meeting_context
             )
             
-            # Format messages for Perplexity API
+            # Format messages for LLM
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ]
             
-            # Call Perplexity API
-            response = await self.perplexity_client.chat_completion(
-                messages=messages,
+            # Call LLM via provider-agnostic interface
+            config = LLMConfig(
                 model=self.model_config.get("model"),
-                temperature=0.3  # Lower temperature for more accurate extraction
+                temperature=0.3,  # Lower temperature for more accurate extraction
             )
+            response = await self.llm_client.generate(messages, config=config)
             
             # Parse the response into structured data
             parsed_result = self._parse_meeting_response(response.content, meeting_type)
@@ -145,15 +146,8 @@ class MeetingAgent(BaseAgent):
             }
             
             # Add citations if available (though rarely needed for meeting summaries)
-            if hasattr(response, "citations") and response.citations:
-                result["citations"] = [
-                    {
-                        "text": citation.text,
-                        "url": citation.metadata.url,
-                        "title": citation.metadata.title
-                    }
-                    for citation in response.citations
-                ]
+            if response.citations:
+                result["citations"] = response.citations
             
             return result
             
@@ -473,12 +467,12 @@ class MeetingAgent(BaseAgent):
             if not context or not context.get("transcript"):
                 return {"error": "No meeting transcript provided in context"}
             
-            # Ensure Perplexity client is initialized
-            if not self.perplexity_client:
+            # Ensure LLM client is initialized
+            if not self.llm_client:
                 self.initialize_models()
                 
-            if not self.perplexity_client:
-                return {"error": "Perplexity client not initialized"}
+            if not self.llm_client:
+                return {"error": "LLM client not initialized"}
             
             # Get meeting data from context
             transcript = context.get("transcript", "")
@@ -494,18 +488,18 @@ class MeetingAgent(BaseAgent):
             # Add the specific query to the user prompt
             user_prompt = f"{user_prompt}\n\nSpecific query: {query}"
             
-            # Format messages for Perplexity API
+            # Format messages for LLM
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ]
             
-            # Call Perplexity API
-            response = await self.perplexity_client.chat_completion(
-                messages=messages,
+            # Call LLM via provider-agnostic interface
+            config = LLMConfig(
                 model=self.model_config.get("model"),
-                temperature=0.3  # Lower temperature for more accurate extraction
+                temperature=0.3,  # Lower temperature for more accurate extraction
             )
+            response = await self.llm_client.generate(messages, config=config)
             
             # Parse the response into structured data
             parsed_result = self._parse_meeting_response(response.content, meeting_type)

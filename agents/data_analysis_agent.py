@@ -22,7 +22,7 @@ class AnalysisMode(Enum):
     REPORT = "report"  # Report generation with insights
 
 class DataAnalysisAgent(BaseAgent):
-    """Agent for data analysis and insights generation using Perplexity AI.
+    """Agent for data analysis and insights generation using LLM providers.
     
     This agent provides comprehensive data analysis services including:
     - Data exploration and summary statistics

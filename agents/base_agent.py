@@ -1,8 +1,8 @@
 from typing import Dict, Any, Optional
 from abc import ABC, abstractmethod
 import os
-# Import necessary libraries for AI models
-from backend.ai_models.perplexity import create_perplexity_client, PerplexityClient
+# Import the provider-agnostic LLM interface
+from backend.ai_models import get_llm_client, LLMClient, LLMConfig, LLMResponse
 from backend.core.config import settings as app_settings
 import structlog
 import asyncio
@@ -22,37 +22,53 @@ class BaseAgent(ABC):
         else:
             self.model_config = {}
 
-        self.perplexity_client: Optional[PerplexityClient] = None
+        self.llm_client: Optional[LLMClient] = None
+        # Keep backward-compat alias
+        self.perplexity_client = None
         self.initialize_models()
 
     def initialize_models(self):
-        """Initialize AI models and clients."""
+        """Initialize the LLM client via the provider-agnostic abstraction."""
         try:
-            # If we have a model name but no model config, try to get it from the global config
-            if not self.model_config and self.config.get("model"):
-                self.model_config = self._get_global_model_config(self.config["model"])
+            # Determine which provider to use for this agent
+            # Priority: agent config > model name mapping > global default
+            provider = self._resolve_provider()
             
-            # Ensure we have the API key — use centralized settings
-            if not self.model_config.get("api_key"):
-                model_name = self.model_config.get("model", "").lower()
-                if "perplexity" in model_name or "sonar" in model_name:
-                    self.model_config["api_key"] = app_settings.PERPLEXITY_API_KEY
+            self.llm_client = get_llm_client(provider=provider)
+            # Backward-compat alias so existing agent code that uses self.perplexity_client
+            # continues to work via the abstraction layer
+            self.perplexity_client = self.llm_client
             
-            if not self.model_config.get("api_key"):
-                raise ValueError("Perplexity API key not found in configuration or environment variables")
-            
-            self.perplexity_client = create_perplexity_client(
-                config=self.model_config
-            )
         except Exception as e:
-            logger.error(f"Error initializing Perplexity client: {str(e)}")
+            logger.error(f"Error initializing LLM client: {str(e)}")
             raise
+
+    def _resolve_provider(self) -> Optional[str]:
+        """
+        Determine the LLM provider for this agent.
+        
+        Resolution order:
+        1. Explicit 'provider' key in agent config
+        2. Model name mapping (e.g., 'perplexity' or 'sonar' → perplexity provider)
+        3. DEFAULT_LLM_PROVIDER from settings
+        """
+        # 1. Explicit provider in config
+        provider = self.config.get("provider") or self.model_config.get("provider")
+        if provider:
+            return provider
+        
+        # 2. Infer from model name
+        model_name = (self.model_config.get("model") or self.config.get("model") or "").lower()
+        if "perplexity" in model_name or "sonar" in model_name:
+            return "perplexity"
+        if "gemini" in model_name:
+            return "gemini"
+        
+        # 3. Global default
+        return None  # get_llm_client() will use DEFAULT_LLM_PROVIDER
 
     def _get_global_model_config(self, model_name: str) -> Dict[str, Any]:
         # This is a placeholder to retrieve model configuration from a global settings object
-        # In a real FastAPI app, you would likely access this from the app state or a settings module
-        # For now, we'll assume the config passed to AgentService has the structure:
-        # {"ai_models": {"model_name": {...}}}
         global_models_config = self.config.get("ai_models", {})
         return global_models_config.get(model_name, {})
 
@@ -74,88 +90,42 @@ class BaseAgent(ABC):
         return self.model_config.get("model")
 
     def _call_model(self, prompt: str, model_name: str = None, **kwargs) -> str:
-        """Calls the appropriate AI model based on configuration.
+        """Calls the LLM via the provider-agnostic interface.
 
         Args:
             prompt: The input prompt for the model.
-            model_name: Optional. The specific model name to use. If not provided,
-                        the model from the agent's config will be used.
-            **kwargs: Additional keyword arguments to pass to the model API.
+            model_name: Optional. The specific model name to use.
+            **kwargs: Additional keyword arguments to pass to the LLM.
 
         Returns:
-            The response from the AI model.
+            The response text from the LLM.
         """
-        actual_model_name = model_name or self.get_model_name()
-        model_config = self._get_global_model_config(actual_model_name)
-        
-        # Load API keys from centralized settings
-        api_key = model_config.get("api_key") or getattr(app_settings, f"{actual_model_name.upper()}_API_KEY", None) or getattr(app_settings, "PERPLEXITY_API_KEY", None)
-
-        if not api_key:
-            logger.warning(f"API key not found for model {actual_model_name}")
-            return f"Error: API key not configured for {actual_model_name}"
-
-        logger.info(f"Calling model {actual_model_name} with prompt: {prompt[:100]}...")
+        if not self.llm_client:
+            logger.error("LLM client not initialized")
+            return "Error: LLM client not initialized correctly."
         
         try:
-            if actual_model_name and ("perplexity" in actual_model_name.lower() or "sonar" in actual_model_name.lower()):
-                # Use Perplexity API integration
-                if not self.perplexity_client:
-                    self.initialize_models()
-                    
-                if not self.perplexity_client:
-                    logger.error("Perplexity client not initialized")
-                    return "Error: Perplexity client not initialized correctly."
-                
-                # Run this synchronously for compatibility with the existing method signature
-                try:
-                    loop = asyncio.get_event_loop()
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                
-                # Format messages for Perplexity API
-                messages = [{"role": "user", "content": prompt}]
-                
-                # Use any model-specific parameters from kwargs
-                model_params = {k: v for k, v in kwargs.items() if k not in ["messages"]}
-                
-                # Make the async call synchronously
-                response = loop.run_until_complete(
-                    self.perplexity_client.chat_completion(messages, **model_params)
-                )
-                
-                # Return the content from the response
-                return response.content
-            elif actual_model_name and "gemini" in actual_model_name.lower():
-                 # Example Gemini API integration:
-                # import google.generativeai as genai
-                # genai.configure(api_key=api_key)
-                # model = genai.GenerativeModel(actual_model_name)
-                # response = model.generate_content(prompt, **kwargs)
-                # return response.text
-                 return f"Placeholder response from Gemini ({actual_model_name}) for prompt: {prompt[:50]}..."
-
-            elif actual_model_name and "mistral" in actual_model_name.lower():
-                 # Example Mistral AI API integration:
-                # from mistralai.client import MistralClient
-                # client = MistralClient(api_key=api_key)
-                # response = client.chat(
-                #    model=actual_model_name,
-                #    messages=[{"role": "user", "content": prompt}],
-                #    **kwargs
-                # )
-                # return response.choices[0].message.content
-                 return f"Placeholder response from Mistral ({actual_model_name}) for prompt: {prompt[:50]}..."
-
-            else:
-                logger.warning(f"Unknown model {actual_model_name}")
-                return f"Error: Unknown model {actual_model_name}"
-
-        except Exception as e:
-            logger.error(f"Error calling model {actual_model_name}: {e}")
-            # Log the error and potentially re-raise or return a specific error response
-            return f"Error calling model {actual_model_name}: {str(e)}"
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        # Build config
+        config = LLMConfig(
+            model=model_name or self.get_model_name(),
+            temperature=kwargs.pop("temperature", 0.7),
+            max_tokens=kwargs.pop("max_tokens", 1024),
+            top_p=kwargs.pop("top_p", 0.9),
+            extra=kwargs,
+        )
+        
+        messages = [{"role": "user", "content": prompt}]
+        
+        response = loop.run_until_complete(
+            self.llm_client.generate(messages, config=config)
+        )
+        
+        return response.content
     
     async def _call_model_async(self, prompt: str, model_name: str = None, system_prompt: str = None, **kwargs) -> str:
         """Asynchronous version of _call_model.
@@ -164,53 +134,34 @@ class BaseAgent(ABC):
             prompt: The input prompt for the model.
             model_name: Optional. The specific model name to use.
             system_prompt: Optional. System instructions for the model.
-            **kwargs: Additional keyword arguments to pass to the model API.
+            **kwargs: Additional keyword arguments to pass to the LLM.
             
         Returns:
-            The response from the AI model.
+            The response text from the LLM.
         """
-        actual_model_name = model_name or self.get_model_name()
-        model_config = self._get_global_model_config(actual_model_name)
-        
-        # Load API keys from centralized settings
-        api_key = model_config.get("api_key") or getattr(app_settings, f"{actual_model_name.upper()}_API_KEY", None) or getattr(app_settings, "PERPLEXITY_API_KEY", None)
-
-        if not api_key:
-            logger.warning(f"API key not found for model {actual_model_name}")
-            return "Error: API key not configured correctly."
+        if not self.llm_client:
+            logger.error("LLM client not initialized")
+            return "Error: LLM client not initialized correctly."
             
         try:
-            if actual_model_name and ("perplexity" in actual_model_name.lower() or "sonar" in actual_model_name.lower()):
-                # Use Perplexity's Sonar models
-                if not self.perplexity_client:
-                    self.initialize_models()
-                    
-                if not self.perplexity_client:
-                    logger.error("Perplexity client not initialized")
-                    return "Error: Perplexity client not initialized correctly."
-                
-                # Format messages for Perplexity API
-                messages = []
-                
-                # Add system prompt if provided
-                if system_prompt:
-                    messages.append({"role": "system", "content": system_prompt})
-                
-                # Add user prompt
-                messages.append({"role": "user", "content": prompt})
-                
-                # Use any model-specific parameters from kwargs
-                model_params = {k: v for k, v in kwargs.items() if k not in ["messages"]}
-                
-                # Make the async call
-                response = await self.perplexity_client.chat_completion(messages, **model_params)
-                
-                # Return the content from the response
-                return response.content
-            else:
-                logger.warning(f"Unsupported model: {actual_model_name}")
-                return f"Error: Unsupported model {actual_model_name}"
+            # Build config
+            config = LLMConfig(
+                model=model_name or self.get_model_name(),
+                temperature=kwargs.pop("temperature", 0.7),
+                max_tokens=kwargs.pop("max_tokens", 1024),
+                top_p=kwargs.pop("top_p", 0.9),
+                extra=kwargs,
+            )
+            
+            # Build messages
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": prompt})
+            
+            response = await self.llm_client.generate(messages, config=config)
+            return response.content
                 
         except Exception as e:
-            logger.error(f"Error calling model {actual_model_name}: {str(e)}")
+            logger.error(f"Error calling LLM: {str(e)}")
             return f"Error: {str(e)}"

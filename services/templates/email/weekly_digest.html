@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+
+{% block title %}Your Weekly Digest - Lumicoria.ai{% endblock %}
+
+{% block content %}
+<p class="greeting">Hi {{ user_name }}, here's your week in review 📊</p>
+
+<p class="main-text">
+    Check out what you accomplished this week with the help of your AI agents.
+</p>
+
+<!-- Stats Overview -->
+<div style="display: flex; gap: 12px; flex-wrap: wrap; margin: 24px 0;">
+    <div
+        style="flex: 1; min-width: 120px; background: linear-gradient(135deg, #EDE9FE 0%, #F3E8FF 100%); padding: 20px; border-radius: 16px; text-align: center;">
+        <div style="font-size: 32px; font-weight: 700; color: #7C3AED;">{{ tasks_completed | default('0') }}</div>
+        <div style="font-size: 12px; color: #6B7280; margin-top: 4px;">Tasks Completed</div>
+    </div>
+    <div
+        style="flex: 1; min-width: 120px; background: linear-gradient(135deg, #D1FAE5 0%, #ECFDF5 100%); padding: 20px; border-radius: 16px; text-align: center;">
+        <div style="font-size: 32px; font-weight: 700; color: #10B981;">{{ documents_processed | default('0') }}</div>
+        <div style="font-size: 12px; color: #6B7280; margin-top: 4px;">Docs Processed</div>
+    </div>
+    <div
+        style="flex: 1; min-width: 120px; background: linear-gradient(135deg, #FEF3C7 0%, #FFFBEB 100%); padding: 20px; border-radius: 16px; text-align: center;">
+        <div style="font-size: 32px; font-weight: 700; color: #D97706;">{{ focus_hours | default('0') }}h</div>
+        <div style="font-size: 12px; color: #6B7280; margin-top: 4px;">Focus Time</div>
+    </div>
+</div>
+
+{% if productivity_trend %}
+<div class="highlight-box"
+    style="background: linear-gradient(135deg, #ECFDF5 0%, #D1FAE5 100%); border-left-color: #10B981;">
+    <p class="highlight-text">
+        📈 <strong>Productivity Insight:</strong> {{ productivity_trend }}
+    </p>
+</div>
+{% endif %}
+
+<!-- Agent Activity -->
+{% if agent_activity and agent_activity|length > 0 %}
+<div class="info-card">
+    <p class="info-card-title">🤖 Agent Activity This Week</p>
+    <div class="info-card-content">
+        <table style="width: 100%; border-collapse: collapse;">
+            {% for agent in agent_activity %}
+            <tr style="{% if not loop.last %}border-bottom: 1px solid #E5E7EB;{% endif %}">
+                <td style="padding: 12px 0;">
+                    <span style="font-size: 18px; margin-right: 8px;">{{ agent.icon | default('🤖') }}</span>
+                    <strong style="color: #1F2937;">{{ agent.name }}</strong>
+                </td>
+                <td style="padding: 12px 0; color: #6B7280; text-align: right;">
+                    {{ agent.actions }} actions
+                </td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
+</div>
+{% endif %}
+
+<!-- Upcoming Tasks -->
+{% if upcoming_tasks and upcoming_tasks|length > 0 %}
+<div class="divider"></div>
+
+<p class="main-text text-sm" style="font-weight: 600; margin-bottom: 16px;">
+    📋 Upcoming Tasks This Week
+</p>
+
+<table style="width: 100%; border-collapse: collapse; background: #F9FAFB; border-radius: 12px; overflow: hidden;">
+    {% for task in upcoming_tasks[:5] %}
+    <tr style="{% if not loop.last %}border-bottom: 1px solid #E5E7EB;{% endif %}">
+        <td style="padding: 14px 16px; color: #374151;">
+            <span style="color: #7C3AED; margin-right: 8px;">☐</span>
+            {{ task.title }}
+        </td>
+        <td style="padding: 14px 16px; text-align: right;">
+            {% if task.priority == 'high' or task.priority == 'urgent' %}
+            <span
+                style="background: #FEE2E2; color: #EF4444; padding: 2px 8px; border-radius: 4px; font-size: 11px;">HIGH</span>
+            {% endif %}
+            <span style="color: #6B7280; font-size: 13px; margin-left: 8px;">{{ task.due_date }}</span>
+        </td>
+    </tr>
+    {% endfor %}
+</table>
+{% endif %}
+
+<!-- Well-being Summary -->
+{% if wellbeing_score %}
+<div class="divider"></div>
+
+<div
+    style="text-align: center; padding: 24px; background: linear-gradient(135deg, #ECFDF5 0%, #FEF3C7 100%); border-radius: 16px;">
+    <p style="font-size: 14px; color: #6B7280; margin-bottom: 8px;">💚 Weekly Well-being Score</p>
+    <div
+        style="font-size: 48px; font-weight: 700; background: linear-gradient(135deg, #10B981, #7C3AED); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">
+        {{ wellbeing_score }}%
+    </div>
+    {% if wellbeing_message %}
+    <p style="font-size: 14px; color: #374151; margin-top: 12px;">{{ wellbeing_message }}</p>
+    {% endif %}
+</div>
+{% endif %}
+
+<div class="button-container">
+    <a href="{{ dashboard_url | default('https://lumicoria.ai/dashboard') }}" class="primary-button">
+        View Full Report
+    </a>
+</div>
+
+<p class="main-text text-center text-sm" style="color: #9CA3AF; margin-top: 24px;">
+    Keep up the great work! Your AI agents are here to help you succeed.<br>
+    <a href="https://lumicoria.ai/settings/digest" style="color: #7C3AED;">Manage digest settings</a>
+</p>
+{% endblock %}

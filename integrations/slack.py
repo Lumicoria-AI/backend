@@ -7,29 +7,41 @@ from ..core.config import settings
 
 logger = structlog.get_logger(__name__)
 
+
 class SlackIntegration:
     """Integration with Slack workspace."""
-    
+
     def __init__(self):
-        """Initialize Slack integration."""
+        """Initialize Slack integration.
+
+        Note: Connection validation is deferred to ``validate_connection()``
+        because the underlying SlackClient methods are async.
+        """
         self.client = SlackClient(
             bot_token=settings.SLACK_BOT_TOKEN,
-            app_token=settings.SLACK_APP_TOKEN
+            app_token=settings.SLACK_APP_TOKEN,
         )
-        self._validate_connection()
-        
-    def _validate_connection(self) -> None:
-        """Validate Slack connection by getting team info."""
+        self._validated = False
+
+    async def validate_connection(self) -> bool:
+        """Validate Slack connection by calling team.info (async).
+
+        Returns True on success, False on failure (logged, not raised).
+        """
+        if self._validated:
+            return True
         try:
-            team_info = self.client.get_team_info()
+            team_info = await self.client.get_team_info()
             logger.info(
                 "Slack connection validated",
                 team_name=team_info.get("name"),
-                team_id=team_info.get("id")
+                team_id=team_info.get("id"),
             )
+            self._validated = True
+            return True
         except Exception as e:
-            logger.error(f"Failed to validate Slack connection: {str(e)}")
-            raise
+            logger.error(f"Failed to validate Slack connection: {e}")
+            return False
     
     async def create_project_channel(self, 
                                    project_name: str, 

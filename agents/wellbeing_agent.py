@@ -1,4 +1,5 @@
 from .base_agent import BaseAgent
+from backend.ai_models import LLMConfig
 from typing import Dict, Any, List, Optional
 import json
 import structlog
@@ -69,12 +70,12 @@ class WellbeingAgent(BaseAgent):
             # Format user data for better prompt context
             formatted_context = self._format_user_data(user_data)
             
-            # Ensure Perplexity client is initialized
-            if not self.perplexity_client:
+            # Ensure LLM client is initialized
+            if not self.llm_client:
                 self.initialize_models()
                 
-            if not self.perplexity_client:
-                return {"error": "Perplexity client not initialized"}
+            if not self.llm_client:
+                return {"error": "LLM client not initialized"}
             
             # Create system prompt for wellbeing advisor
             system_prompt = (
@@ -85,10 +86,23 @@ class WellbeingAgent(BaseAgent):
                 "and thoughtful, but respect the user's autonomy."
             )
             
-            # Use Perplexity client directly for wellbeing advice
-            response = await self.perplexity_client.generate_wellbeing_advice(
-                user_data=user_data
+            # Build user prompt from user data
+            user_prompt = (
+                f"Based on the following user activity and wellbeing data, provide personalized wellbeing "
+                f"recommendations. Include specific suggestions for breaks, focus techniques, stress management, "
+                f"and overall wellbeing improvement.\n\nUser data: {formatted_context}"
             )
+            
+            # Use LLM client via provider-agnostic interface
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+            config = LLMConfig(
+                model=self.model_config.get("model"),
+                temperature=0.7,
+            )
+            response = await self.llm_client.generate(messages, config=config)
             
             # Parse the response into structured recommendations
             wellbeing_suggestions = self._parse_wellbeing_advice(response.content)
@@ -261,12 +275,12 @@ class WellbeingAgent(BaseAgent):
             Dictionary containing wellbeing advice and recommendations
         """
         try:
-            # Ensure Perplexity client is initialized
-            if not self.perplexity_client:
+            # Ensure LLM client is initialized
+            if not self.llm_client:
                 self.initialize_models()
                 
-            if not self.perplexity_client:
-                return {"error": "Perplexity client not initialized"}
+            if not self.llm_client:
+                return {"error": "LLM client not initialized"}
             
             # Create system prompt for wellbeing advisor
             system_prompt = (
@@ -289,18 +303,18 @@ class WellbeingAgent(BaseAgent):
                 if user_context:
                     user_prompt = f"Context:\n{chr(10).join(user_context)}\n\nQuery: {query}"
             
-            # Format messages for Perplexity API
+            # Format messages for LLM
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ]
             
-            # Call Perplexity API
-            response = await self.perplexity_client.chat_completion(
-                messages=messages,
+            # Call LLM via provider-agnostic interface
+            config = LLMConfig(
                 model=self.model_config.get("model"),
-                temperature=0.7
+                temperature=0.7,
             )
+            response = await self.llm_client.generate(messages, config=config)
             
             # Parse the response into structured recommendations
             wellbeing_suggestions = self._parse_wellbeing_advice(response.content)

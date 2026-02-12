@@ -445,32 +445,11 @@ async def create_custom_agent_prompt(
         )
     
     try:
-        # Initialize any needed agents
-        perplexity_config = {
-            "model": "sonar-large-online",
-            "model_config": {
-                "model": "sonar-large-online",
-                "temperature": 0.7,
-                "max_tokens": 2048
-            }
-        }
+        # Use the LLM abstraction layer instead of direct Perplexity access
+        from backend.ai_models import get_llm_client, LLMConfig
         
-        # Use document agent as it has perplexity client already set up
-        document_agent = agent_service.get_agent("document")
+        llm_client = get_llm_client()
         
-        if not document_agent or not hasattr(document_agent, "perplexity_client") or not document_agent.perplexity_client:
-            document_agent = DocumentAgent(perplexity_config)
-        
-        # Ensure Perplexity client is initialized
-        if not document_agent.perplexity_client:
-            document_agent.initialize_models()
-            
-        if not document_agent.perplexity_client:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to initialize Perplexity client"
-            )
-            
         # Format features and integrations
         features_str = ""
         if customization_request.features:
@@ -480,12 +459,25 @@ async def create_custom_agent_prompt(
         if customization_request.integrations:
             integrations_str = "Integrations:\n" + "\n".join([f"- {integration}" for integration in customization_request.integrations])
             
-        # Use Perplexity to generate agent system prompt
-        response = await document_agent.perplexity_client.create_agent_prompt(
-            agent_type=customization_request.agent_type,
-            agent_name=customization_request.agent_name,
-            agent_description=customization_request.agent_description,
-            capabilities=customization_request.capabilities
+        # Generate agent system prompt via LLM
+        capability_str = "\n".join([f"- {cap}" for cap in customization_request.capabilities])
+        prompt = (
+            f"Please create a detailed system prompt for a new AI agent with these specifications:\n\n"
+            f"Agent Type: {customization_request.agent_type}\n"
+            f"Agent Name: {customization_request.agent_name}\n"
+            f"Description: {customization_request.agent_description}\n"
+            f"Capabilities:\n{capability_str}\n"
+            f"{features_str}\n{integrations_str}\n\n"
+            f"The prompt should be comprehensive, clear, and effective at guiding the AI to perform "
+            f"this specific role. Include appropriate tone, constraints, and response formats."
+        )
+        
+        response = await llm_client.generate(
+            messages=[
+                {"role": "system", "content": "You are an AI system architect specializing in creating effective prompts for specialized AI agents."},
+                {"role": "user", "content": prompt}
+            ],
+            config=LLMConfig(max_tokens=2048),
         )
         
         system_prompt = response.content
@@ -524,14 +516,10 @@ async def generate_agent_prompt(
     Generate a specialized prompt for an agent based on user query.
     """
     try:
-        # Get document agent for Perplexity access
-        document_agent = agent_service.get_agent("document")
+        # Use the LLM abstraction layer
+        from backend.ai_models import get_llm_client, LLMConfig
         
-        if not document_agent or not hasattr(document_agent, "perplexity_client") or not document_agent.perplexity_client:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Perplexity client not available"
-            )
+        llm_client = get_llm_client()
         
         # Format context as string
         context_str = ""
@@ -547,19 +535,15 @@ User query: {prompt_request.user_query}
 The prompt should be detailed, specific, and tailored to the user's needs as a {prompt_request.agent_type} agent.
 """
         
-        # Use Perplexity to generate the prompt
-        model = prompt_request.model or "sonar-large-online"
-        messages = [{"role": "user", "content": prompt}]
-        
-        response = await document_agent.perplexity_client.chat_completion(
-            messages=messages,
-            model=model
+        response = await llm_client.generate(
+            messages=[{"role": "user", "content": prompt}],
+            config=LLMConfig(model=prompt_request.model),
         )
 
         return {
             "generated_prompt": response.content,
             "agent_type": prompt_request.agent_type,
-            "model_used": model
+            "model_used": response.model
         }
     except Exception as e:
         raise HTTPException(

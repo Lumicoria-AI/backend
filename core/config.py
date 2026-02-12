@@ -111,13 +111,62 @@ class Settings(BaseSettings):
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     ALGORITHM: str = "HS256"
 
-    # ── AI / LLM Keys (REQUIRED for core functionality) ─────────────────
-    PERPLEXITY_API_KEY: str = Field(
-        ...,
-        description="Perplexity Sonar API key. MUST be set via env var.",
+    # ── AI / LLM Provider Switching ─────────────────────────────────────
+    DEFAULT_LLM_PROVIDER: str = Field(
+        default="perplexity",
+        description=(
+            "Default LLM provider. Options: 'perplexity', 'gemini', 'openai'. "
+            "Can be overridden per-request via the API."
+        ),
     )
-    OPENAI_API_KEY: Optional[str] = None
-    OPENAI_MODEL: str = "gpt-4-turbo-preview"
+    DEFAULT_EMBEDDING_PROVIDER: Optional[str] = Field(
+        default=None,
+        description=(
+            "Default embedding provider. If None, falls back to DEFAULT_LLM_PROVIDER. "
+            "Set to a specific provider if you want embeddings from a different source."
+        ),
+    )
+    LLM_FALLBACK_PROVIDER: Optional[str] = Field(
+        default=None,
+        description=(
+            "Fallback LLM provider if the primary is unavailable. "
+            "Set to 'gemini' for Perplexity → Gemini fallback, or vice versa."
+        ),
+    )
+
+    # ── AI / LLM Keys ──────────────────────────────────────────────────
+    PERPLEXITY_API_KEY: Optional[str] = Field(
+        default=None,
+        description=(
+            "Perplexity Sonar API key. Required if DEFAULT_LLM_PROVIDER='perplexity'. "
+            "Get from https://www.perplexity.ai/settings/api"
+        ),
+    )
+    GEMINI_API_KEY: Optional[str] = Field(
+        default=None,
+        description=(
+            "Google Gemini API key. Required if DEFAULT_LLM_PROVIDER='gemini'. "
+            "Get from https://aistudio.google.com/apikey"
+        ),
+    )
+    OPENAI_API_KEY: Optional[str] = Field(
+        default=None,
+        description=(
+            "OpenAI API key. Required if DEFAULT_LLM_PROVIDER='openai'. "
+            "Get from https://platform.openai.com/api-keys"
+        ),
+    )
+    OPENAI_MODEL: str = Field(
+        default="gpt-4o-mini",
+        description=(
+            "Default OpenAI chat model. Options: gpt-4o, gpt-4o-mini, "
+            "gpt-4-turbo, gpt-3.5-turbo, o1, o1-mini, o3-mini."
+        ),
+    )
+    OPENAI_TIMEOUT: int = Field(
+        default=30,
+        description="HTTP timeout in seconds for OpenAI API calls.",
+    )
 
     # ── Google OAuth ────────────────────────────────────────────────────
     GOOGLE_OAUTH_CLIENT_ID: str = Field(
@@ -294,7 +343,9 @@ def get_settings() -> Settings:
         print(f"\n{e}\n", file=sys.stderr)
         print("Required environment variables:", file=sys.stderr)
         print("  SECRET_KEY         — JWT signing key (64+ hex chars)", file=sys.stderr)
-        print("  PERPLEXITY_API_KEY — Perplexity Sonar API key", file=sys.stderr)
+        print("  PERPLEXITY_API_KEY — Perplexity Sonar API key (if using Perplexity)", file=sys.stderr)
+        print("  GEMINI_API_KEY     — Google Gemini API key (if using Gemini)", file=sys.stderr)
+        print("  DEFAULT_LLM_PROVIDER — 'perplexity' or 'gemini' (default: perplexity)", file=sys.stderr)
         print("\nSee backend/.env.example for the full list.\n", file=sys.stderr)
         sys.exit(1)
 

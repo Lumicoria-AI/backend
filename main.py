@@ -113,6 +113,11 @@ async def lifespan(app: FastAPI):
         await close_agent_service()
         logger.info("Agent service closed")
         
+        # Close all LLM provider clients
+        from backend.ai_models.registry import LLMRegistry
+        await LLMRegistry.close_all()
+        logger.info("LLM provider clients closed")
+        
     except Exception as e:
         logger.error(f"Error during shutdown: {str(e)}")
         raise

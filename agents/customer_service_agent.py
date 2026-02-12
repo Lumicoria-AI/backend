@@ -10,7 +10,7 @@ import re
 logger = structlog.get_logger(__name__)
 
 class CustomerServiceAgent(BaseAgent):
-    """Agent for customer service and support using Perplexity AI.
+    """Agent for customer service and support using LLM providers.
     
     This agent helps with customer communication, feedback analysis,
     FAQ generation, response templates, and customer satisfaction strategies.
@@ -169,10 +169,11 @@ class CustomerServiceAgent(BaseAgent):
                 
                 # For feedback analysis, we might want to add sentiment analysis
                 if "sentiment_analysis" in self.capabilities:
-                    sentiment_result = await self.perplexity_client.analyze_sentiment(
-                        text=content,
-                        aspects=self.feedback_categories
-                    )
+                    sentiment_messages = [
+                        {"role": "system", "content": "You are an expert sentiment analyzer. Analyze the sentiment of the given text across the specified aspects."},
+                        {"role": "user", "content": f"Analyze the sentiment of the following text across these aspects: {', '.join(self.feedback_categories)}.\n\nText: {content}"}
+                    ]
+                    sentiment_result = await self.llm_client.generate(sentiment_messages)
                     parsed_result["sentiment_analysis"] = sentiment_result.content
                     
             elif request_type == "generate_faq":

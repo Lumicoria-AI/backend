@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+
+{% block title %}Agent Activity: {{ agent_name }} - Lumicoria.ai{% endblock %}
+
+{% block content %}
+<p class="greeting">Hi {{ user_name }},</p>
+
+<p class="main-text">
+    Your AI agent <strong>{{ agent_name }}</strong> has completed some actions on your behalf. Here's a summary of what
+    happened.
+</p>
+
+<div class="info-card" style="border-left: 4px solid {{ agent_color | default('#7C3AED') }};">
+    <p class="info-card-title">{{ agent_icon | default('🤖') }} {{ agent_name }}</p>
+    <div class="info-card-content">
+        <table style="width: 100%; border-collapse: collapse;">
+            <tr>
+                <td style="padding: 8px 0; color: #6B7280; width: 100px;">Action:</td>
+                <td style="padding: 8px 0; font-weight: 600; color: #1F2937;">{{ action_type }}</td>
+            </tr>
+            <tr>
+                <td style="padding: 8px 0; color: #6B7280;">Time:</td>
+                <td style="padding: 8px 0; color: #374151;">{{ action_time | default('Just now') }}</td>
+            </tr>
+            <tr>
+                <td style="padding: 8px 0; color: #6B7280;">Status:</td>
+                <td style="padding: 8px 0;">
+                    {% if action_status == 'success' %}
+                    <span
+                        style="background: #D1FAE5; color: #059669; padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;">✓
+                        Success</span>
+                    {% elif action_status == 'pending' %}
+                    <span
+                        style="background: #FEF3C7; color: #D97706; padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;">⏳
+                        Pending</span>
+                    {% elif action_status == 'needs_review' %}
+                    <span
+                        style="background: #E0E7FF; color: #4F46E5; padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;">👁
+                        Needs Review</span>
+                    {% else %}
+                    <span
+                        style="background: #FEE2E2; color: #EF4444; padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;">⚠
+                        {{ action_status }}</span>
+                    {% endif %}
+                </td>
+            </tr>
+        </table>
+    </div>
+</div>
+
+{% if action_details %}
+<div class="highlight-box">
+    <p class="highlight-text">
+        📝 <strong>Details:</strong><br>
+        <span style="font-weight: 400;">{{ action_details }}</span>
+    </p>
+</div>
+{% endif %}
+
+{% if created_items and created_items|length > 0 %}
+<div class="divider"></div>
+
+<p class="main-text text-sm" style="font-weight: 600; margin-bottom: 12px;">
+    ✅ Items Created
+</p>
+
+<table style="width: 100%; border-collapse: collapse; background: #F9FAFB; border-radius: 12px; overflow: hidden;">
+    {% for item in created_items %}
+    <tr style="{% if not loop.last %}border-bottom: 1px solid #E5E7EB;{% endif %}">
+        <td style="padding: 14px 16px; color: #374151;">
+            <span style="margin-right: 8px;">{{ item.icon | default('•') }}</span>
+            {{ item.title }}
+        </td>
+        {% if item.extra %}
+        <td style="padding: 14px 16px; color: #6B7280; text-align: right; font-size: 14px;">
+            {{ item.extra }}
+        </td>
+        {% endif %}
+    </tr>
+    {% endfor %}
+</table>
+{% endif %}
+
+{% if requires_action %}
+<div class="info-card"
+    style="background: linear-gradient(135deg, #FEF3C7 0%, #FFFBEB 100%); border-left: 4px solid #F59E0B;">
+    <p class="info-card-title" style="color: #D97706;">⚡ Action Required</p>
+    <div class="info-card-content">
+        {{ requires_action_message | default('Please review the changes made by this agent.') }}
+    </div>
+</div>
+{% endif %}
+
+<div class="button-container">
+    <a href="{{ action_url | default('https://lumicoria.ai/agents') }}" class="primary-button">
+        {{ action_button_text | default('View Details') }}
+    </a>
+    {% if agent_settings_url %}
+    <br>
+    <a href="{{ agent_settings_url }}" class="secondary-button">
+        ⚙️ Agent Settings
+    </a>
+    {% endif %}
+</div>
+
+<p class="main-text text-center text-sm" style="color: #9CA3AF; margin-top: 24px;">
+    Your AI agents work autonomously to help you stay productive.<br>
+    <a href="https://lumicoria.ai/agents/{{ agent_id | default('settings') }}" style="color: #7C3AED;">Manage {{
+        agent_name }} notifications</a>
+</p>
+{% endblock %}

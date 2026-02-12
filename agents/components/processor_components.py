@@ -9,7 +9,7 @@ from .base_component import BaseComponent, ComponentResult, ComponentStatus
 logger = structlog.get_logger(__name__)
 
 class PerplexityResearchComponent(BaseComponent):
-    """Component that performs research using the Perplexity API."""
+    """Component that performs research using LLM providers."""
     
     @property
     def component_type(self) -> str:
@@ -54,28 +54,29 @@ class PerplexityResearchComponent(BaseComponent):
             depth = input_data.get("depth", "detailed")
             focus_areas = input_data.get("focus_areas", [])
             
-            # Use Perplexity client to perform research
-            if not self.perplexity_client:
-                raise ValueError("Perplexity client not initialized")
+            # Use LLM client to perform research
+            if not self.llm_client:
+                raise ValueError("LLM client not initialized")
                 
-            response = await self.perplexity_client.query(
-                prompt=f"""Research query: {query}
+            prompt = f"""Research query: {query}
                 Context: {context}
                 Focus areas: {', '.join(focus_areas)}
                 Depth: {depth}
                 
                 Provide detailed research findings with sources."""
-            )
+            
+            messages = [{"role": "user", "content": prompt}]
+            response = await self.llm_client.generate(messages)
             
             result_data = {
                 "findings": self._parse_findings(response.content),
-                "sources": response.metadata.get("sources", []),
+                "sources": [],
                 "summary": response.content,
                 "metadata": {
                     "depth": depth,
                     "focus_areas": focus_areas,
                     "query_timestamp": datetime.utcnow().isoformat(),
-                    "confidence": response.metadata.get("confidence", 0.0)
+                    "confidence": 0.0
                 }
             }
             
@@ -382,14 +383,15 @@ class DataExtractionComponent(BaseComponent):
             # Initialize result container
             extracted_entities = []
 
-            # Use Perplexity for smart extraction
-            if not self.perplexity_client:
-                raise ValueError("Perplexity client not initialized")
+            # Use LLM for smart extraction
+            if not self.llm_client:
+                raise ValueError("LLM client not initialized")
 
             # Prepare extraction prompt based on type
             prompt = self._get_extraction_prompt(text, extraction_type, custom_patterns)
             
-            response = await self.perplexity_client.query(prompt)
+            messages = [{"role": "user", "content": prompt}]
+            response = await self.llm_client.generate(messages)
             
             # Parse the response into structured data
             extracted_data = self._parse_extraction_response(
@@ -658,14 +660,15 @@ class LiveEnvironmentAnalyzerComponent(BaseComponent):
 
     async def _analyze_ergonomics(self, camera_feed: str) -> Dict[str, Any]:
         """Analyze workspace ergonomics using computer vision"""
-        # Use perplexity for intelligent scene analysis
+        # Use LLM for intelligent scene analysis
         prompt = """Analyze the workspace image for ergonomic factors:
         - Detect person's posture and body position
         - Assess screen height and distance
         - Evaluate desk and chair setup
         Provide scores and specific recommendations."""
 
-        response = await self.perplexity_client.query(prompt, context={"image": camera_feed})
+        messages = [{"role": "user", "content": prompt}]
+        response = await self.llm_client.generate(messages)
         
         # Parse the response into structured data
         analysis = self._parse_ergonomics_response(response.content)
@@ -681,7 +684,8 @@ class LiveEnvironmentAnalyzerComponent(BaseComponent):
         - Light distribution
         Provide scores and recommendations for optimal lighting."""
 
-        response = await self.perplexity_client.query(prompt, context={"image": camera_feed})
+        messages = [{"role": "user", "content": prompt}]
+        response = await self.llm_client.generate(messages)
         
         return self._parse_lighting_response(response.content)
 
@@ -693,7 +697,8 @@ class LiveEnvironmentAnalyzerComponent(BaseComponent):
         - Identify optimization opportunities
         Provide a clutter score and organization suggestions."""
 
-        response = await self.perplexity_client.query(prompt, context={"image": camera_feed})
+        messages = [{"role": "user", "content": prompt}]
+        response = await self.llm_client.generate(messages)
         
         return self._parse_organization_response(response.content)
 
@@ -886,8 +891,9 @@ class TranslatorComponent(BaseComponent):
                 context, tone, preserve_formatting
             )
 
-            # Get translation from Perplexity
-            response = await self.perplexity_client.query(prompt)
+            # Get translation from LLM
+            messages = [{"role": "user", "content": prompt}]
+            response = await self.llm_client.generate(messages)
             
             # Process the translation
             translation_result = self._process_translation_response(
@@ -932,7 +938,8 @@ class TranslatorComponent(BaseComponent):
         prompt = f"""What is the language of this text? Respond with just the ISO 639-1 language code.
         Text: {text[:200]}..."""  # Use first 200 chars for detection
 
-        response = await self.perplexity_client.query(prompt)
+        messages = [{"role": "user", "content": prompt}]
+        response = await self.llm_client.generate(messages)
         return response.content.strip().lower()
 
     def _prepare_translation_prompt(

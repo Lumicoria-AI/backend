@@ -18,7 +18,7 @@ class TranslationMode(Enum):
     LITERARY = "literary"  # Literary content translation
 
 class TranslationAgent(BaseAgent):
-    """Agent for multilingual translation and cultural adaptation using Perplexity AI.
+    """Agent for multilingual translation and cultural adaptation using LLM providers.
     
     This agent provides comprehensive translation services including:
     - Document translation with format preservation

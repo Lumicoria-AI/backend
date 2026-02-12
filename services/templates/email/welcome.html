@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+
+{% block title %}Welcome to Lumicoria.ai{% endblock %}
+
+{% block content %}
+<p class="greeting">Welcome aboard, {{ user_name }}! 🎉</p>
+
+<p class="main-text">
+    We're thrilled to have you join the Lumicoria.ai family. You've just taken the first step towards transforming how
+    you manage your digital life with the power of AI.
+</p>
+
+<div class="highlight-box">
+    <p class="highlight-text">
+        <strong>Your account is ready!</strong> Start exploring our AI agents that will help you stay organized,
+        productive, and balanced.
+    </p>
+</div>
+
+<div class="info-card">
+    <p class="info-card-title">🚀 Getting Started</p>
+    <div class="info-card-content">
+        <p style="margin-bottom: 12px;"><strong>1. Upload Documents</strong><br>Let our AI extract key information and
+            create tasks automatically.</p>
+        <p style="margin-bottom: 12px;"><strong>2. Set Up Your Agents</strong><br>Customize AI agents like Document
+            Agent and Well-being Coach.</p>
+        <p><strong>3. Connect Integrations</strong><br>Sync with Google Workspace, Slack, and more for seamless
+            productivity.</p>
+    </div>
+</div>
+
+<div class="button-container">
+    <a href="{{ dashboard_url | default('https://lumicoria.ai/dashboard') }}" class="primary-button">
+        Go to Dashboard
+    </a>
+    <br>
+    <a href="{{ getting_started_url | default('https://lumicoria.ai/getting-started') }}" class="secondary-button">
+        View Getting Started Guide
+    </a>
+</div>
+
+<div class="divider"></div>
+
+<p class="main-text text-center text-sm">
+    Need help? Our support team is here for you 24/7.<br>
+    Just reply to this email or visit our <a href="https://lumicoria.ai/help" style="color: #7C3AED;">Help Center</a>.
+</p>
+{% endblock %}

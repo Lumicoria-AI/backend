@@ -611,6 +611,11 @@ async def setup_agent_service() -> None:
                         "model": "sonar-medium-online",
                         "temperature": 0.7,
                         "max_tokens": 1024
+                    },
+                    "gemini": {
+                        "model": "gemini-2.0-flash",
+                        "temperature": 0.7,
+                        "max_tokens": 1024
                     }
                 },
                 "agents": {
@@ -626,10 +631,15 @@ async def setup_agent_service() -> None:
             with open(config_path, "r") as f:
                 config = yaml.safe_load(f)
         
-        # Inject API key from centralized settings into the loaded config
+        # Inject API keys from centralized settings into the loaded config
+        # (API keys are resolved by the LLM abstraction layer, but we keep
+        # this for backward compatibility with any direct config access)
         from backend.core.config import settings as app_settings
-        if "ai_models" in config and "perplexity" in config["ai_models"]:
-            config["ai_models"]["perplexity"]["api_key"] = app_settings.PERPLEXITY_API_KEY
+        if "ai_models" in config:
+            if "perplexity" in config["ai_models"] and app_settings.PERPLEXITY_API_KEY:
+                config["ai_models"]["perplexity"]["api_key"] = app_settings.PERPLEXITY_API_KEY
+            if "gemini" in config["ai_models"] and getattr(app_settings, "GEMINI_API_KEY", None):
+                config["ai_models"]["gemini"]["api_key"] = app_settings.GEMINI_API_KEY
 
         # Create agent service with loaded configuration
         _agent_service = AgentService(config)

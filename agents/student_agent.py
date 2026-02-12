@@ -1,4 +1,5 @@
 from .base_agent import BaseAgent
+from backend.ai_models import LLMConfig
 from typing import Dict, Any, List, Optional, Union
 import json
 import structlog
@@ -10,7 +11,7 @@ import re
 logger = structlog.get_logger(__name__)
 
 class StudentAgent(BaseAgent):
-    """Agent for student learning and academic task management using Perplexity AI.
+    """Agent for student learning and academic task management using LLM providers.
     
     This agent helps students organize study materials, track assignments, 
     generate study plans, provide research assistance, and offer learning strategies.
@@ -113,28 +114,28 @@ class StudentAgent(BaseAgent):
             return {"error": "No student content provided"}
         
         try:
-            # Ensure Perplexity client is initialized
-            if not self.perplexity_client:
+            # Ensure LLM client is initialized
+            if not self.llm_client:
                 self.initialize_models()
                 
-            if not self.perplexity_client:
-                return {"error": "Perplexity client not initialized"}
+            if not self.llm_client:
+                return {"error": "LLM client not initialized"}
             
             # Select appropriate system prompt and user prompt based on request type
             system_prompt, user_prompt = self._create_async_prompts(request_type, content, student_context)
             
-            # Format messages for Perplexity API
+            # Format messages for LLM
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ]
             
-            # Call Perplexity API
-            response = await self.perplexity_client.chat_completion(
-                messages=messages,
+            # Call LLM via provider-agnostic interface
+            config = LLMConfig(
                 model=self.model_config.get("model"),
-                temperature=0.7
+                temperature=0.7,
             )
+            response = await self.llm_client.generate(messages, config=config)
             
             # Parse response based on request type
             if request_type == "assignment_help":
@@ -149,25 +150,26 @@ class StudentAgent(BaseAgent):
                 
                 # For research-specific tasks, we might want to add more context using a specialized call
                 if "topic" in content and len(content) < 500:
-                    research_result = await self.perplexity_client.academic_research(
-                        query=content,
-                        depth="detailed",
-                        focus_areas=student_context.get("interests", [])
+                    focus_areas = student_context.get("interests", [])
+                    focus_str = f"\n\nFocus areas: {', '.join(focus_areas)}" if focus_areas else ""
+                    research_messages = [
+                        {"role": "system", "content": "You are an expert academic researcher. Provide comprehensive, well-cited research findings."},
+                        {"role": "user", "content": f"Conduct detailed academic research on:\n\n{content}{focus_str}"}
+                    ]
+                    research_config = LLMConfig(
+                        model=self.model_config.get("model"),
+                        temperature=0.4,
+                    )
+                    research_result = await self.llm_client.generate(
+                        research_messages, config=research_config
                     )
                     
                     # Add the additional research context
                     parsed_result["extended_research"] = research_result.content
                     
                     # Add any citations
-                    if hasattr(research_result, "citations") and research_result.citations:
-                        parsed_result["citations"] = [
-                            {
-                                "text": citation.text,
-                                "url": citation.metadata.url,
-                                "title": citation.metadata.title
-                            }
-                            for citation in research_result.citations
-                        ]
+                    if research_result.citations:
+                        parsed_result["citations"] = research_result.citations
             else:
                 parsed_result = self._parse_general_assistance(response.content)
             
@@ -181,15 +183,8 @@ class StudentAgent(BaseAgent):
             }
             
             # Add citations if available
-            if hasattr(response, "citations") and response.citations:
-                result["citations"] = [
-                    {
-                        "text": citation.text,
-                        "url": citation.metadata.url,
-                        "title": citation.metadata.title
-                    }
-                    for citation in response.citations
-                ]
+            if response.citations:
+                result["citations"] = response.citations
             
             return result
             
@@ -208,12 +203,12 @@ class StudentAgent(BaseAgent):
             Dictionary containing academic assistance and guidance
         """
         try:
-            # Ensure Perplexity client is initialized
-            if not self.perplexity_client:
+            # Ensure LLM client is initialized
+            if not self.llm_client:
                 self.initialize_models()
                 
-            if not self.perplexity_client:
-                return {"error": "Perplexity client not initialized"}
+            if not self.llm_client:
+                return {"error": "LLM client not initialized"}
             
             # Get student context from context parameter
             student_context = context.get("context", {}) if context else {}
@@ -222,18 +217,18 @@ class StudentAgent(BaseAgent):
             # Create system and user prompts
             system_prompt, user_prompt = self._create_async_prompts(request_type, query, student_context)
             
-            # Format messages for Perplexity API
+            # Format messages for LLM
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ]
             
-            # Call Perplexity API
-            response = await self.perplexity_client.chat_completion(
-                messages=messages,
+            # Call LLM via provider-agnostic interface
+            config = LLMConfig(
                 model=self.model_config.get("model"),
-                temperature=0.7
+                temperature=0.7,
             )
+            response = await self.llm_client.generate(messages, config=config)
             
             # Parse response based on request type
             if request_type == "assignment_help":
@@ -246,27 +241,28 @@ class StudentAgent(BaseAgent):
                 # For research, we want to include citations
                 parsed_result = self._parse_research(response.content)
                 
-                # For research-specific tasks, we might want to add more context using a specialized call
+                # For research-specific tasks, add more context using a research call
                 if "topic" in query and len(query) < 500:
-                    research_result = await self.perplexity_client.academic_research(
-                        query=query,
-                        depth="detailed",
-                        focus_areas=student_context.get("interests", [])
+                    focus_areas = student_context.get("interests", [])
+                    focus_str = f"\n\nFocus areas: {', '.join(focus_areas)}" if focus_areas else ""
+                    research_messages = [
+                        {"role": "system", "content": "You are an expert academic researcher. Provide comprehensive, well-cited research findings."},
+                        {"role": "user", "content": f"Conduct detailed academic research on:\n\n{query}{focus_str}"}
+                    ]
+                    research_config = LLMConfig(
+                        model=self.model_config.get("model"),
+                        temperature=0.4,
+                    )
+                    research_result = await self.llm_client.generate(
+                        research_messages, config=research_config
                     )
                     
                     # Add the additional research context
                     parsed_result["extended_research"] = research_result.content
                     
                     # Add any citations
-                    if hasattr(research_result, "citations") and research_result.citations:
-                        parsed_result["citations"] = [
-                            {
-                                "text": citation.text,
-                                "url": citation.metadata.url,
-                                "title": citation.metadata.title
-                            }
-                            for citation in research_result.citations
-                        ]
+                    if research_result.citations:
+                        parsed_result["citations"] = research_result.citations
             else:
                 parsed_result = self._parse_general_assistance(response.content)
             

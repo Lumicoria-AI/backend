@@ -462,20 +462,21 @@ class DocumentRepository(BaseRepository[Document]):
                 "extracted_data": extraction_result
             }
             
-            # Use Perplexity client directly for querying
-            perplexity_client = document_agent.perplexity_client
-            if not perplexity_client:
+            # Use LLM client for querying
+            llm_client = document_agent.llm_client
+            if not llm_client:
                 document_agent.initialize_models()
-                perplexity_client = document_agent.perplexity_client
+                llm_client = document_agent.llm_client
             
-            if not perplexity_client:
-                raise ValueError("Failed to initialize Perplexity client")
+            if not llm_client:
+                raise ValueError("Failed to initialize LLM client")
             
-            # Query document
-            response = await perplexity_client.query_document(
-                document=document_content,
-                query=query
-            )
+            # Query document via provider-agnostic interface
+            messages = [
+                {"role": "system", "content": f"You are analyzing the following document. Answer questions based on its content.\n\nDocument:\n{document_content[:8000]}"},
+                {"role": "user", "content": query}
+            ]
+            response = await llm_client.generate(messages)
             
             # Format response
             result = {
@@ -486,18 +487,8 @@ class DocumentRepository(BaseRepository[Document]):
             }
             
             # Add citations if available
-            if hasattr(response, "citations") and response.citations:
-                result["citations"] = [
-                    {
-                        "text": citation.text,
-                        "metadata": {
-                            "url": citation.metadata.url,
-                            "title": citation.metadata.title,
-                            "snippet": citation.metadata.snippet
-                        }
-                    }
-                    for citation in response.citations
-                ]
+            if response.citations:
+                result["citations"] = response.citations
             
             # Add extracted data if requested
             if include_extracted_data and extraction_result:

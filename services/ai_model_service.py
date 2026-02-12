@@ -1,32 +1,20 @@
 from typing import Any, Dict, List, Optional
 import structlog
 
-# Assuming client libraries for various AI models are available or will be implemented
-# from backend.services.ai_clients.gemini_client import GeminiClient
-# from backend.services.ai_clients.mistral_client import MistralClient
-from backend.services.ai_clients.perplexity_client import PerplexityClient
-# from backend.services.ai_clients.ocr_client import OCRClient
-# from backend.services.ai_clients.stt_client import STTClient
-# from backend.services.ai_clients.image_analysis_client import ImageAnalysisClient
+from backend.ai_models import get_llm_client, LLMClient, LLMConfig
 from backend.core.config import settings as app_settings
 
 logger = structlog.get_logger()
 
+
 class AIModeService:
     def __init__(self):
-        # Initialize clients using centralized settings (no direct os.getenv)
-        perplexity_api_key = app_settings.PERPLEXITY_API_KEY
-        if not perplexity_api_key:
-            logger.warning("PERPLEXITY_API_KEY not configured. Perplexity client will not be functional.")
-            self.perplexity_client = None
-        else:
-            self.perplexity_client = PerplexityClient(api_key=perplexity_api_key)
-
-        # self.gemini_client = GeminiClient()
-        # self.mistral_client = MistralClient()
-        # self.ocr_client = OCRClient()
-        # self.stt_client = STTClient()
-        # self.image_analysis_client = ImageAnalysisClient()
+        # Initialize the default LLM client via the provider-agnostic abstraction
+        try:
+            self.llm_client: Optional[LLMClient] = get_llm_client()
+        except Exception as e:
+            logger.warning(f"Default LLM client not initialized: {e}")
+            self.llm_client = None
 
     async def process_text(
         self,
@@ -35,33 +23,48 @@ class AIModeService:
         settings: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Process text input using a specified text-based AI model.
-        E.g., for generation, summarization, Q&A.
+        Process text input using the LLM abstraction layer.
+        
+        The model_name parameter now maps to a provider name (e.g., 'perplexity', 'gemini')
+        or the default provider is used.
         """
         await logger.info("Processing text with AI model", model_name=model_name)
 
-        # Route call to the appropriate AI model client based on model_name
-        if model_name.lower() == "perplexity":
-            if not self.perplexity_client:
-                raise ValueError("Perplexity client is not initialized. API key may be missing.")
-            # Pass settings to the client, it can decide which ones are relevant (e.g., model version)
-            result = await self.perplexity_client.process_text(prompt, settings)
-            return result
-        # elif model_name.lower() == "gemini":
-        #     if not self.gemini_client:
-        #          raise ValueError("Gemini client is not initialized.")
-        #     result = await self.gemini_client.process_text(prompt, settings)
-        #     return result
-        # elif model_name.lower() == "mistral":
-        #      if not self.mistral_client:
-        #           raise ValueError("Mistral client is not initialized.")
-        #      result = await self.mistral_client.process_text(prompt, settings)
-        #      return result
-        else:
-            await logger.warning("Unsupported text model", model_name=model_name)
-            # Depending on requirements, you might fallback to a default model or raise an error
-            # For now, raising an error for clarity.
-            raise ValueError(f"Unsupported text model: {model_name}")
+        # Resolve which provider to use
+        provider = self._resolve_provider(model_name)
+        
+        try:
+            client = get_llm_client(provider=provider)
+        except Exception as e:
+            raise ValueError(f"Failed to get LLM client for '{provider}': {e}")
+
+        # Build messages
+        messages = [{"role": "user", "content": prompt}]
+        
+        # Build config from settings
+        config = LLMConfig()
+        if settings:
+            if "temperature" in settings:
+                config.temperature = settings["temperature"]
+            if "max_tokens" in settings:
+                config.max_tokens = settings["max_tokens"]
+            if "model" in settings:
+                config.model = settings["model"]
+            if "system_prompt" in settings:
+                messages.insert(0, {"role": "system", "content": settings["system_prompt"]})
+
+        response = await client.generate(messages, config=config)
+        return {"content": response.content, "model": response.model, "id": response.response_id}
+
+    def _resolve_provider(self, model_name: str) -> Optional[str]:
+        """Map a model_name string to a provider name."""
+        name = model_name.lower()
+        if name in ("perplexity", "sonar") or "sonar" in name:
+            return "perplexity"
+        if name in ("gemini",) or "gemini" in name:
+            return "gemini"
+        # Fall back to default provider
+        return None
 
     async def process_document(
         self,

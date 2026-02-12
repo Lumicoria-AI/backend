@@ -14,7 +14,7 @@ import json
 from ..db.vector_stores import get_vector_store
 from ..services.document_processor import document_processor
 from ..core.config import settings
-from ..ai_models.perplexity import PerplexityClient, create_perplexity_client, create_perplexity_client_async
+from ..ai_models import get_embedding_client, LLMClient
 
 logger = structlog.get_logger(__name__)
 
@@ -22,14 +22,14 @@ class ContextService:
     """
     Service for retrieving and managing context for RAG from multiple sources.
     """
-    def __init__(self, perplexity_client: Optional[PerplexityClient] = None):
+    def __init__(self, llm_client: Optional[LLMClient] = None):
         """Initialize the context service."""
-        self.perplexity_client = perplexity_client
+        self.llm_client = llm_client
         
     async def initialize(self):
         """Ensure client is initialized."""
-        if not self.perplexity_client:
-            self.perplexity_client = await create_perplexity_client_async()
+        if not self.llm_client:
+            self.llm_client = get_embedding_client()
             
     async def get_context_for_query(
         self,
@@ -57,7 +57,7 @@ class ContextService:
         await self.initialize()
         
         # Generate embedding for the query
-        query_embedding = await self.perplexity_client.generate_embeddings(texts=[query])
+        query_embedding = await self.llm_client.generate_embeddings(texts=[query])
         if not query_embedding or len(query_embedding) == 0:
             logger.error("Failed to generate query embedding")
             return {"context": [], "error": "Failed to generate query embedding"}
@@ -528,7 +528,7 @@ class ContextService:
         await self.initialize()
         
         # Generate embedding for the query
-        query_embedding = await self.perplexity_client.generate_embeddings(texts=[query])
+        query_embedding = await self.llm_client.generate_embeddings(texts=[query])
         if not query_embedding or len(query_embedding) == 0:
             logger.error("Failed to generate query embedding")
             return {"context": [], "error": "Failed to generate query embedding"}

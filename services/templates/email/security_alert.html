@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+
+{% block title %}Security Alert - Lumicoria.ai{% endblock %}
+
+{% block content %}
+<p class="greeting">Hi {{ user_name }},</p>
+
+<p class="main-text">
+    We detected {{ alert_type | default('unusual activity') }} on your Lumicoria.ai account. We're reaching out to make
+    sure it was you.
+</p>
+
+<div class="info-card"
+    style="background: linear-gradient(135deg, #FEE2E2 0%, #FEF2F2 100%); border-left: 4px solid #EF4444;">
+    <p class="info-card-title" style="color: #DC2626;">🔔 Security Alert</p>
+    <div class="info-card-content">
+        <table style="width: 100%; border-collapse: collapse;">
+            <tr>
+                <td style="padding: 10px 0; color: #6B7280; width: 100px;">Activity:</td>
+                <td style="padding: 10px 0; font-weight: 600; color: #1F2937;">{{ activity_description | default('New
+                    login detected') }}</td>
+            </tr>
+            <tr>
+                <td style="padding: 10px 0; color: #6B7280;">Time:</td>
+                <td style="padding: 10px 0; color: #374151;">{{ activity_time | default('Just now') }}</td>
+            </tr>
+            {% if device %}
+            <tr>
+                <td style="padding: 10px 0; color: #6B7280;">Device:</td>
+                <td style="padding: 10px 0; color: #374151;">{{ device }}</td>
+            </tr>
+            {% endif %}
+            {% if location %}
+            <tr>
+                <td style="padding: 10px 0; color: #6B7280;">Location:</td>
+                <td style="padding: 10px 0; color: #374151;">{{ location }}</td>
+            </tr>
+            {% endif %}
+            {% if ip_address %}
+            <tr>
+                <td style="padding: 10px 0; color: #6B7280;">IP Address:</td>
+                <td style="padding: 10px 0; color: #374151; font-family: monospace;">{{ ip_address }}</td>
+            </tr>
+            {% endif %}
+        </table>
+    </div>
+</div>
+
+<div class="highlight-box"
+    style="background: linear-gradient(135deg, #FEF3C7 0%, #FFFBEB 100%); border-left-color: #F59E0B;">
+    <p class="highlight-text">
+        ⚠️ <strong>Was this you?</strong><br>
+        <span style="font-weight: 400;">If you recognize this activity, you can safely ignore this email. If you don't
+            recognize it, please secure your account immediately.</span>
+    </p>
+</div>
+
+<div class="button-container">
+    <a href="{{ secure_account_url | default('https://lumicoria.ai/security') }}" class="primary-button"
+        style="background: linear-gradient(135deg, #EF4444 0%, #DC2626 100%);">
+        🔒 Secure My Account
+    </a>
+    <br>
+    <a href="{{ review_activity_url | default('https://lumicoria.ai/security/activity') }}" class="secondary-button">
+        Review Recent Activity
+    </a>
+</div>
+
+<div class="divider"></div>
+
+<div class="info-card">
+    <p class="info-card-title">🛡️ Recommended Actions</p>
+    <div class="info-card-content">
+        <ul style="margin: 0; padding-left: 20px; line-height: 1.8;">
+            <li>Change your password immediately</li>
+            <li>Enable two-factor authentication (2FA)</li>
+            <li>Review connected devices and revoke unknown sessions</li>
+            <li>Check for unauthorized changes to your settings</li>
+        </ul>
+    </div>
+</div>
+
+<p class="main-text text-center text-sm" style="color: #6B7280; margin-top: 24px;">
+    If you need help securing your account, contact us at<br>
+    <a href="mailto:security@lumicoria.ai" style="color: #7C3AED;">security@lumicoria.ai</a>
+</p>
+{% endblock %}

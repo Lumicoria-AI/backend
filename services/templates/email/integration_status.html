@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+
+{% block title %}Integration {{ status | title }}: {{ integration_name }} - Lumicoria.ai{% endblock %}
+
+{% block content %}
+<p class="greeting">Hi {{ user_name }},</p>
+
+{% if status == 'connected' %}
+<p class="main-text">
+    Great news! Your <strong>{{ integration_name }}</strong> integration has been successfully connected to
+    Lumicoria.ai.
+</p>
+
+<div class="info-card" style="border-left: 4px solid #10B981;">
+    <p class="info-card-title" style="color: #059669;">✅ Integration Connected</p>
+    <div class="info-card-content">
+        <table style="width: 100%; border-collapse: collapse;">
+            <tr>
+                <td style="padding: 8px 0; color: #6B7280; width: 120px;">Integration:</td>
+                <td style="padding: 8px 0; font-weight: 600; color: #1F2937;">{{ integration_name }}</td>
+            </tr>
+            <tr>
+                <td style="padding: 8px 0; color: #6B7280;">Connected at:</td>
+                <td style="padding: 8px 0; color: #374151;">{{ connected_at | default('Just now') }}</td>
+            </tr>
+            <tr>
+                <td style="padding: 8px 0; color: #6B7280;">Account:</td>
+                <td style="padding: 8px 0; color: #374151;">{{ integration_account | default('N/A') }}</td>
+            </tr>
+            <tr>
+                <td style="padding: 8px 0; color: #6B7280;">Status:</td>
+                <td style="padding: 8px 0;">
+                    <span
+                        style="background: #D1FAE5; color: #059669; padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;">Active</span>
+                </td>
+            </tr>
+        </table>
+    </div>
+</div>
+
+{% if capabilities and capabilities|length > 0 %}
+<div class="highlight-box">
+    <p class="highlight-text">
+        🚀 <strong>What you can now do:</strong>
+    </p>
+    <ul style="margin: 12px 0 0 20px; line-height: 1.8;">
+        {% for capability in capabilities %}
+        <li>{{ capability }}</li>
+        {% endfor %}
+    </ul>
+</div>
+{% endif %}
+
+{% elif status == 'disconnected' %}
+<p class="main-text">
+    Your <strong>{{ integration_name }}</strong> integration has been disconnected from Lumicoria.ai.
+</p>
+
+<div class="info-card" style="border-left: 4px solid #6B7280;">
+    <p class="info-card-title" style="color: #6B7280;">⚡ Integration Disconnected</p>
+    <div class="info-card-content">
+        <p>The integration was disconnected on {{ disconnected_at | default('Just now') }}.</p>
+        {% if disconnect_reason %}
+        <p style="margin-top: 8px; color: #6B7280;">Reason: {{ disconnect_reason }}</p>
+        {% endif %}
+    </div>
+</div>
+
+{% elif status == 'error' %}
+<p class="main-text">
+    We encountered an issue with your <strong>{{ integration_name }}</strong> integration.
+</p>
+
+<div class="info-card"
+    style="background: linear-gradient(135deg, #FEE2E2 0%, #FEF2F2 100%); border-left: 4px solid #EF4444;">
+    <p class="info-card-title" style="color: #DC2626;">⚠️ Integration Error</p>
+    <div class="info-card-content">
+        <p><strong>Error:</strong> {{ error_message | default('Connection failed') }}</p>
+        {% if error_details %}
+        <p style="margin-top: 8px; color: #6B7280;">{{ error_details }}</p>
+        {% endif %}
+    </div>
+</div>
+
+<div class="highlight-box"
+    style="background: linear-gradient(135deg, #FEF3C7 0%, #FFFBEB 100%); border-left-color: #F59E0B;">
+    <p class="highlight-text">
+        💡 <strong>How to fix this:</strong><br>
+        <span style="font-weight: 400;">Try reconnecting the integration from your settings. If the issue persists,
+            please contact support.</span>
+    </p>
+</div>
+
+{% elif status == 'expiring' %}
+<p class="main-text">
+    Your <strong>{{ integration_name }}</strong> integration credentials are about to expire.
+</p>
+
+<div class="info-card" style="border-left: 4px solid #F59E0B;">
+    <p class="info-card-title" style="color: #D97706;">⏰ Action Required</p>
+    <div class="info-card-content">
+        <p>Your integration will be disconnected on <strong>{{ expiry_date }}</strong> unless you reauthorize it.</p>
+    </div>
+</div>
+{% endif %}
+
+<div class="button-container">
+    <a href="{{ integration_url | default('https://lumicoria.ai/settings/integrations') }}" class="primary-button">
+        {% if status == 'connected' %}View Integration{% elif status == 'disconnected' %}Reconnect{% elif status ==
+        'error' %}Fix Integration{% else %}Reauthorize{% endif %}
+    </a>
+</div>
+
+<p class="main-text text-center text-sm" style="color: #9CA3AF; margin-top: 24px;">
+    Manage all your integrations in <a href="https://lumicoria.ai/settings/integrations"
+        style="color: #7C3AED;">Settings</a>
+</p>
+{% endblock %}

@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+
+{% block title %}Document Processed: {{ document_name }} - Lumicoria.ai{% endblock %}
+
+{% block content %}
+<p class="greeting">Hi {{ user_name }},</p>
+
+<p class="main-text">
+    Great news! Your document has been processed by our AI and is ready for review.
+</p>
+
+<div class="info-card" style="border-left: 4px solid #10B981;">
+    <p class="info-card-title">📄 Document Summary</p>
+    <div class="info-card-content">
+        <table style="width: 100%; border-collapse: collapse;">
+            <tr>
+                <td style="padding: 8px 0; color: #6B7280; width: 120px;">Document:</td>
+                <td style="padding: 8px 0; font-weight: 600; color: #1F2937;">{{ document_name }}</td>
+            </tr>
+            <tr>
+                <td style="padding: 8px 0; color: #6B7280;">Type:</td>
+                <td style="padding: 8px 0; color: #374151;">{{ document_type | default('PDF') }}</td>
+            </tr>
+            <tr>
+                <td style="padding: 8px 0; color: #6B7280;">Processed:</td>
+                <td style="padding: 8px 0; color: #374151;">{{ processed_at | default('Just now') }}</td>
+            </tr>
+            <tr>
+                <td style="padding: 8px 0; color: #6B7280;">Status:</td>
+                <td style="padding: 8px 0;">
+                    <span
+                        style="background: #D1FAE5; color: #059669; padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;">
+                        ✓ COMPLETE
+                    </span>
+                </td>
+            </tr>
+        </table>
+    </div>
+</div>
+
+{% if extracted_items or tasks_created %}
+<div class="highlight-box">
+    <p class="highlight-text">
+        🤖 <strong>AI Extraction Results:</strong>
+    </p>
+    <div style="margin-top: 12px; display: flex; gap: 20px; flex-wrap: wrap;">
+        {% if extracted_items %}
+        <div style="background: white; padding: 16px 20px; border-radius: 12px; text-align: center; min-width: 100px;">
+            <div style="font-size: 28px; font-weight: 700; color: #7C3AED;">{{ extracted_items }}</div>
+            <div style="font-size: 12px; color: #6B7280; margin-top: 4px;">Items Extracted</div>
+        </div>
+        {% endif %}
+        {% if tasks_created %}
+        <div style="background: white; padding: 16px 20px; border-radius: 12px; text-align: center; min-width: 100px;">
+            <div style="font-size: 28px; font-weight: 700; color: #10B981;">{{ tasks_created }}</div>
+            <div style="font-size: 12px; color: #6B7280; margin-top: 4px;">Tasks Created</div>
+        </div>
+        {% endif %}
+        {% if key_dates %}
+        <div style="background: white; padding: 16px 20px; border-radius: 12px; text-align: center; min-width: 100px;">
+            <div style="font-size: 28px; font-weight: 700; color: #F59E0B;">{{ key_dates }}</div>
+            <div style="font-size: 12px; color: #6B7280; margin-top: 4px;">Key Dates Found</div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
+{% if extracted_summary %}
+<div class="info-card">
+    <p class="info-card-title">📝 Document Summary</p>
+    <div class="info-card-content">
+        {{ extracted_summary }}
+    </div>
+</div>
+{% endif %}
+
+{% if created_tasks and created_tasks|length > 0 %}
+<div class="divider"></div>
+
+<p class="main-text text-sm" style="font-weight: 600; margin-bottom: 12px;">
+    ✅ Tasks automatically created:
+</p>
+
+<table style="width: 100%; border-collapse: collapse; background: #F9FAFB; border-radius: 12px; overflow: hidden;">
+    {% for task in created_tasks[:5] %}
+    <tr style="{% if not loop.last %}border-bottom: 1px solid #E5E7EB;{% endif %}">
+        <td style="padding: 14px 16px; color: #374151;">
+            <span style="color: #7C3AED; margin-right: 8px;">☐</span>
+            {{ task.title }}
+        </td>
+        <td style="padding: 14px 16px; color: #6B7280; text-align: right; font-size: 14px;">
+            {% if task.due_date %}Due: {{ task.due_date }}{% endif %}
+        </td>
+    </tr>
+    {% endfor %}
+</table>
+{% endif %}
+
+<div class="button-container">
+    <a href="{{ document_url | default('https://lumicoria.ai/documents') }}" class="primary-button">
+        View Document
+    </a>
+    {% if tasks_url %}
+    <br>
+    <a href="{{ tasks_url }}" class="secondary-button">
+        Review Created Tasks
+    </a>
+    {% endif %}
+</div>
+
+<p class="main-text text-center text-sm" style="color: #9CA3AF; margin-top: 24px;">
+    Our AI analyzed your document and extracted actionable insights.<br>
+    Review the results to ensure everything looks correct.
+</p>
+{% endblock %}

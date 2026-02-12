@@ -596,13 +596,3 @@ async def get_email_service() -> EmailService:
         await _email_service.initialize()
     
     return _email_service
-
-
-# Convenience function for direct imports
-email_service = EmailService(
-    sendgrid_api_key=getattr(settings, 'SENDGRID_API_KEY', None),
-    resend_api_key=getattr(settings, 'RESEND_API_KEY', None),
-    from_email=getattr(settings, 'EMAIL_FROM_ADDRESS', 'noreply@lumicoria.ai'),
-    from_name=getattr(settings, 'EMAIL_FROM_NAME', 'Lumicoria.ai'),
-    sandbox_mode=getattr(settings, 'EMAIL_SANDBOX_MODE', False),
-)

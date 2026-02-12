@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block title %}{{ subject | default('New Notification') }} - Lumicoria.ai{% endblock %}
+
+{% block content %}
+<p class="greeting">Hi {{ user_name }},</p>
+
+<p class="main-text">
+    {{ message }}
+</p>
+
+{% if notification_type == 'task' %}
+<div class="info-card" style="border-left: 4px solid #7C3AED;">
+    <p class="info-card-title">📋 Task Update</p>
+    <div class="info-card-content">
+        <p><strong>{{ task_title | default('Task') }}</strong></p>
+        {% if task_due_date %}
+        <p style="margin-top: 8px; color: #6B7280;">Due: {{ task_due_date }}</p>
+        {% endif %}
+        {% if task_description %}
+        <p style="margin-top: 8px;">{{ task_description }}</p>
+        {% endif %}
+    </div>
+</div>
+{% elif notification_type == 'document' %}
+<div class="info-card" style="border-left: 4px solid #10B981;">
+    <p class="info-card-title">📄 Document Update</p>
+    <div class="info-card-content">
+        <p><strong>{{ document_name | default('Document') }}</strong></p>
+        {% if extracted_items %}
+        <p style="margin-top: 8px;">Extracted {{ extracted_items }} items</p>
+        {% endif %}
+    </div>
+</div>
+{% elif notification_type == 'wellbeing' %}
+<div class="info-card" style="border-left: 4px solid #F59E0B;">
+    <p class="info-card-title">💚 Well-being Reminder</p>
+    <div class="info-card-content">
+        <p>{{ wellbeing_message | default('Time to take care of yourself!') }}</p>
+        {% if suggestion %}
+        <p style="margin-top: 12px; padding: 12px; background: #FEF3C7; border-radius: 8px;">
+            💡 <strong>Suggestion:</strong> {{ suggestion }}
+        </p>
+        {% endif %}
+    </div>
+</div>
+{% elif notification_type == 'system' %}
+<div class="info-card" style="border-left: 4px solid #6B7280;">
+    <p class="info-card-title">⚙️ System Notification</p>
+    <div class="info-card-content">
+        {{ system_message | default(message) }}
+    </div>
+</div>
+{% else %}
+<div class="highlight-box">
+    <p class="highlight-text">{{ message }}</p>
+</div>
+{% endif %}
+
+{% if action_url %}
+<div class="button-container">
+    <a href="{{ action_url }}" class="primary-button">
+        {{ action_text | default('View Details') }}
+    </a>
+</div>
+{% endif %}
+
+{% if additional_info %}
+<div class="divider"></div>
+<p class="main-text text-sm" style="color: #6B7280;">
+    {{ additional_info }}
+</p>
+{% endif %}
+{% endblock %}

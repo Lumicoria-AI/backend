@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+
+{% block title %}Task Reminder: {{ task_title }} - Lumicoria.ai{% endblock %}
+
+{% block content %}
+<p class="greeting">Hi {{ user_name }},</p>
+
+<p class="main-text">
+    Just a friendly reminder about an upcoming task that needs your attention.
+</p>
+
+<div class="info-card" style="border-left: 4px solid #7C3AED;">
+    <p class="info-card-title">📋 Task Details</p>
+    <div class="info-card-content">
+        <table style="width: 100%; border-collapse: collapse;">
+            <tr>
+                <td style="padding: 8px 0; color: #6B7280; width: 100px;">Title:</td>
+                <td style="padding: 8px 0; font-weight: 600; color: #1F2937;">{{ task_title }}</td>
+            </tr>
+            {% if task_description %}
+            <tr>
+                <td style="padding: 8px 0; color: #6B7280; vertical-align: top;">Description:</td>
+                <td style="padding: 8px 0; color: #374151;">{{ task_description }}</td>
+            </tr>
+            {% endif %}
+            <tr>
+                <td style="padding: 8px 0; color: #6B7280;">Due Date:</td>
+                <td
+                    style="padding: 8px 0; font-weight: 600; color: {% if is_overdue %}#EF4444{% elif is_urgent %}#F59E0B{% else %}#1F2937{% endif %};">
+                    {{ task_due_date }}
+                    {% if is_overdue %}
+                    <span
+                        style="background: #FEE2E2; color: #EF4444; padding: 2px 8px; border-radius: 4px; font-size: 12px; margin-left: 8px;">OVERDUE</span>
+                    {% elif is_urgent %}
+                    <span
+                        style="background: #FEF3C7; color: #D97706; padding: 2px 8px; border-radius: 4px; font-size: 12px; margin-left: 8px;">DUE
+                        SOON</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% if task_priority %}
+            <tr>
+                <td style="padding: 8px 0; color: #6B7280;">Priority:</td>
+                <td style="padding: 8px 0;">
+                    {% if task_priority == 'high' or task_priority == 'urgent' %}
+                    <span
+                        style="background: #FEE2E2; color: #EF4444; padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;">{{
+                        task_priority | upper }}</span>
+                    {% elif task_priority == 'normal' %}
+                    <span
+                        style="background: #E0E7FF; color: #4F46E5; padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;">NORMAL</span>
+                    {% else %}
+                    <span
+                        style="background: #E5E7EB; color: #6B7280; padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;">{{
+                        task_priority | upper }}</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endif %}
+            {% if source_document %}
+            <tr>
+                <td style="padding: 8px 0; color: #6B7280;">Source:</td>
+                <td style="padding: 8px 0; color: #7C3AED;">📄 {{ source_document }}</td>
+            </tr>
+            {% endif %}
+        </table>
+    </div>
+</div>
+
+<div class="button-container">
+    <a href="{{ task_url | default('https://lumicoria.ai/tasks') }}" class="primary-button">
+        View Task
+    </a>
+    {% if mark_complete_url %}
+    <br>
+    <a href="{{ mark_complete_url }}" class="secondary-button">
+        ✓ Mark as Complete
+    </a>
+    {% endif %}
+</div>
+
+{% if related_tasks and related_tasks|length > 0 %}
+<div class="divider"></div>
+
+<p class="main-text text-sm" style="font-weight: 600; margin-bottom: 12px;">
+    📌 Other upcoming tasks:
+</p>
+
+<table style="width: 100%; border-collapse: collapse;">
+    {% for task in related_tasks[:3] %}
+    <tr style="border-bottom: 1px solid #E5E7EB;">
+        <td style="padding: 12px 0; color: #374151;">{{ task.title }}</td>
+        <td style="padding: 12px 0; color: #6B7280; text-align: right;">{{ task.due_date }}</td>
+    </tr>
+    {% endfor %}
+</table>
+{% endif %}
+{% endblock %}

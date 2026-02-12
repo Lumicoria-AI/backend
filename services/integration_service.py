@@ -1,15 +1,11 @@
 from typing import Any, Dict, List, Optional
 import structlog
+import json
 from datetime import datetime
-from motor.motor_asyncio import AsyncIOMotorClient
+from pathlib import Path
 
-# Assuming these repositories and services exist
 from backend.db.mongodb.repositories.integration_repository import integration_repository
 from backend.models.integration import Integration, IntegrationCreate
-# Assuming specific integration client libraries are available or will be implemented
-# from backend.services.google_calendar_client import GoogleCalendarClient
-# from backend.services.slack_client import SlackClient
-# from backend.services.salesforce_client import SalesforceClient
 from backend.integrations.notion import NotionIntegration
 from backend.integrations.google_workspace import GoogleWorkspaceIntegration
 from backend.integrations.slack import SlackIntegration
@@ -19,35 +15,52 @@ from backend.core.logging import get_logger
 # Initialize logger
 logger = get_logger("lumicoria.services.integration")
 
+
 class IntegrationService:
     """Service for managing external integrations."""
-    
+
     def __init__(self):
         """Initialize integration service."""
         self.integrations: Dict[str, Any] = {}
         self._initialize_integrations()
-        
+
     def _initialize_integrations(self) -> None:
-        """Initialize available integrations."""
-        try:
-            # Initialize Notion integration
-            if settings.NOTION_API_KEY:
-                self.integrations["notion"] = NotionIntegration()
+        """Initialize available integrations (each independently — one failure doesn't block the rest)."""
+
+        # ── Notion ──────────────────────────────────────────────────────
+        if settings.NOTION_API_KEY:
+            try:
+                self.integrations["notion"] = NotionIntegration(
+                    api_token=settings.NOTION_API_KEY
+                )
                 logger.info("Notion integration initialized")
-                
-            # Initialize Google Workspace integration
-            if settings.GOOGLE_CREDENTIALS_FILE:
-                self.integrations["google_workspace"] = GoogleWorkspaceIntegration()
-                logger.info("Google Workspace integration initialized")
-                
-            # Initialize Slack integration
-            if settings.SLACK_BOT_TOKEN:
+            except Exception as e:
+                logger.error(f"Failed to initialize Notion integration: {e}")
+
+        # ── Google Workspace ────────────────────────────────────────────
+        if settings.GOOGLE_CREDENTIALS_FILE:
+            try:
+                creds_path = Path(settings.GOOGLE_CREDENTIALS_FILE)
+                if creds_path.exists():
+                    credentials_info = json.loads(creds_path.read_text())
+                    self.integrations["google_workspace"] = GoogleWorkspaceIntegration(
+                        credentials_info=credentials_info
+                    )
+                    logger.info("Google Workspace integration initialized")
+                else:
+                    logger.warning(
+                        f"Google credentials file not found: {settings.GOOGLE_CREDENTIALS_FILE}"
+                    )
+            except Exception as e:
+                logger.error(f"Failed to initialize Google Workspace integration: {e}")
+
+        # ── Slack ───────────────────────────────────────────────────────
+        if settings.SLACK_BOT_TOKEN:
+            try:
                 self.integrations["slack"] = SlackIntegration()
                 logger.info("Slack integration initialized")
-                
-        except Exception as e:
-            logger.error(f"Error initializing integrations: {str(e)}")
-            raise
+            except Exception as e:
+                logger.error(f"Failed to initialize Slack integration: {e}")
             
     async def execute_integration_action(self,
                                        integration_type: str,

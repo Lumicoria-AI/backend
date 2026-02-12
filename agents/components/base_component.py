@@ -62,6 +62,19 @@ class BaseComponent(ABC):
         self.status = ComponentStatus.IDLE
         self._execution_count = 0
         self._last_execution = None
+        # LLM client for components that need AI capabilities
+        self._llm_client = None
+
+    @property
+    def llm_client(self):
+        """Lazy-initialize the LLM client for components that need it."""
+        if self._llm_client is None:
+            try:
+                from backend.ai_models import get_llm_client
+                self._llm_client = get_llm_client()
+            except Exception as e:
+                logger.error(f"Failed to initialize LLM client for component {self.name}: {e}")
+        return self._llm_client
         
     @property
     @abstractmethod

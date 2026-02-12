@@ -32,7 +32,7 @@ from langchain_core.documents import Document as LangchainDocument
 
 from ..db.vector_stores import get_vector_store
 from ..core.config import settings
-from ..ai_models.perplexity import create_perplexity_client, PerplexityClient
+from ..ai_models import get_embedding_client, LLMClient
 
 logger = structlog.get_logger(__name__)
 
@@ -55,9 +55,9 @@ class DocumentProcessor:
     Process documents for RAG by chunking, embedding, and storing them.
     """
     
-    def __init__(self, perplexity_client: Optional[PerplexityClient] = None):
+    def __init__(self, llm_client: Optional[LLMClient] = None):
         """Initialize the document processor."""
-        self.perplexity_client = perplexity_client
+        self.llm_client = llm_client
         self.loaders = {
             "text/plain": TextLoader,
             "application/pdf": PyPDFLoader,
@@ -74,8 +74,8 @@ class DocumentProcessor:
         
     async def initialize(self):
         """Ensure client is initialized."""
-        if not self.perplexity_client:
-            self.perplexity_client = create_perplexity_client()
+        if not self.llm_client:
+            self.llm_client = get_embedding_client()
             
     async def process_file(
         self, 
@@ -405,7 +405,7 @@ class DocumentProcessor:
             for i in range(0, len(texts), batch_size):
                 batch_texts = texts[i:i+batch_size]
                 # Get embeddings from Perplexity
-                batch_embeddings = await self.perplexity_client.generate_embeddings(texts=batch_texts)
+                batch_embeddings = await self.llm_client.generate_embeddings(texts=batch_texts)
                 all_embeddings.extend(batch_embeddings)
                 
                 # Short delay to avoid rate limiting

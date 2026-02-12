@@ -1,4 +1,5 @@
 from .base_agent import BaseAgent
+from backend.ai_models import LLMConfig
 from typing import Dict, Any, List, Optional
 import json
 import structlog
@@ -10,7 +11,7 @@ import re
 logger = structlog.get_logger(__name__)
 
 class CreativeAgent(BaseAgent):
-    """Agent for generating creative content using Perplexity AI.
+    """Agent for generating creative content using LLM providers.
     
     This agent generates various types of creative content including marketing copy,
     stories, poems, scripts, product descriptions, and other creative text forms.
@@ -104,30 +105,30 @@ class CreativeAgent(BaseAgent):
             return {"error": "No topic or content prompt provided"}
             
         try:
-            # Ensure Perplexity client is initialized
-            if not self.perplexity_client:
+            # Ensure LLM client is initialized
+            if not self.llm_client:
                 self.initialize_models()
                 
-            if not self.perplexity_client:
-                return {"error": "Perplexity client not initialized"}
+            if not self.llm_client:
+                return {"error": "LLM client not initialized"}
             
             # Create system and user prompts
             system_prompt, user_prompt = self._create_async_prompts(
                 content_type, topic, guidelines, audience, tone, length
             )
             
-            # Format messages for Perplexity API
+            # Format messages for LLM
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ]
             
-            # Call Perplexity API
-            response = await self.perplexity_client.chat_completion(
-                messages=messages,
+            # Call LLM via provider-agnostic interface
+            config = LLMConfig(
                 model=self.model_config.get("model"),
-                temperature=0.8  # Slightly higher temperature for creativity
+                temperature=0.8,  # Slightly higher temperature for creativity
             )
+            response = await self.llm_client.generate(messages, config=config)
             
             # Parse the content based on its type
             parsed_content = self._parse_creative_content(response.content, content_type)
@@ -148,15 +149,8 @@ class CreativeAgent(BaseAgent):
             }
             
             # Add citations if available
-            if hasattr(response, "citations") and response.citations:
-                result["citations"] = [
-                    {
-                        "text": citation.text,
-                        "url": citation.metadata.url,
-                        "title": citation.metadata.title
-                    }
-                    for citation in response.citations
-                ]
+            if response.citations:
+                result["citations"] = response.citations
             
             return result
             
@@ -647,12 +641,12 @@ class CreativeAgent(BaseAgent):
             Dictionary containing generated creative content
         """
         try:
-            # Ensure Perplexity client is initialized
-            if not self.perplexity_client:
+            # Ensure LLM client is initialized
+            if not self.llm_client:
                 self.initialize_models()
                 
-            if not self.perplexity_client:
-                return {"error": "Perplexity client not initialized"}
+            if not self.llm_client:
+                return {"error": "LLM client not initialized"}
             
             # Get content parameters from context
             content_type = context.get("content_type", "general") if context else "general"
@@ -667,18 +661,18 @@ class CreativeAgent(BaseAgent):
                 content_type, topic or query, guidelines, audience, tone, length
             )
             
-            # Format messages for Perplexity API
+            # Format messages for LLM
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ]
             
-            # Call Perplexity API
-            response = await self.perplexity_client.chat_completion(
-                messages=messages,
+            # Call LLM via provider-agnostic interface
+            config = LLMConfig(
                 model=self.model_config.get("model"),
-                temperature=0.8  # Slightly higher temperature for creativity
+                temperature=0.8,  # Slightly higher temperature for creativity
             )
+            response = await self.llm_client.generate(messages, config=config)
             
             # Parse the content based on its type
             parsed_content = self._parse_creative_content(response.content, content_type)

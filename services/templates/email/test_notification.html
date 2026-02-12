@@ -1,68 +1,55 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ subject }}</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            line-height: 1.6;
-            color: #333;
-            margin: 0;
-            padding: 0;
-        }
-        .container {
-            max-width: 600px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-        .header {
-            background-color: #4a90e2;
-            color: white;
-            padding: 20px;
-            text-align: center;
-        }
-        .content {
-            padding: 20px;
-            background-color: #f9f9f9;
-        }
-        .footer {
-            text-align: center;
-            padding: 20px;
-            font-size: 12px;
-            color: #666;
-        }
-        .button {
-            display: inline-block;
-            padding: 10px 20px;
-            background-color: #4a90e2;
-            color: white;
-            text-decoration: none;
-            border-radius: 5px;
-            margin: 20px 0;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>Lumicoria.ai</h1>
-        </div>
-        <div class="content">
-            <h2>{{ subject }}</h2>
-            <p>Hello {{ user_name }},</p>
-            <p>{{ message }}</p>
-            {% if action_url %}
-            <center>
-                <a href="{{ action_url }}" class="button">Take Action</a>
-            </center>
-            {% endif %}
-        </div>
-        <div class="footer">
-            <p>This is an automated message from Lumicoria.ai. Please do not reply to this email.</p>
-            <p>&copy; {{ year }} Lumicoria.ai. All rights reserved.</p>
-        </div>
+{% extends "base.html" %}
+
+{% block title %}{{ subject | default('Test Email') }} - Lumicoria.ai{% endblock %}
+
+{% block content %}
+<p class="greeting">Hi {{ user_name | default('there') }},</p>
+
+<p class="main-text">
+    {{ message | default('This is a test notification from Lumicoria.ai to verify that your email integration is working
+    correctly.') }}
+</p>
+
+<div class="highlight-box">
+    <p class="highlight-text">
+        ✅ <strong>Email delivery is working!</strong><br>
+        <span style="font-weight: 400;">If you received this email, your notification settings are configured
+            correctly.</span>
+    </p>
+</div>
+
+<div class="info-card">
+    <p class="info-card-title">📧 Email Details</p>
+    <div class="info-card-content">
+        <table style="width: 100%; border-collapse: collapse;">
+            <tr>
+                <td style="padding: 8px 0; color: #6B7280; width: 100px;">Sent at:</td>
+                <td style="padding: 8px 0; color: #374151;">{{ sent_at | default('Just now') }}</td>
+            </tr>
+            <tr>
+                <td style="padding: 8px 0; color: #6B7280;">Provider:</td>
+                <td style="padding: 8px 0; color: #374151;">{{ provider | default('SendGrid') }}</td>
+            </tr>
+            <tr>
+                <td style="padding: 8px 0; color: #6B7280;">Template:</td>
+                <td style="padding: 8px 0; color: #374151;">test_notification</td>
+            </tr>
+        </table>
     </div>
-</body>
-</html> 
+</div>
+
+{% if action_url %}
+<div class="button-container">
+    <a href="{{ action_url }}" class="primary-button">
+        {{ action_text | default('Go to Dashboard') }}
+    </a>
+</div>
+{% endif %}
+
+<div class="divider"></div>
+
+<p class="main-text text-center text-sm" style="color: #6B7280;">
+    This is an automated test message from Lumicoria.ai.<br>
+    You can safely ignore this email.
+</p>
+{% endblock %}

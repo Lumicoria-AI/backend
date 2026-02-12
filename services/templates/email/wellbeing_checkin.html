@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+
+{% block title %}Well-being Check-in - Lumicoria.ai{% endblock %}
+
+{% block content %}
+<p class="greeting">Hi {{ user_name }} 💚</p>
+
+<p class="main-text">
+    It's time for your {{ check_in_type | default('daily') }} well-being check-in. Taking a moment to reflect on how
+    you're feeling can help you stay balanced and productive.
+</p>
+
+<div class="info-card" style="background: linear-gradient(135deg, #ECFDF5 0%, #FEF3C7 100%); border: none;">
+    <p class="info-card-title" style="color: #059669;">🧘 Well-being Insights</p>
+    <div class="info-card-content">
+        <table style="width: 100%; border-collapse: collapse;">
+            {% if focus_time %}
+            <tr>
+                <td style="padding: 10px 0; color: #6B7280; width: 130px;">Focus Time Today:</td>
+                <td style="padding: 10px 0; font-weight: 600; color: #1F2937;">{{ focus_time }}</td>
+            </tr>
+            {% endif %}
+            {% if break_time %}
+            <tr>
+                <td style="padding: 10px 0; color: #6B7280;">Breaks Taken:</td>
+                <td style="padding: 10px 0; font-weight: 600; color: #1F2937;">{{ break_time }}</td>
+            </tr>
+            {% endif %}
+            {% if stress_level %}
+            <tr>
+                <td style="padding: 10px 0; color: #6B7280;">Stress Level:</td>
+                <td style="padding: 10px 0;">
+                    {% if stress_level == 'low' %}
+                    <span
+                        style="background: #D1FAE5; color: #059669; padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;">Low
+                        ✓</span>
+                    {% elif stress_level == 'moderate' %}
+                    <span
+                        style="background: #FEF3C7; color: #D97706; padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;">Moderate</span>
+                    {% else %}
+                    <span
+                        style="background: #FEE2E2; color: #EF4444; padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 600;">High</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endif %}
+            {% if hydration %}
+            <tr>
+                <td style="padding: 10px 0; color: #6B7280;">Hydration:</td>
+                <td style="padding: 10px 0; font-weight: 600; color: #1F2937;">{{ hydration }}</td>
+            </tr>
+            {% endif %}
+        </table>
+    </div>
+</div>
+
+{% if suggestion %}
+<div class="highlight-box"
+    style="background: linear-gradient(135deg, #E0F2FE 0%, #E0E7FF 100%); border-left-color: #0EA5E9;">
+    <p class="highlight-text">
+        💡 <strong>Personalized Suggestion:</strong><br>
+        <span style="font-weight: 400;">{{ suggestion }}</span>
+    </p>
+</div>
+{% endif %}
+
+{% if wellness_tips and wellness_tips|length > 0 %}
+<div class="divider"></div>
+
+<p class="main-text text-sm" style="font-weight: 600; margin-bottom: 16px;">
+    🌟 Quick Wellness Tips
+</p>
+
+<table style="width: 100%; border-collapse: collapse;">
+    {% for tip in wellness_tips[:3] %}
+    <tr>
+        <td style="padding: 12px 0; color: #374151; line-height: 1.6;">
+            <span style="font-size: 18px; margin-right: 8px;">{{ tip.icon | default('•') }}</span>
+            {{ tip.text }}
+        </td>
+    </tr>
+    {% endfor %}
+</table>
+{% endif %}
+
+<div class="button-container">
+    <a href="{{ wellbeing_url | default('https://lumicoria.ai/wellbeing') }}" class="primary-button"
+        style="background: linear-gradient(135deg, #10B981 0%, #059669 100%);">
+        Complete Check-in
+    </a>
+    {% if take_break_url %}
+    <br>
+    <a href="{{ take_break_url }}" class="secondary-button" style="border-color: #A7F3D0; color: #059669 !important;">
+        ☕ Take a 5-min Break
+    </a>
+    {% endif %}
+</div>
+
+<div class="divider"></div>
+
+<div style="text-align: center; padding: 20px; background: #F9FAFB; border-radius: 16px;">
+    <p style="font-size: 14px; color: #6B7280; margin-bottom: 8px;">Your Well-being Score</p>
+    <div
+        style="font-size: 48px; font-weight: 700; background: linear-gradient(135deg, #10B981, #7C3AED); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">
+        {{ wellbeing_score | default('85') }}%
+    </div>
+    <p style="font-size: 12px; color: #9CA3AF; margin-top: 4px;">
+        {% if wellbeing_trend == 'up' %}📈 Up from last week{% elif wellbeing_trend == 'down' %}📉 Down from last week{%
+        else %}→ Stable{% endif %}
+    </p>
+</div>
+
+<p class="main-text text-center text-sm" style="color: #9CA3AF; margin-top: 24px;">
+    Remember: Taking care of yourself is the first step to being productive.<br>
+    <a href="https://lumicoria.ai/wellbeing/settings" style="color: #7C3AED;">Manage well-being notifications</a>
+</p>
+{% endblock %}

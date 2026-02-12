@@ -1,4 +1,5 @@
 from .base_agent import BaseAgent
+from backend.ai_models import LLMConfig
 from typing import Dict, Any, List, Optional, Union, BinaryIO
 import base64
 import io
@@ -14,10 +15,10 @@ import httpx
 logger = structlog.get_logger(__name__)
 
 class VisionAgent(BaseAgent):
-    """Agent for processing images and visual data using Perplexity AI.
+    """Agent for processing images and visual data using LLM providers.
     
     This agent analyzes images, extracts text, identifies objects, and provides
-    detailed insights using Perplexity's API capabilities.
+    detailed insights using the provider-agnostic LLM interface.
     """
     
     def __init__(self, config: Dict[str, Any]):
@@ -145,12 +146,12 @@ class VisionAgent(BaseAgent):
                     response.raise_for_status()
                     encoded_image = self._encode_image(response.content)
             
-            # Ensure Perplexity client is initialized
-            if not self.perplexity_client:
+            # Ensure LLM client is initialized
+            if not self.llm_client:
                 self.initialize_models()
                 
-            if not self.perplexity_client:
-                return {"error": "Perplexity client not initialized"}
+            if not self.llm_client:
+                return {"error": "LLM client not initialized"}
             
             # Create a system prompt for image analysis
             system_prompt = (
@@ -173,24 +174,21 @@ class VisionAgent(BaseAgent):
                 }
             ]
             
-            # Format into messages for Perplexity API
+            # Format into messages for LLM
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": content}
             ]
             
             # Use default parameters
-            model_params = {
-                "temperature": vision_data.get("temperature", 0.7),
-                "max_tokens": vision_data.get("max_tokens", 1024),
-                "top_p": vision_data.get("top_p", 0.9)
-            }
-            
-            # Call Perplexity API directly
-            response = await self.perplexity_client.chat_completion(
-                messages=messages,
-                **model_params
+            config = LLMConfig(
+                temperature=vision_data.get("temperature", 0.7),
+                max_tokens=vision_data.get("max_tokens", 1024),
+                top_p=vision_data.get("top_p", 0.9),
             )
+            
+            # Call LLM via provider-agnostic interface
+            response = await self.llm_client.generate(messages, config=config)
             
             # Extract structured information
             structured_analysis = self._extract_structured_information(response.content)
@@ -231,12 +229,12 @@ class VisionAgent(BaseAgent):
             if not context or not (context.get("image_content") or context.get("image_path") or context.get("image_url")):
                 return {"error": "No image data provided in context"}
             
-            # Ensure Perplexity client is initialized
-            if not self.perplexity_client:
+            # Ensure LLM client is initialized
+            if not self.llm_client:
                 self.initialize_models()
                 
-            if not self.perplexity_client:
-                return {"error": "Perplexity client not initialized"}
+            if not self.llm_client:
+                return {"error": "LLM client not initialized"}
             
             # Get image data from context
             image_content = context.get("image_content")
@@ -276,24 +274,21 @@ class VisionAgent(BaseAgent):
                 }
             ]
             
-            # Format messages for Perplexity API
+            # Format messages for LLM
             messages = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": content}
             ]
             
             # Use parameters from context or defaults
-            model_params = {
-                "temperature": context.get("temperature", 0.7),
-                "max_tokens": context.get("max_tokens", 1024),
-                "top_p": context.get("top_p", 0.9)
-            }
-            
-            # Call Perplexity API
-            response = await self.perplexity_client.chat_completion(
-                messages=messages,
-                **model_params
+            config = LLMConfig(
+                temperature=context.get("temperature", 0.7),
+                max_tokens=context.get("max_tokens", 1024),
+                top_p=context.get("top_p", 0.9),
             )
+            
+            # Call LLM via provider-agnostic interface
+            response = await self.llm_client.generate(messages, config=config)
             
             # Extract structured information
             structured_analysis = self._extract_structured_information(response.content)
@@ -304,14 +299,7 @@ class VisionAgent(BaseAgent):
                 "structured_analysis": structured_analysis,
                 "processed_at": datetime.utcnow().isoformat(),
                 "model_used": self.model_config.get("model"),
-                "citations": [
-                    {
-                        "text": citation.text,
-                        "url": citation.metadata.url,
-                        "title": citation.metadata.title
-                    } 
-                    for citation in response.citations
-                ] if hasattr(response, "citations") else []
+                "citations": response.citations if response.citations else []
             }
             
             return result

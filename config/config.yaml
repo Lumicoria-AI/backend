@@ -1,12 +1,18 @@
 ai_models:
+  # Provider-level defaults. The actual provider is selected by
+  # DEFAULT_LLM_PROVIDER env var (or per-agent override below).
   perplexity:
     # api_key: loaded from PERPLEXITY_API_KEY env var via settings (never hardcode)
     model: "sonar-large-online"
+  gemini:
+    # api_key: loaded from GEMINI_API_KEY env var via settings (never hardcode)
+    model: "gemini-2.0-flash"
 
 
 agents:
   document_agent:
     type: "document"
+    # provider: uses DEFAULT_LLM_PROVIDER unless overridden  
     model: "perplexity"  
   wellbeing_agent:
     type: "wellbeing"
@@ -22,7 +28,7 @@ agents:
     model: "perplexity"
   creative_agent:
     type: "creative"
-    model: "mistral"
+    model: "gemini"  # Creative tasks benefit from Gemini's capabilities
   student_agent:
     type: "student"
     model: "perplexity"
