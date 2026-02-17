@@ -133,13 +133,22 @@ class BaseAgent(ABC):
         
         return response.content
     
-    async def _call_model_async(self, prompt: str, model_name: str = None, system_prompt: str = None, **kwargs) -> str:
-        """Asynchronous version of _call_model.
+    async def _call_model_async(
+        self,
+        prompt: str,
+        model_name: str = None,
+        system_prompt: str = None,
+        conversation_history: list = None,
+        **kwargs,
+    ) -> str:
+        """Asynchronous version of _call_model with optional conversation history.
         
         Args:
             prompt: The input prompt for the model.
             model_name: Optional. The specific model name to use.
             system_prompt: Optional. System instructions for the model.
+            conversation_history: Optional list of {"role": "user"|"assistant", "content": "..."} dicts.
+                These are prepended to give the model conversational context.
             **kwargs: Additional keyword arguments to pass to the LLM.
             
         Returns:
@@ -159,10 +168,19 @@ class BaseAgent(ABC):
                 extra=kwargs,
             )
             
-            # Build messages
+            # Build messages with optional history
             messages = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
+            
+            # Inject conversation history for context-aware responses
+            if conversation_history:
+                for msg in conversation_history[-8:]:  # Last 8 messages max
+                    messages.append({
+                        "role": msg.get("role", "user"),
+                        "content": msg.get("content", ""),
+                    })
+            
             messages.append({"role": "user", "content": prompt})
             
             response = await self.llm_client.generate(messages, config=config)

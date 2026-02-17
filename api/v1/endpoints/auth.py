@@ -1,12 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, OAuth2PasswordRequestForm
 from typing import Any, Optional
+import asyncio
 import firebase_admin
 from firebase_admin import auth
 from backend.core.security import verify_token, rate_limit, create_access_token, get_password_hash, verify_password
 from backend.db.mongodb.repositories.user_repository import UserRepository, get_user_repository
 from backend.models.user import UserCreate, Token, UserInDB, TokenResponse, GoogleSignInRequest, UserResponse, UserCreateOAuth
 from backend.core.config import settings
+from backend.services.notification_service import notification_service
 from pydantic import BaseModel, EmailStr, Field
 import structlog
 from datetime import datetime, timedelta
@@ -27,6 +29,7 @@ GOOGLE_CLIENT_ID = settings.GOOGLE_OAUTH_CLIENT_ID
 
 @router.post("/login", response_model=TokenResponse)
 async def login(
+    request: Request,
     form_data: OAuth2PasswordRequestForm = Depends(),
     user_repository: UserRepository = Depends(get_user_repository)
 ) -> Any:
@@ -70,6 +73,17 @@ async def login(
     # Get created_at time
     created_at = getattr(user, "created_at", datetime.utcnow())
     
+    # Fire-and-forget: send login security alert
+    ip_address = request.client.host if hasattr(request, 'client') and request.client else None
+    device = request.headers.get("User-Agent", "Unknown device")
+    asyncio.ensure_future(notification_service.send_login_alert(
+        user_id=str(user.id),
+        email=user.email,
+        name=user.full_name or "User",
+        ip_address=ip_address,
+        device=device,
+    ))
+
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
@@ -116,6 +130,13 @@ async def signup(
     # Get created_at time
     created_at = getattr(user, "created_at", datetime.utcnow())
     
+    # Fire-and-forget: send welcome email + in-app notification
+    asyncio.ensure_future(notification_service.send_welcome_notification(
+        user_id=str(user.id),
+        email=user.email,
+        name=user.full_name or "User",
+    ))
+
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
@@ -163,6 +184,13 @@ async def register(
         # Get created_at time
         created_at = getattr(db_user, "created_at", datetime.utcnow())
         
+        # Fire-and-forget: send welcome email + in-app notification
+        asyncio.ensure_future(notification_service.send_welcome_notification(
+            user_id=str(db_user.id),
+            email=db_user.email,
+            name=db_user.full_name or "User",
+        ))
+
         return {
             "access_token": custom_token.decode(),
             "refresh_token": refresh_token,
@@ -289,6 +317,7 @@ async def google_sign_in(
 
         # Check if user exists in your database using the Google user ID as firebase_uid
         user = await user_repository.get_user_by_firebase_uid(google_user_id)
+        is_new_user = user is None
         if not user:
             # Create new user in your database using the UserCreateOAuth model
             user_data = UserCreateOAuth(
@@ -332,6 +361,24 @@ async def google_sign_in(
         # Get the necessary fields for UserResponse
         created_at = getattr(user, "created_at", datetime.utcnow())
         
+        # Fire-and-forget: welcome for new users, security alert for returning users
+        if is_new_user:
+            asyncio.ensure_future(notification_service.send_welcome_notification(
+                user_id=str(user.id),
+                email=user.email,
+                name=user.full_name or "User",
+            ))
+        else:
+            ip_address = request.client.host if hasattr(request, 'client') and request.client else None
+            device = request.headers.get("User-Agent", "Unknown device")
+            asyncio.ensure_future(notification_service.send_login_alert(
+                user_id=str(user.id),
+                email=user.email,
+                name=user.full_name or "User",
+                ip_address=ip_address,
+                device=device,
+            ))
+
         return {
             "access_token": access_token, # Using our own JWT token instead of Firebase custom token
             "refresh_token": refresh_token,  # Add refresh token

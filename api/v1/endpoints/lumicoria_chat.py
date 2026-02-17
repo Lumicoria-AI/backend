@@ -1,15 +1,24 @@
 """
 API endpoints for the main Ask Lumicoria.ai chat feature.
 
-This implements the core RAG-based chat experience that combines context from multiple sources.
+Now powered by:
+- Intent Router        — LLM-based classification to 21 specialized agents
+- Conversation Memory  — MongoDB-persisted chat history
+- Response Normalizer  — Consistent output from diverse agent shapes
+- Rate Limiter         — In-memory sliding-window (10 req/min per user)
+- Security             — Basic prompt injection check
 """
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, File, UploadFile, Form
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, File, UploadFile, Form, Query
 from fastapi.responses import JSONResponse
 from typing import List, Dict, Any, Optional
 import uuid
+import re
+import time
+import structlog
+from collections import defaultdict
 from pydantic import BaseModel, Field
-from datetime import datetime
+from datetime import datetime, timezone
 import os
 import shutil
 from pathlib import Path
@@ -19,22 +28,269 @@ from ....core.config import settings
 from ....services.context_service import context_service
 from ....agents.agent_service import AgentService
 from ....core.dependencies import get_agent_service
+from ....agents.router import get_router
+from ....agents import memory as conversation_memory
+from ....agents.response_normalizer import normalize_agent_response
 
 router = APIRouter()
+logger = structlog.get_logger(__name__)
 
-# Request and Response Models
+# ═══════════════════════════════════════════════════════════════════
+#  Rate Limiter (in-memory sliding window — 10 req/min per user)
+# ═══════════════════════════════════════════════════════════════════
+_rate_limit_store: Dict[str, list] = defaultdict(list)
+RATE_LIMIT_WINDOW = 60    # seconds
+RATE_LIMIT_MAX = 10       # max requests per window
+
+
+def _check_rate_limit(user_id: str) -> bool:
+    """Returns True if request is allowed, False if rate-limited."""
+    now = time.time()
+    window_start = now - RATE_LIMIT_WINDOW
+    # Prune old entries
+    _rate_limit_store[user_id] = [t for t in _rate_limit_store[user_id] if t > window_start]
+    if len(_rate_limit_store[user_id]) >= RATE_LIMIT_MAX:
+        return False
+    _rate_limit_store[user_id].append(now)
+    return True
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Prompt Injection Check
+# ═══════════════════════════════════════════════════════════════════
+INJECTION_PATTERNS = [
+    r"ignore\s+(all\s+)?previous\s+instructions",
+    r"you\s+are\s+now\s+a",
+    r"system\s*:\s*",
+    r"<\|im_start\|>",
+    r"<\|system\|>",
+    r"override\s+your\s+programming",
+    r"disregard\s+your\s+instructions",
+]
+_INJECTION_RE = re.compile("|".join(INJECTION_PATTERNS), re.IGNORECASE)
+
+
+def _is_prompt_injection(text: str) -> bool:
+    return bool(_INJECTION_RE.search(text))
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Request / Response Models
+# ═══════════════════════════════════════════════════════════════════
+
 class LumicoriaChatRequest(BaseModel):
     """Request model for Lumicoria.ai chat queries."""
     query: str = Field(..., description="The user's question or query")
     conversation_id: Optional[str] = Field(None, description="Conversation ID for context continuity")
     save_to_context: bool = Field(True, description="Whether to save this interaction to context")
-    include_sources: Optional[List[str]] = Field(None, description="Source types to include (e.g., upload, drive, chat_history)")
-    max_sources_per_type: Optional[int] = Field(3, description="Maximum number of sources per type to include")
+    include_sources: Optional[List[str]] = Field(None, description="Source types to include")
+    max_sources_per_type: Optional[int] = Field(3, description="Max sources per type")
+
+class ChatResponse(BaseModel):
+    """Response model for chat interactions."""
+    response: str = Field(..., description="The AI's response")
+    conversation_id: str = Field(..., description="Conversation ID")
+    agent_used: str = Field("general", description="Which agent handled the request")
+    route_confidence: float = Field(0.0, description="Router confidence in the choice")
+    sources: List[Dict[str, Any]] = Field([], description="Sources used")
+    processing_time_seconds: float = Field(..., description="Processing time")
+    context_used: int = Field(0, description="Number of context chunks used")
+    success: bool = Field(True, description="Whether the request was successful")
+
+class ConversationSummary(BaseModel):
+    conversation_id: str
+    title: str = ""
+    preview: str = ""
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    agents_used: List[str] = []
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Main Chat Endpoint
+# ═══════════════════════════════════════════════════════════════════
+
+@router.post("/chat", response_model=ChatResponse)
+async def ask_lumicoria(
+    request: LumicoriaChatRequest,
+    background_tasks: BackgroundTasks,
+    agent_service: AgentService = Depends(get_agent_service),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """
+    Ask a question to Lumicoria.ai.
+    
+    1. Rate limit check
+    2. Prompt injection check
+    3. Route to the best agent via LLM
+    4. Execute the agent
+    5. Normalize the response
+    6. Save to conversation memory (background)
+    """
+    user_id = current_user["id"]
+    
+    # ── Rate Limit ──
+    if not _check_rate_limit(user_id):
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded. Please wait a moment before sending another message."
+        )
+    
+    # ── Prompt Injection ──
+    if _is_prompt_injection(request.query):
+        logger.warning("prompt_injection_blocked", user_id=user_id, query_preview=request.query[:60])
+        raise HTTPException(status_code=400, detail="Your message was flagged for safety. Please rephrase.")
+    
+    conversation_id = request.conversation_id or str(uuid.uuid4())
+    start_time = time.time()
+    
+    try:
+        # ── 1. Get conversation history for context ──
+        history = await conversation_memory.get_conversation_history(conversation_id, limit=6)
+        
+        # ── 2. Route to the right agent ──
+        intent_router = await get_router()
+        route_result = await intent_router.route(
+            message=request.query,
+            conversation_history=history,
+        )
+        agent_key = route_result["agent"]
+        confidence = route_result["confidence"]
+        
+        logger.info(
+            "chat_routed",
+            user_id=user_id,
+            conversation_id=conversation_id,
+            agent=agent_key,
+            confidence=confidence,
+            query_preview=request.query[:80],
+        )
+        
+        # ── 3. Get the agent and execute ──
+        try:
+            agent = agent_service.get_agent(agent_key)
+        except (ValueError, KeyError):
+            # Agent not loaded — try to fall back to general
+            logger.warning("agent_not_loaded_falling_back", agent=agent_key)
+            agent = agent_service.get_agent("general")
+            agent_key = "general"
+        
+        # Build agent input — include conversation history for context
+        agent_input = {
+            "query": request.query,
+            "content": request.query,
+            "prompt": request.query,
+            "user_id": user_id,
+            "conversation_id": conversation_id,
+        }
+        
+        # Inject conversation history if the agent supports it
+        if history:
+            agent_input["conversation_history"] = history
+        
+        raw_result = await agent.process_async(agent_input)
+        
+        # ── 4. Normalize ──
+        normalized = normalize_agent_response(raw_result, agent_key=agent_key)
+        
+        processing_time = time.time() - start_time
+        
+        # ── 5. Save to memory (background — don't block the response) ──
+        background_tasks.add_task(
+            conversation_memory.save_message,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            role="user",
+            content=request.query,
+        )
+        background_tasks.add_task(
+            conversation_memory.save_message,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            role="assistant",
+            content=normalized["response"],
+            agent=agent_key,
+        )
+        
+        # Auto-generate title on first message
+        if not request.conversation_id:
+            background_tasks.add_task(
+                conversation_memory.generate_conversation_title,
+                conversation_id=conversation_id,
+                first_message=request.query,
+            )
+        
+        return ChatResponse(
+            response=normalized["response"],
+            conversation_id=conversation_id,
+            agent_used=agent_key,
+            route_confidence=confidence,
+            sources=normalized.get("sources", []),
+            processing_time_seconds=round(processing_time, 2),
+            context_used=normalized.get("context_used", 0),
+            success=normalized.get("success", True),
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("chat_error", error=str(e), user_id=user_id)
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Conversation History Endpoints
+# ═══════════════════════════════════════════════════════════════════
+
+@router.get("/conversations", response_model=List[ConversationSummary])
+async def list_conversations(
+    limit: int = Query(50, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """List all conversations for the current user."""
+    user_id = current_user["id"]
+    conversations = await conversation_memory.list_user_conversations(user_id, limit=limit, offset=offset)
+    return conversations
+
+
+@router.get("/conversations/{conversation_id}")
+async def get_conversation(
+    conversation_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Get full conversation history by ID."""
+    doc = await conversation_memory.get_full_conversation(conversation_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    # Security: verify ownership
+    if doc.get("user_id") != current_user["id"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    # Remove MongoDB _id (not JSON serializable)
+    doc.pop("_id", None)
+    return doc
+
+
+@router.delete("/conversations/{conversation_id}")
+async def delete_conversation(
+    conversation_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Delete a conversation."""
+    deleted = await conversation_memory.delete_conversation(conversation_id, current_user["id"])
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"message": "Conversation deleted"}
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Document Models & Endpoints
+# ═══════════════════════════════════════════════════════════════════
 
 class DocumentUploadRequest(BaseModel):
     """Request model for document upload metadata."""
     title: Optional[str] = Field(None, description="Document title")
-    tags: Optional[List[str]] = Field(None, description="Tags for categorizing the document") 
+    tags: Optional[List[str]] = Field(None, description="Tags for categorizing the document")
     source: str = Field("upload", description="Source of the document")
 
 class DocumentUrlRequest(BaseModel):
@@ -56,76 +312,12 @@ class GoogleDriveRequest(BaseModel):
     title: Optional[str] = Field(None, description="Document title")
     tags: Optional[List[str]] = Field(None, description="Tags for categorizing the document")
 
-class ChatResponse(BaseModel):
-    """Response model for chat interactions."""
-    response: str = Field(..., description="The AI's response to the query")
-    conversation_id: str = Field(..., description="ID of the conversation")
-    sources: List[Dict[str, Any]] = Field([], description="Sources used for generating the response")
-    processing_time_seconds: float = Field(..., description="Processing time in seconds")
-    context_used: int = Field(0, description="Number of context chunks used")
-    success: bool = Field(True, description="Whether the request was successful")
-
 class DocumentListRequest(BaseModel):
     """Request model for listing documents."""
     source_types: Optional[List[str]] = Field(None, description="Source types to include")
     tags: Optional[List[str]] = Field(None, description="Tags to filter by")
     limit: int = Field(100, description="Maximum number of documents to return")
     offset: int = Field(0, description="Offset for pagination")
-
-@router.post("/chat", response_model=ChatResponse)
-async def ask_lumicoria(
-    request: LumicoriaChatRequest,
-    agent_service: AgentService = Depends(get_agent_service),
-    current_user: Dict[str, Any] = Depends(get_current_user)
-):
-    """
-    Ask a question to Lumicoria.ai with context from multiple sources.
-    """
-    # Get the user information
-    user_id = current_user["id"]
-    organization_id = current_user.get("organization_id")
-    
-    # Create conversation ID if not provided
-    conversation_id = request.conversation_id or str(uuid.uuid4())
-    
-    # Prepare request data for the agent
-    request_data = {
-        "query": request.query,
-        "user_id": user_id,
-        "organization_id": organization_id,
-        "conversation_id": conversation_id,
-        "save_to_context": request.save_to_context,
-        "include_sources": request.include_sources,
-        "max_sources_per_type": request.max_sources_per_type
-    }
-    
-    try:
-        # Get the RAG agent
-        rag_agent = agent_service.get_agent("rag")
-        
-        # Process the request
-        start_time = datetime.utcnow()
-        result = await rag_agent.process_async(request_data)
-        end_time = datetime.utcnow()
-        processing_time = (end_time - start_time).total_seconds()
-        
-        if not result.get("success", False):
-            raise HTTPException(
-                status_code=500, 
-                detail=f"Processing error: {result.get('error', 'Unknown error')}"
-            )
-            
-        return ChatResponse(
-            response=result["response"],
-            conversation_id=result.get("conversation_id", conversation_id),
-            sources=result.get("sources", []),
-            processing_time_seconds=processing_time,
-            context_used=result.get("context_used", 0),
-            success=True
-        )
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/documents/upload", status_code=201)
 async def upload_document(

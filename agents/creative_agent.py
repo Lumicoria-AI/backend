@@ -117,11 +117,21 @@ class CreativeAgent(BaseAgent):
                 content_type, topic, guidelines, audience, tone, length
             )
             
-            # Format messages for LLM
+            # Format messages for LLM with conversation history
             messages = [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
             ]
+            
+            # Inject conversation history for context-aware follow-ups
+            conv_history = creative_data.get("conversation_history", [])
+            if conv_history:
+                for msg in conv_history[-6:]:
+                    messages.append({
+                        "role": msg.get("role", "user"),
+                        "content": msg.get("content", ""),
+                    })
+            
+            messages.append({"role": "user", "content": user_prompt})
             
             # Call LLM via provider-agnostic interface
             config = LLMConfig(

@@ -166,9 +166,12 @@ class SocialMediaAgent(BaseAgent):
         
     async def _call_ai_model(self, prompt: str) -> str:
         """Call the AI model with the given prompt."""
-        # In this implementation, we're using the generic BaseAgent's AI model calling functionality
-        response = await self.generate_response({"prompt": prompt, "max_tokens": 500})
-        return response.get("content", "")
+        response = await self._call_model_async(
+            prompt=prompt,
+            system_prompt="You are a social media content expert. Create engaging, platform-appropriate content.",
+            max_tokens=500
+        )
+        return response
 
     async def process_async(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Process social media data asynchronously.

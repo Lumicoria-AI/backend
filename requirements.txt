@@ -4,10 +4,11 @@ uvicorn
 python-jose[cryptography]
 passlib[bcrypt]
 python-multipart
-firebase-admin
-pydantic
-pydantic-settings
-pydantic[email]
+firebase-admin>=6.5.0
+
+pydantic>=2.6
+pydantic-settings>=2.0
+pydantic[email]>=2.6
 python-dotenv
 email-validator
 itsdangerous
@@ -19,16 +20,16 @@ pandas
 motor
 pymongo
 redis
-cassandra-driver
-sqlalchemy
+cassandra-driver==3.29.3 
+sqlalchemy>=2.0
 asyncpg
 alembic
 
 # ── Vector Stores ──────────────────────────────────────────────────────
-numpy
-weaviate-client
-qdrant-client
-chromadb
+numpy>=1.26
+weaviate-client>=4.16
+qdrant-client>=1.9
+chromadb>=1.4
 
 # ── Monitoring & Logging ───────────────────────────────────────────────
 prometheus-client
@@ -36,14 +37,25 @@ structlog
 sentry-sdk
 
 # ── HTTP & Utilities ───────────────────────────────────────────────────
-httpx
+httpx>=0.27
 tenacity
-aiohttp
+aiohttp>=3.9
 aiofiles
+
+# ── Stripe Billing ────────────────────────────────────────────────────
+stripe>=10.0.0
 
 # ── AI / LLM Providers ────────────────────────────────────────────────
 # Google Gemini (optional — only needed if DEFAULT_LLM_PROVIDER=gemini)
-google-generativeai>=0.8.0
+
+google-api-core[grpc]==2.29.0
+google-auth==2.48.0
+grpcio==1.78.0
+grpcio-status==1.78.0
+proto-plus==1.27.1
+protobuf==6.33.5
+googleapis-common-protos==1.72.0
+
 # OpenAI (optional — only needed if DEFAULT_LLM_PROVIDER=openai)
 openai>=1.0.0
 # Anthropic (optional — only needed if DEFAULT_LLM_PROVIDER=anthropic)

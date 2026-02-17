@@ -73,16 +73,21 @@ class AgentFactory:
         
         agent_class = self._agent_classes[config.agent_type]
         
-        # Create agent instance with configuration
-        agent = agent_class(
-            model=config.model,
-            cache=self.agent_cache if config.cache_enabled else None,
-            cache_ttl=config.cache_ttl,
-            max_retries=config.max_retries,
-            timeout=config.timeout,
-            api_key=config.api_key,
-            **(config.additional_config or {})
-        )
+        # Create agent instance with configuration (single dict — BaseAgent expects Dict[str, Any])
+        agent_config_dict = {
+            "model": config.model,
+            "cache_enabled": config.cache_enabled,
+            "cache_ttl": config.cache_ttl,
+            "max_retries": config.max_retries,
+            "timeout": config.timeout,
+            "type": config.agent_type.value,
+        }
+        if config.api_key:
+            agent_config_dict["api_key"] = config.api_key
+        if config.additional_config:
+            agent_config_dict.update(config.additional_config)
+
+        agent = agent_class(agent_config_dict)
         
         # Store active agent
         agent_id = f"{config.agent_type.value}:{id(agent)}"

@@ -103,11 +103,21 @@ class RAGAgent(BaseAgent):
             # Create system prompt with context
             system_prompt = self.system_prompt_template.format(context=formatted_context)
             
-            # Create messages for LLM
+            # Create messages for LLM with conversation history
             messages = [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": query}
             ]
+            
+            # Inject conversation history for context-aware follow-ups
+            conv_history = data.get("conversation_history", [])
+            if conv_history:
+                for msg in conv_history[-6:]:
+                    messages.append({
+                        "role": msg.get("role", "user"),
+                        "content": msg.get("content", ""),
+                    })
+            
+            messages.append({"role": "user", "content": query})
             
             # Call LLM via provider-agnostic interface
             config = LLMConfig(

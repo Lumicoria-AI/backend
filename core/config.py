@@ -217,6 +217,54 @@ class Settings(BaseSettings):
         description="HTTP timeout in seconds for Mistral API calls.",
     )
 
+    # ── Stripe Billing ──────────────────────────────────────────────────
+    STRIPE_SECRET_KEY: str = Field(
+        default="",
+        description=(
+            "Stripe secret key (sk_live_... or sk_test_...). "
+            "Get from https://dashboard.stripe.com/apikeys"
+        ),
+    )
+    STRIPE_WEBHOOK_SECRET: str = Field(
+        default="",
+        description=(
+            "Stripe webhook endpoint signing secret (whsec_...). "
+            "Get from https://dashboard.stripe.com/webhooks"
+        ),
+    )
+    STRIPE_PUBLISHABLE_KEY: str = Field(
+        default="",
+        description="Stripe publishable key (pk_live_... or pk_test_...).",
+    )
+    STRIPE_PRICE_STARTER_MONTHLY: str = Field(
+        default="",
+        description="Stripe Price ID for Starter plan (monthly).",
+    )
+    STRIPE_PRICE_STARTER_YEARLY: str = Field(
+        default="",
+        description="Stripe Price ID for Starter plan (yearly).",
+    )
+    STRIPE_PRICE_PRO_MONTHLY: str = Field(
+        default="",
+        description="Stripe Price ID for Professional plan (monthly).",
+    )
+    STRIPE_PRICE_PRO_YEARLY: str = Field(
+        default="",
+        description="Stripe Price ID for Professional plan (yearly).",
+    )
+    STRIPE_PRICE_ENTERPRISE: str = Field(
+        default="",
+        description="Stripe Price ID for Enterprise plan.",
+    )
+    STRIPE_SUCCESS_URL: str = Field(
+        default="http://localhost:3000/dashboard?billing=success",
+        description="Redirect URL after successful Stripe Checkout.",
+    )
+    STRIPE_CANCEL_URL: str = Field(
+        default="http://localhost:3000/pricing?billing=canceled",
+        description="Redirect URL after canceled Stripe Checkout.",
+    )
+
     # ── Google OAuth ────────────────────────────────────────────────────
     GOOGLE_OAUTH_CLIENT_ID: str = Field(
         default="",

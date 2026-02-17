@@ -1,0 +1,17 @@
+__pycache__
+*.pyc
+*.pyo
+.env
+.env.*
+firebase-credentials.json
+lumicoria_ai_venv/
+.git
+.gitignore
+.pytest_cache
+.mypy_cache
+uploads/*
+tests/
+*.md
+.vscode
+.idea
+images/

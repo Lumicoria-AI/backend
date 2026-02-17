@@ -48,3 +48,33 @@ agents:
       Be clear when you're using information from their documents vs. your general knowledge.
 
       {context}
+
+  # === Added: all remaining agents ===
+  research:
+    type: "research"
+  research_mentor:
+    type: "research_mentor"
+  social_media:
+    type: "social_media"
+  legal_document:
+    type: "legal_document"
+  learning_coach:
+    type: "learning_coach"
+  knowledge_graph:
+    type: "knowledge_graph"
+  ethics_bias:
+    type: "ethics_bias"
+  focus_flow:
+    type: "focus_flow"
+  workspace_ergonomics:
+    type: "workspace_ergonomics"
+  customer_service:
+    type: "customer_service"
+  data_analysis:
+    type: "data_analysis"
+  translation:
+    type: "translation"
+  meeting_fact_checker:
+    type: "meeting_fact_checker"
+  general:
+    type: "general"

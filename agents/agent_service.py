@@ -27,6 +27,11 @@ from .rag_agent import RAGAgent
 from .focus_flow_agent import FocusFlowAgent
 from .workspace_ergonomics_agent import WorkspaceErgonomicsAgent
 from .meeting_fact_checker_agent import MeetingFactCheckerAgent
+from .research_agent import ResearchAgent
+from .customer_service_agent import CustomerServiceAgent
+from .data_analysis_agent import DataAnalysisAgent
+from .translation_agent import TranslationAgent
+from .general_agent import GeneralAgent
 
 # Configure logging
 logger = structlog.get_logger(__name__)
@@ -52,7 +57,20 @@ class AgentService:
             "creative": CreativeAgent,
             "student": StudentAgent,
             "rag": RAGAgent,
-            "meeting_fact_checker": MeetingFactCheckerAgent
+            "meeting_fact_checker": MeetingFactCheckerAgent,
+            "research": ResearchAgent,
+            "research_mentor": ResearchMentorAgent,
+            "social_media": SocialMediaAgent,
+            "legal_document": LegalDocumentAgent,
+            "learning_coach": LearningCoachAgent,
+            "knowledge_graph": KnowledgeGraphAgent,
+            "ethics_bias": EthicsBiasAgent,
+            "focus_flow": FocusFlowAgent,
+            "workspace_ergonomics": WorkspaceErgonomicsAgent,
+            "customer_service": CustomerServiceAgent,
+            "data_analysis": DataAnalysisAgent,
+            "translation": TranslationAgent,
+            "general": GeneralAgent,
         }
         
         # Add vision agent if available

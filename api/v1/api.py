@@ -28,7 +28,8 @@ from backend.api.v1.endpoints import (
     workflow_execution,
     onboarding,
     websocket,
-    device_tokens
+    device_tokens,
+    billing,
 )
 
 api_router = APIRouter()
@@ -341,6 +342,23 @@ api_router.include_router(
         404: {"description": "Not Found"},
         422: {"description": "Validation Error"},
         500: {"description": "Internal Server Error"}
+    }
+)
+
+# Billing & Subscription endpoints
+api_router.include_router(
+    billing.router,
+    prefix="/billing",
+    tags=["billing"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        402: {"description": "Payment Required"},
+        403: {"description": "Forbidden"},
+        429: {"description": "Usage Limit Exceeded"},
+        500: {"description": "Internal Server Error"},
+        502: {"description": "Payment Gateway Error"},
     }
 )
 

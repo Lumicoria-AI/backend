@@ -1,22 +1,37 @@
-from cassandra.cluster import Cluster, Session
-from cassandra.auth import PlainTextAuthProvider
-from cassandra.cqlengine.connection import register_connection, set_default_connection
-from cassandra.query import BatchStatement, SimpleStatement
 from typing import Optional, List
 import asyncio
-from ...core.config import settings
 import structlog
 
 logger = structlog.get_logger()
 
+# Cassandra driver may not be available on Python 3.12+ (asyncore was removed).
+# Guard the import so the app can start with CASSANDRA_ENABLED=false.
+try:
+    from cassandra.cluster import Cluster, Session
+    from cassandra.auth import PlainTextAuthProvider
+    from cassandra.cqlengine.connection import register_connection, set_default_connection
+    from cassandra.query import BatchStatement, SimpleStatement
+    _CASSANDRA_AVAILABLE = True
+except Exception:
+    _CASSANDRA_AVAILABLE = False
+    Cluster = None   # type: ignore
+    Session = None   # type: ignore
+    logger.warning("Cassandra driver not available — Cassandra features disabled")
+
+from ...core.config import settings
+
+
 class CassandraClient:
-    cluster: Optional[Cluster] = None
-    session: Optional[Session] = None
+    cluster: Optional[object] = None
+    session: Optional[object] = None
 
     @classmethod
     async def connect(cls) -> None:
         if not settings.db.CASSANDRA_ENABLED:
             logger.info("Cassandra disabled; skipping connect")
+            return
+        if not _CASSANDRA_AVAILABLE:
+            logger.error("Cassandra is enabled but driver is not available (Python 3.12+ needs libev)")
             return
         try:
             await asyncio.to_thread(cls._connect_sync)
@@ -79,7 +94,7 @@ class CassandraClient:
             cls.cluster.shutdown()
 
     @classmethod
-    async def get_session(cls) -> Session:
+    async def get_session(cls):
         if not cls.session:
             await cls.connect()
         return cls.session
@@ -116,4 +131,4 @@ class CassandraClient:
 
 
 async def get_cassandra() -> CassandraClient:
-    return CassandraClient() 
+    return CassandraClient()

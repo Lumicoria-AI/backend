@@ -343,6 +343,24 @@ async def health_check():
         checks["cassandra"] = f"error: {str(e)}"
         healthy = False
 
+    # Vector Store / Weaviate (optional)
+    try:
+        if settings.db.VECTOR_STORE_ENABLED:
+            import httpx
+            vector_url = settings.db.VECTOR_STORE_URL or "http://localhost:8081"
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                resp = await client.get(f"{vector_url}/v1/.well-known/ready")
+                if resp.status_code == 200:
+                    checks["vector_store"] = "ok"
+                else:
+                    checks["vector_store"] = f"error: status {resp.status_code}"
+                    healthy = False
+    except Exception as e:
+        checks["vector_store"] = f"error: {str(e)}"
+        # Vector store is optional — don't mark overall as unhealthy
+        # healthy = False
+
+
     status_code = 200 if healthy else 503
     return JSONResponse(
         status_code=status_code,

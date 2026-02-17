@@ -420,6 +420,167 @@ class NotificationService:
             priority=priority
         )
 
+    async def send_welcome_notification(
+        self,
+        user_id: str,
+        email: str,
+        name: str
+    ) -> None:
+        """Send welcome email + in-app notification on signup."""
+        try:
+            # Send welcome email
+            await self.send_email_notification(
+                to_email=email,
+                template_name="welcome",
+                template_data={
+                    "user_name": name,
+                    "dashboard_url": "https://lumicoria.ai/dashboard",
+                    "getting_started_url": "https://lumicoria.ai/getting-started",
+                },
+                priority=NotificationPriority.NORMAL,
+            )
+        except Exception as e:
+            logger.error("Failed to send welcome email", user_id=user_id, error=str(e))
+
+        try:
+            # Create in-app welcome notification
+            await self.create_in_app_notification(
+                user_id=user_id,
+                title="Welcome to Lumicoria.ai! 🎉",
+                content=f"Hi {name}, your account is ready. Start exploring our AI agents to boost your productivity.",
+                notification_type=NotificationType.AUTH,
+                priority=NotificationPriority.NORMAL,
+                metadata={"action": "signup"},
+            )
+        except Exception as e:
+            logger.error("Failed to create welcome in-app notification", user_id=user_id, error=str(e))
+
+    async def send_login_alert(
+        self,
+        user_id: str,
+        email: str,
+        name: str,
+        ip_address: str = None,
+        device: str = None,
+        activity_time: str = None,
+    ) -> None:
+        """Send security alert email + in-app notification on login."""
+        from datetime import datetime as dt
+
+        activity_time = activity_time or dt.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+        try:
+            await self.send_email_notification(
+                to_email=email,
+                template_name="security_alert",
+                template_data={
+                    "user_name": name,
+                    "alert_type": "a new sign-in",
+                    "activity_description": "New login to your account",
+                    "activity_time": activity_time,
+                    "ip_address": ip_address or "Unknown",
+                    "device": device or "Unknown device",
+                },
+                priority=NotificationPriority.HIGH,
+            )
+        except Exception as e:
+            logger.error("Failed to send login alert email", user_id=user_id, error=str(e))
+
+        try:
+            await self.create_in_app_notification(
+                user_id=user_id,
+                title="New Sign-In Detected",
+                content=f"A new sign-in was detected from {ip_address or 'an unknown location'} at {activity_time}.",
+                notification_type=NotificationType.AUTH,
+                priority=NotificationPriority.HIGH,
+                metadata={
+                    "action": "login",
+                    "ip_address": ip_address,
+                    "device": device,
+                },
+            )
+        except Exception as e:
+            logger.error("Failed to create login in-app notification", user_id=user_id, error=str(e))
+
+    async def send_billing_notification(
+        self,
+        user_id: str,
+        email: str,
+        event: str,
+        details: dict = None,
+    ) -> None:
+        """Send billing-related in-app notification (+ email for critical events)."""
+        details = details or {}
+
+        event_config = {
+            "checkout_completed": {
+                "title": "Subscription Confirmed! 🎉",
+                "content": f"Your {details.get('plan', 'subscription')} plan is now active. Enjoy your upgraded features!",
+                "priority": NotificationPriority.HIGH,
+                "send_email": True,
+            },
+            "subscription_updated": {
+                "title": "Plan Updated",
+                "content": f"Your subscription has been updated to {details.get('plan', 'a new plan')}.",
+                "priority": NotificationPriority.NORMAL,
+                "send_email": False,
+            },
+            "subscription_deleted": {
+                "title": "Subscription Cancelled",
+                "content": "Your subscription has been cancelled. You'll retain access until the end of your billing period.",
+                "priority": NotificationPriority.HIGH,
+                "send_email": True,
+            },
+            "payment_succeeded": {
+                "title": "Payment Received ✓",
+                "content": f"Payment of {details.get('amount', 'your invoice')} was successfully processed.",
+                "priority": NotificationPriority.NORMAL,
+                "send_email": False,
+            },
+            "payment_failed": {
+                "title": "⚠️ Payment Failed",
+                "content": "We couldn't process your payment. Please update your payment method to avoid service interruption.",
+                "priority": NotificationPriority.URGENT,
+                "send_email": True,
+            },
+        }
+
+        config = event_config.get(event, {
+            "title": "Billing Update",
+            "content": f"There's an update regarding your billing: {event}",
+            "priority": NotificationPriority.NORMAL,
+            "send_email": False,
+        })
+
+        # In-app notification
+        try:
+            await self.create_in_app_notification(
+                user_id=user_id,
+                title=config["title"],
+                content=config["content"],
+                notification_type=NotificationType.BILLING,
+                priority=config["priority"],
+                metadata={"event": event, **details},
+            )
+        except Exception as e:
+            logger.error("Failed to create billing in-app notification", user_id=user_id, error=str(e))
+
+        # Email for critical events
+        if config.get("send_email") and email:
+            try:
+                await self.send_email_notification(
+                    to_email=email,
+                    template_name="notification",
+                    template_data={
+                        "user_name": details.get("name", "there"),
+                        "subject": config["title"],
+                        "message": config["content"],
+                    },
+                    priority=config["priority"],
+                )
+            except Exception as e:
+                logger.error("Failed to send billing email", user_id=user_id, error=str(e))
+
 
 # Create singleton instance
 notification_service = NotificationService()

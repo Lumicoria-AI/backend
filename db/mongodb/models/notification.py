@@ -12,6 +12,8 @@ class NotificationType(str, Enum):
     DOCUMENT = "document"
     WELLBEING = "wellbeing"
     SYSTEM = "system"
+    AUTH = "auth"
+    BILLING = "billing"
 
 class NotificationPriority(str, Enum):
     LOW = "low"
