@@ -146,6 +146,14 @@ class LearningCoachAgent(BaseAgent):
             logger.error(f"Error processing learning support request: {str(e)}")
             return {"error": str(e)}
 
+    async def query_async(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Query the learning coach agent asynchronously."""
+        return await self.process_async({
+            "mode": LearningMode.CONCEPT_EXPLANATION.value,
+            "data": {"concept": query},
+            "context": context or {}
+        })
+
     async def _create_learning_path(
         self,
         data: Dict[str, Any],

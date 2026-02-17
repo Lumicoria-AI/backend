@@ -199,6 +199,14 @@ class CustomerServiceAgent(BaseAgent):
         except Exception as e:
             logger.error(f"Error processing customer service request asynchronously: {str(e)}")
             return {"error": f"Customer service processing failed: {str(e)}"}
+
+    async def query_async(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Query the customer service agent asynchronously."""
+        return await self.process_async({
+            "request_type": "general_assistance",
+            "content": query,
+            "context": context or {}
+        })
     
     def _get_system_prompt(self, request_type: str, context: Dict[str, Any]) -> str:
         """Create system prompt based on request type and context."""

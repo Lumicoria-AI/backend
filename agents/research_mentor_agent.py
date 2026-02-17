@@ -114,7 +114,7 @@ class ResearchMentorAgent(BaseAgent):
             "presence_penalty": 0.3
         })
 
-        self.document_repository = DocumentRepository()
+        self.document_repository = None
         self.system_prompt = """You are a research mentor AI assistant. Your role is to help users with their research tasks by:
 1. Analyzing documents and extracting key insights
 2. Providing guidance on research methodology
@@ -131,6 +131,12 @@ Always maintain a professional and academic tone. When analyzing documents, focu
 
 If you're unsure about something, acknowledge the limitations and suggest how to verify the information."""
 
+    async def _get_repository(self):
+        if not self.document_repository:
+            from backend.db.mongodb.repositories.document_repository import get_document_repository
+            self.document_repository = await get_document_repository()
+        return self.document_repository
+
     async def process_async(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Process a research document asynchronously."""
         try:
@@ -139,12 +145,13 @@ If you're unsure about something, acknowledge the limitations and suggest how to
                 raise ValueError("document_id is required")
 
             # Get document from repository
-            document = await self.document_repository.get_by_id(document_id)
+            repo = await self._get_repository()
+            document = await repo.get_by_id(document_id)
             if not document:
                 raise ValueError(f"Document not found: {document_id}")
 
             # Update document status to processing
-            await self.document_repository.update_status(
+            await repo.update_status(
                 document_id=document_id,
                 status=DocumentStatus.PROCESSING
             )
@@ -170,7 +177,7 @@ Document content:
             )
 
             # Update document with analysis results
-            await self.document_repository.update_extraction(
+            await repo.update_extraction(
                 document_id=document_id,
                 extraction_result={"analysis": analysis},
                 extraction_status="completed"
@@ -184,7 +191,7 @@ Document content:
 
         except Exception as e:
             logger.error(f"Error processing document: {str(e)}")
-            if document_id:
+            if document_id and self.document_repository:
                 await self.document_repository.update_status(
                     document_id=document_id,
                     status=DocumentStatus.FAILED,
@@ -198,7 +205,8 @@ Document content:
             # If context includes a document_id, fetch the document
             document_content = ""
             if context and context.get("document_id"):
-                document = await self.document_repository.get_by_id(context["document_id"])
+                repo = await self._get_repository()
+                document = await repo.get_by_id(context["document_id"])
                 if document and document.extraction_result:
                     document_content = f"\nRelevant document content:\n{document.extraction_result.get('analysis', '')}"
 

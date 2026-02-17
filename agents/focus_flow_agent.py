@@ -141,6 +141,14 @@ class FocusFlowAgent(BaseAgent):
             logger.error(f"Error processing focus and flow request: {str(e)}")
             return {"error": str(e)}
 
+    async def query_async(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Query the focus flow agent asynchronously."""
+        return await self.process_async({
+            "action": "monitor",
+            "data": {"current_state": query},
+            "context": context or {}
+        })
+
     async def _monitor_focus(
         self,
         data: Dict[str, Any],

@@ -170,6 +170,17 @@ class TranslationAgent(BaseAgent):
         except Exception as e:
             logger.error(f"Error processing translation request: {str(e)}")
             return {"error": f"Translation processing failed: {str(e)}"}
+
+    async def query_async(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Query the translation agent asynchronously."""
+        context = context or {}
+        return await self.process_async({
+            "content": query,
+            "target_language": context.get("target_language", "en"),
+            "source_language": context.get("source_language", "auto"),
+            "mode": TranslationMode.CONVERSATION.value,
+            "context": context
+        })
     
     def _create_system_prompt(
         self,

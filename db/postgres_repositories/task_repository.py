@@ -128,7 +128,7 @@ class PostgresTaskRepository:
             stmt = stmt.where(TaskSQL.agent_id == agent_id)
         if document_id:
             # stored in metadata for now
-            stmt = stmt.where(TaskSQL.metadata["document_id"].astext == str(document_id))
+            stmt = stmt.where(TaskSQL.meta["document_id"].astext == str(document_id))
 
         stmt = stmt.order_by(TaskSQL.created_at.desc()).offset(skip).limit(limit)
         result = await self.session.execute(stmt)

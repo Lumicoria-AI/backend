@@ -157,6 +157,14 @@ class DataAnalysisAgent(BaseAgent):
         except Exception as e:
             logger.error(f"Error processing analysis request: {str(e)}")
             return {"error": f"Analysis processing failed: {str(e)}"}
+
+    async def query_async(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Query the data analysis agent asynchronously."""
+        return await self.process_async({
+            "mode": AnalysisMode.EXPLORATORY.value,
+            "data": query,
+            "context": context or {}
+        })
     
     def _prepare_data(self, data: Union[str, Dict, pd.DataFrame]) -> Union[pd.DataFrame, Dict[str, str]]:
         """Convert input data to pandas DataFrame."""

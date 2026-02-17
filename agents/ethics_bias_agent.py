@@ -129,6 +129,14 @@ class EthicsBiasAgent(BaseAgent):
             logger.error(f"Error processing ethics and bias request: {str(e)}")
             return {"error": str(e)}
 
+    async def query_async(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Query the ethics and bias agent asynchronously."""
+        return await self.process_async({
+            "action": "analyze",
+            "data": {"content": query},
+            "context": context or {}
+        })
+
     async def _analyze_content(
         self,
         data: Dict[str, Any],

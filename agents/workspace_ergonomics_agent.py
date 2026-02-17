@@ -122,6 +122,14 @@ class WorkspaceErgonomicsAgent(BaseAgent):
             logger.error(f"Error processing workspace ergonomics request: {str(e)}")
             return {"error": str(e)}
 
+    async def query_async(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Query the workspace ergonomics agent asynchronously."""
+        return await self.process_async({
+            "action": "get_recommendations",
+            "data": {"user_profile": {"query": query}},
+            "context": context or {}
+        })
+
     async def _analyze_workspace(
         self,
         data: Dict[str, Any],

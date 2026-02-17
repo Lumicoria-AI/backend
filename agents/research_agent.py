@@ -83,6 +83,22 @@ class ResearchAgent(BaseAgent):
             logger.error(f"Error processing research request: {str(e)}")
             return {"error": f"Research processing failed: {str(e)}"}
     
+    async def query_async(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Query the research agent asynchronously.
+        
+        Args:
+            query: The research query.
+            context: Optional context dictionary.
+            
+        Returns:
+            Dictionary containing research findings.
+        """
+        return await self.process_async({
+            "query": query,
+            "context": context or {},
+            "research_type": "general"
+        })
+    
     async def process_async(self, research_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process a research request asynchronously with optimized processing.
         

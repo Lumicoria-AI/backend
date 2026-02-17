@@ -131,6 +131,17 @@ class KnowledgeGraphAgent(BaseAgent):
             logger.error(f"Error processing knowledge graph request: {str(e)}")
             return {"error": str(e)}
 
+    async def query_async(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Query the knowledge graph agent asynchronously."""
+        return await self.process_async({
+            "action": "query",
+            "data": {
+                "query": {"term": query},
+                "query_type": "search"
+            },
+            "context": context or {}
+        })
+
     async def _extract_knowledge(
         self,
         data: Dict[str, Any],

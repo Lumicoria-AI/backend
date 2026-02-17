@@ -127,6 +127,14 @@ class LegalDocumentAgent(BaseAgent):
             logger.error(f"Error processing legal document request: {str(e)}")
             return {"error": str(e)}
 
+    async def query_async(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Query the legal document agent asynchronously."""
+        return await self.process_async({
+            "mode": LegalDocumentMode.PLAIN_LANGUAGE.value,
+            "data": {"document": query},
+            "context": context or {}
+        })
+
     async def _extract_clauses(
         self,
         data: Dict[str, Any],

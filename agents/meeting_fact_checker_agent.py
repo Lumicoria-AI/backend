@@ -126,6 +126,18 @@ class MeetingFactCheckerAgent(BaseAgent):
             logger.error(f"Error processing meeting fact checking request: {str(e)}")
             return {"error": str(e)}
 
+    async def query_async(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Query the meeting fact checker agent asynchronously."""
+        return await self.process_async({
+            "action": "verify",
+            "data": {
+                "claim": query,
+                "speaker": "user",
+                "claim_type": "assertion"
+            },
+            "context": context or {}
+        })
+
     async def _verify_claim(
         self,
         data: Dict[str, Any],

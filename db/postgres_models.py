@@ -49,7 +49,7 @@ class TaskSQL(Base):
     agent_id = Column(String(64), nullable=True)
 
     tags = Column(ARRAY(String), nullable=False, default=list)
-    metadata = Column(JSONB, nullable=False, default=dict)
+    meta = Column("metadata", JSONB, nullable=False, default=dict)
     progress = Column(Integer, nullable=False, default=0)
     completed_at = Column(DateTime, nullable=True)
 
@@ -105,4 +105,4 @@ class AgentExecutionSQL(Base):
 
     input_payload = Column(JSONB, nullable=True)
     output_payload = Column(JSONB, nullable=True)
-    metadata = Column(JSONB, nullable=False, default=dict)
+    meta = Column("metadata", JSONB, nullable=False, default=dict)
