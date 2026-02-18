@@ -353,6 +353,12 @@ class EmailService:
             
             if result.success:
                 self._stats[f"success_{provider_type.value}"] += 1
+                logger.info(
+                    "email_sent_successfully",
+                    provider=provider_type.value,
+                    subject=message.subject,
+                    to=message.to
+                )
                 return result
             
             # Check if we should failover
@@ -467,6 +473,7 @@ class EmailService:
         failover_codes = {
             "CLIENT_NOT_INITIALIZED",
             "AUTHENTICATION_ERROR",
+            "AUTH_ERROR",
             "RATE_LIMIT_ERROR",
             "UNEXPECTED_ERROR",
             "MAX_RETRIES",

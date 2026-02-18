@@ -34,7 +34,7 @@ except Exception as e:
     logger.error("Failed to initialize Firebase", error=str(e))
     raise
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+pwd_context = CryptContext(schemes=["argon2", "bcrypt"], deprecated="auto")
 ALGORITHM = settings.ALGORITHM
 
 

@@ -3,6 +3,8 @@ fastapi
 uvicorn
 python-jose[cryptography]
 passlib[bcrypt]
+passlib[argon2]
+argon2-cffi
 python-multipart
 firebase-admin>=6.5.0
 
@@ -58,7 +60,7 @@ googleapis-common-protos==1.72.0
 google-api-python-client
 google-generativeai>=0.8.0
 
-
+argon2-cffi
 # OpenAI (optional — only needed if DEFAULT_LLM_PROVIDER=openai)
 openai>=1.0.0
 # Anthropic (optional — only needed if DEFAULT_LLM_PROVIDER=anthropic)

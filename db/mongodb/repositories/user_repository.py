@@ -47,8 +47,14 @@ class UserRepository(BaseRepository[UserInDB]):
         # Access collection directly
         user_dict = user.model_dump(exclude={"password"})
         user_dict["created_at"] = datetime.utcnow()
-        # The hashed_password is required by UserInDB
-        user_dict["hashed_password"] = user.hashed_password # Ensure hashed_password is set from UserCreate
+        
+        # Hash the password if not already hashed
+        if user.hashed_password:
+            user_dict["hashed_password"] = user.hashed_password
+        else:
+            from backend.core.security import get_password_hash
+            user_dict["hashed_password"] = get_password_hash(user.password)
+            
         # Ensure firebase_uid is set even if None initially
         user_dict["firebase_uid"] = user_dict.get("firebase_uid") # Explicitly get or set None
         

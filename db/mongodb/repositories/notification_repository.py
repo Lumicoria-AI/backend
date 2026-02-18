@@ -24,9 +24,7 @@ class NotificationRepository(BaseRepository[Notification]):
         self.db = db
         self._collection = db["notifications"]
 
-    @property
-    def collection(self):
-        return self._collection
+
 
     async def create_notification(self, notification: Notification) -> Notification:
         """Create a new notification."""

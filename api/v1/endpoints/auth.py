@@ -221,6 +221,7 @@ async def register(
 @router.post("/refresh", response_model=TokenResponse)
 @rate_limit()
 async def refresh_token(
+    request: Request,
     credentials: HTTPAuthorizationCredentials = Depends(security),
     user_repository: UserRepository = Depends(get_user_repository)
 ) -> Any:
@@ -301,42 +302,60 @@ async def google_sign_in(
     user_repository: UserRepository = Depends(get_user_repository)
 ) -> TokenResponse:
     try:
-        # Verify the Google ID token using google-auth library
-        # Use the specific Google OAuth Client ID for verification
-        idinfo = id_token.verify_oauth2_token(
-            google_data.id_token, requests.Request(), GOOGLE_CLIENT_ID)        # Extract user information from the verified token
-        google_user_id = idinfo['sub']
-        email = idinfo.get('email')
-        name = idinfo.get('name')
-        picture = idinfo.get('picture')  # Get profile picture URL from Google token
+        # Verify the Firebase ID token (sent by frontend's signInWithPopup)
+        # We use Firebase Admin Verify instead of google-auth because the frontend
+        # generates a Firebase ID Token (iss: https://securetoken.google.com/...)
+        decoded_token = auth.verify_id_token(google_data.id_token, check_revoked=True)
         
-        logger.info("Google sign-in information", 
-                   user_id=google_user_id, 
+        # Extract user information from the verified Firebase token
+        firebase_uid = decoded_token['uid']
+        email = decoded_token.get('email')
+        name = decoded_token.get('name')
+        picture = decoded_token.get('picture')
+        
+        logger.info("Google/Firebase sign-in verified", 
+                   uid=firebase_uid, 
                    email=email, 
                    has_picture=bool(picture))
 
-        # Check if user exists in your database using the Google user ID as firebase_uid
-        user = await user_repository.get_user_by_firebase_uid(google_user_id)
+        # Check if user exists in your database using the Firebase UID
+        user = await user_repository.get_user_by_firebase_uid(firebase_uid)
+        
+        # If not found by UID, try email (account linking)
+        if not user and email:
+             user = await user_repository.get_user_by_email(email)
+             if user:
+                 # Link existing email user to this Firebase UID
+                 logger.info("Linking existing email user to Firebase/Google", user_id=str(user.id))
+                 await user_repository.update_user(str(user.id), {"firebase_uid": firebase_uid})
+                 if picture and not getattr(user, "avatar_url", None):
+                      await user_repository.update_user(str(user.id), {"avatar_url": picture})
+                 # Refresh user object
+                 user = await user_repository.get_user_by_id(str(user.id))
+
         is_new_user = user is None
+        
         if not user:
+            if not email:
+                 raise HTTPException(status_code=400, detail="Email not provided in token")
+                 
             # Create new user in your database using the UserCreateOAuth model
             user_data = UserCreateOAuth(
                 email=email,
-                full_name=name,
-                firebase_uid=google_user_id,  # Use Google user ID as firebase_uid
-                avatar_url=picture,  # Use Google profile picture if available
+                full_name=name or email.split('@')[0],
+                firebase_uid=firebase_uid,
+                avatar_url=picture,
                 onboarding_completed=False
             )
             # Use the new create_user_oauth method
             user = await user_repository.create_user_oauth(user_data)
         elif picture and not getattr(user, "avatar_url", None):
             # Update existing user with Google profile picture if they don't have an avatar
-            logger.info("Updating user avatar from Google", 
-                       user_id=str(user.id), 
-                       google_picture_url=picture)
             await user_repository.update_user(str(user.id), {"avatar_url": picture})
             # Refresh user data after update
-            user = await user_repository.get_user_by_id(str(user.id))        # Create a JWT token for our backend authentication using our own secret key
+            user = await user_repository.get_user_by_id(str(user.id))
+
+        # Create a JWT token for our backend authentication using our own secret key
         # This is more reliable than using Firebase custom tokens for our backend
         access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
         
@@ -380,8 +399,8 @@ async def google_sign_in(
             ))
 
         return {
-            "access_token": access_token, # Using our own JWT token instead of Firebase custom token
-            "refresh_token": refresh_token,  # Add refresh token
+            "access_token": access_token, # Using our own JWT token
+            "refresh_token": refresh_token,
             "token_type": "bearer",
             "user": {
                 "id": str(user.id),
@@ -390,22 +409,22 @@ async def google_sign_in(
                 "is_active": user.is_active,
                 "avatar_url": getattr(user, "avatar_url", None),
                 "onboarding_completed": getattr(user, "onboarding_completed", False),
-                "created_at": created_at,  # Add created_at field
-                "updated_at": getattr(user, "updated_at", None)  # Add updated_at field
+                "created_at": created_at,
+                "updated_at": getattr(user, "updated_at", None)
             }
         }
     except ValueError as e:
         # Invalid token
-        logger.error("Google ID token verification failed", error=str(e))
+        logger.error("Firebase ID token verification failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Google ID token"
+            detail="Invalid Google/Firebase ID token"
         )
     except Exception as e:
         logger.error("Google sign-in failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Google sign-in failed"
+            detail=f"Google sign-in failed: {str(e)}"
         )
 
 async def handle_onboarding_status_update(user, request, user_repository):
