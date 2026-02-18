@@ -19,6 +19,7 @@ from backend.db.mongodb.models.device_token import (
 from backend.db.mongodb.repositories.device_token_repository import (
     get_device_token_repository
 )
+from backend.services.push_notification_service import push_notification_service
 
 logger = structlog.get_logger()
 router = APIRouter()
@@ -52,13 +53,25 @@ async def register_device_token(
     """
     repository = await get_device_token_repository()
     
-    device_token = await repository.register_token(
-        user_id=current_user.id,
+    device_token, is_new = await repository.register_token(
+        user_id=str(current_user.id),
         token=request.token,
         platform=request.platform,
         device_name=request.device_name,
         app_version=request.app_version
     )
+    
+    # Send test/welcome notification to active device ONLY if it's a new registration
+    if is_new:
+        try:
+            await push_notification_service.send_to_device(
+                device_token=request.token,
+                title="Notifications Enabled 🔔",
+                body=f"Welcome back, {current_user.full_name}! Push notifications are now active on this device."
+            )
+        except Exception as e:
+            logger.error("failed_to_send_welcome_push", error=str(e))
+
     
     return DeviceTokenResponse(
         id=str(device_token.id),
@@ -85,7 +98,7 @@ async def deregister_device_token(
     repository = await get_device_token_repository()
     
     success = await repository.delete_token(
-        user_id=current_user.id,
+        user_id=str(current_user.id),
         token=request.token
     )
     
@@ -101,7 +114,7 @@ async def get_my_device_tokens(
 ):
     """Get all device tokens for the current user."""
     repository = await get_device_token_repository()
-    tokens = await repository.get_user_tokens(current_user.id)
+    tokens = await repository.get_user_tokens(str(current_user.id))
     
     return [
         DeviceTokenResponse(
@@ -122,7 +135,7 @@ async def delete_all_my_tokens(
 ):
     """Delete all device tokens for the current user."""
     repository = await get_device_token_repository()
-    deleted_count = await repository.delete_all_user_tokens(current_user.id)
+    deleted_count = await repository.delete_all_user_tokens(str(current_user.id))
     
     return {
         "status": "success",
@@ -136,6 +149,6 @@ async def get_token_stats(
 ):
     """Get device token statistics for the current user."""
     repository = await get_device_token_repository()
-    stats = await repository.get_platform_stats(current_user.id)
+    stats = await repository.get_platform_stats(str(current_user.id))
     
     return stats

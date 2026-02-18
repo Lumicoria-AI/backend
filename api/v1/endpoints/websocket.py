@@ -36,8 +36,9 @@ async def authenticate_websocket(
     
     try:
         payload = await verify_token(token)
-        if payload and "sub" in payload:
-            return payload["sub"]
+        if payload:
+            # security.verify_token returns a dict with 'user_id'
+            return payload.get("user_id") or payload.get("sub")
     except Exception as e:
         logger.warning("websocket_auth_failed", error=str(e))
     

@@ -77,14 +77,22 @@ async def verify_token(
 
     SECURITY: We NEVER decode a token without signature verification.
     """
-    if not credentials or not credentials.credentials:
+    
+    if not credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="No credentials provided",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    token = credentials.credentials
+    # Handle both HTTPAuthorizationCredentials (HTTP) and raw string (WebSocket)
+    if hasattr(credentials, "credentials"):
+        token = credentials.credentials
+    elif isinstance(credentials, str):
+        token = credentials
+    else:
+        # Fallback for unexpected types
+        token = str(credentials)
 
     # Lazy import to avoid circular dependency at module level
     from backend.db.mongodb.repositories.user_repository import user_repository

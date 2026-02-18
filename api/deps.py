@@ -30,14 +30,32 @@ async def get_current_user(
     try:
         token_data = await verify_token(credentials)
         
-        # Handle both Firebase and JWT tokens
+        # Ensure user repository is initialized
+        repo = await get_user_repository()
+        if not repo:
+            logger.error("User repository not initialized in get_current_user")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Internal server error"
+            )
+
         user = None
-        if token_data.get("provider") == "firebase" and token_data.get("uid"):
-            user = await user_repository.get_user_by_firebase_uid(token_data["uid"])
-        elif token_data.get("provider") == "jwt" and token_data.get("uid"):
-            user = await user_repository.get_user_by_id(token_data["uid"])
+        
+        # Priority 1: Direct user_id match (most reliable for JWTs)
+        if "user_id" in token_data:
+            user = await repo.get_user_by_id(token_data["user_id"])
             
+        # Priority 2: Firebase UID 
+        elif token_data.get("provider") == "firebase" and token_data.get("uid"):
+            user = await repo.get_user_by_firebase_uid(token_data["uid"])
+            
+        # Priority 3: Fallback to uid as ID
+        elif token_data.get("uid"):
+             # If provider is jwt but no user_id, uid might be the id
+             user = await repo.get_user_by_id(token_data["uid"])
+
         if not user:
+            logger.error("User not found in get_current_user", token_data=token_data)
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="User not found"

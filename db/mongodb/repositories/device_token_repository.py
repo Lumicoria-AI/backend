@@ -37,12 +37,12 @@ class DeviceTokenRepository:
         platform: DevicePlatform = DevicePlatform.UNKNOWN,
         device_name: Optional[str] = None,
         app_version: Optional[str] = None
-    ) -> DeviceToken:
+    ) -> tuple[DeviceToken, bool]:
         """
         Register a new device token or update existing one.
         
-        If the token already exists for this user, update it.
-        If the token exists for a different user, reassign it.
+        Returns:
+            tuple[DeviceToken, bool]: (The token object, True if new, False if updated)
         """
         now = datetime.utcnow()
         
@@ -72,28 +72,27 @@ class DeviceTokenRepository:
                 }
             )
             
-            updated = await self.collection.find_one({"token": token})
-            return DeviceToken(**updated)
+            updated_doc = await self.collection.find_one({"token": token})
+            return DeviceToken(**updated_doc), False  # False = not new
+            
+        # Token doesn't exist - create new
+        new_token = {
+            "user_id": user_id,
+            "token": token,
+            "platform": platform.value,
+            "device_name": device_name,
+            "app_version": app_version,
+            "is_active": True,
+            "created_at": now,
+            "updated_at": now
+        }
         
-        # New token - create it
-        device_token = DeviceToken(
-            user_id=user_id,
-            token=token,
-            platform=platform,
-            device_name=device_name,
-            app_version=app_version,
-            created_at=now,
-            updated_at=now,
-            is_active=True
-        )
-        
-        result = await self.collection.insert_one(
-            device_token.model_dump(by_alias=True)
-        )
-        device_token.id = result.inserted_id
+        # Insert and get ID
+        result = await self.collection.insert_one(new_token)
+        new_token["_id"] = result.inserted_id
         
         logger.info("device_token_registered", user_id=user_id, platform=platform.value)
-        return device_token
+        return DeviceToken(**new_token), True  # True = new
     
     async def get_user_tokens(
         self,
