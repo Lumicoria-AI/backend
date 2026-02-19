@@ -36,7 +36,7 @@ agents:
     type: "rag"
     model_config:
       temperature: 0.7
-      max_tokens: 1024
+      max_tokens: 8192
     context_settings:
       max_chunks: 8
       max_tokens: 8000

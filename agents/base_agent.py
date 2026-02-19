@@ -124,7 +124,7 @@ class BaseAgent(ABC):
         config = LLMConfig(
             model=model_name or self.get_model_name(),
             temperature=kwargs.pop("temperature", 0.7),
-            max_tokens=kwargs.pop("max_tokens", 1024),
+            max_tokens=kwargs.pop("max_tokens", 8192),
             top_p=kwargs.pop("top_p", 0.9),
             extra=kwargs,
         )
@@ -174,7 +174,7 @@ class BaseAgent(ABC):
             config = LLMConfig(
                 model=model_name or self.get_model_name(),
                 temperature=kwargs.pop("temperature", 0.7),
-                max_tokens=kwargs.pop("max_tokens", 1024),
+                max_tokens=kwargs.pop("max_tokens", 8192),
                 top_p=kwargs.pop("top_p", 0.9),
                 extra=kwargs,
             )

@@ -277,10 +277,11 @@ class GeminiProvider(LLMClient):
         """Return the GenerateContentConfig kwargs for the new SDK."""
         kw: Dict[str, Any] = {
             "temperature": cfg.temperature,
-            "max_output_tokens": cfg.max_tokens,
             "top_p": cfg.top_p,
             "safety_settings": _SAFETY_SETTINGS,
         }
+        if cfg.max_tokens is not None:
+            kw["max_output_tokens"] = cfg.max_tokens
         return kw
 
     # ── Retry wrapper ─────────────────────────────────────────────────────

@@ -10,8 +10,9 @@ Now powered by:
 """
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, File, UploadFile, Form, Query
-from fastapi.responses import JSONResponse
-from typing import List, Dict, Any, Optional
+from fastapi.responses import JSONResponse, StreamingResponse
+from typing import List, Dict, Any, Optional, AsyncGenerator
+import json
 import uuid
 import re
 import time
@@ -242,6 +243,139 @@ async def ask_lumicoria(
     except Exception as e:
         logger.error("chat_error", error=str(e), user_id=user_id)
         raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Streaming Chat Endpoint  (POST /chat/stream  →  text/event-stream)
+# ═══════════════════════════════════════════════════════════════════
+
+@router.post("/stream")
+async def ask_lumicoria_stream(
+    request: LumicoriaChatRequest,
+    agent_service: AgentService = Depends(get_agent_service),
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """
+    Streaming version of the chat endpoint.
+    Returns text/event-stream with JSON-encoded SSE frames.
+
+    Frame types:
+      {"type": "meta",  "conversation_id": "...", "agent_used": "..."}  (first frame)
+      {"type": "delta", "text": "..."}  (one per token batch)
+      {"type": "done",  "processing_time": 1.23}  (final frame)
+      {"type": "error", "message": "..."}  (on failure)
+    """
+    user_id = current_user["id"]
+
+    if not _check_rate_limit(user_id):
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded. Please wait a moment."
+        )
+
+    if _is_prompt_injection(request.query):
+        raise HTTPException(status_code=400, detail="Your message was flagged for safety.")
+
+    conversation_id = request.conversation_id or str(uuid.uuid4())
+    start_time = time.time()
+
+    async def event_stream() -> AsyncGenerator[str, None]:
+        full_response = ""
+        agent_key = "general"
+        try:
+            # 1. Conversation history
+            history = await conversation_memory.get_conversation_history(conversation_id, limit=6)
+
+            # 2. Route
+            intent_router = await get_router()
+            route_result = await intent_router.route(
+                message=request.query,
+                conversation_history=history,
+            )
+            agent_key = route_result["agent"]
+            confidence = route_result["confidence"]
+
+            # First frame: metadata
+            yield f"data: {json.dumps({'type': 'meta', 'conversation_id': conversation_id, 'agent_used': agent_key, 'confidence': confidence})}\n\n"
+
+            # 3. Get agent
+            try:
+                agent = agent_service.get_agent(agent_key)
+            except (ValueError, KeyError):
+                try:
+                    agent = agent_service.get_agent("general")
+                except (ValueError, KeyError):
+                    from ....agents.general_agent import GeneralAgent
+                    agent = GeneralAgent({})
+                agent_key = "general"
+
+            # 4. Stream via the provider's stream() method if available
+            from ....ai_models.base import LLMConfig
+            llm = getattr(agent, "llm_client", None) or getattr(agent, "perplexity_client", None)
+
+            if llm and hasattr(llm, "stream"):
+                # Build messages the same way base_agent does
+                system_prompt = getattr(agent, "system_prompt", None) or ""
+                messages = []
+                if system_prompt:
+                    messages.append({"role": "system", "content": system_prompt})
+                if history:
+                    for m in history[-8:]:
+                        messages.append({"role": m.get("role", "user"), "content": m.get("content", "")})
+                messages.append({"role": "user", "content": request.query})
+
+                cfg = LLMConfig(temperature=0.7, max_tokens=None)  # None = use model's native max (65k for gemini-2.5-flash)
+                async for chunk in llm.stream(messages, config=cfg):
+                    if chunk.content:
+                        full_response += chunk.content
+                        yield f"data: {json.dumps({'type': 'delta', 'text': chunk.content})}\n\n"
+            else:
+                # Fallback: call process_async and emit whole response as a single delta
+                agent_input = {
+                    "query": request.query,
+                    "content": request.query,
+                    "prompt": request.query,
+                    "user_id": user_id,
+                    "conversation_id": conversation_id,
+                }
+                if history:
+                    agent_input["conversation_history"] = history
+                raw_result = await agent.process_async(agent_input)
+                normalized = normalize_agent_response(raw_result, agent_key=agent_key)
+                full_response = normalized["response"]
+                yield f"data: {json.dumps({'type': 'delta', 'text': full_response})}\n\n"
+
+            # 5. Done frame
+            processing_time = round(time.time() - start_time, 2)
+            yield f"data: {json.dumps({'type': 'done', 'processing_time': processing_time})}\n\n"
+
+            # 6. Persist to memory (non-blocking concurrent tasks)
+            import asyncio
+            asyncio.create_task(conversation_memory.save_message(
+                conversation_id=conversation_id, user_id=user_id,
+                role="user", content=request.query,
+            ))
+            asyncio.create_task(conversation_memory.save_message(
+                conversation_id=conversation_id, user_id=user_id,
+                role="assistant", content=full_response, agent=agent_key,
+            ))
+            if not request.conversation_id:
+                asyncio.create_task(conversation_memory.generate_conversation_title(
+                    conversation_id=conversation_id, first_message=request.query,
+                ))
+
+        except Exception as e:
+            logger.error("stream_chat_error", error=str(e), user_id=user_id)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════

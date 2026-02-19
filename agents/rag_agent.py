@@ -123,7 +123,7 @@ class RAGAgent(BaseAgent):
             config = LLMConfig(
                 model=self.model_config.get("model"),
                 temperature=self.model_config.get("temperature", 0.7),
-                max_tokens=self.model_config.get("max_tokens", 1024),
+                max_tokens=self.model_config.get("max_tokens", 8192),
             )
             response = await self.llm_client.generate(messages, config=config)
             
@@ -297,7 +297,7 @@ class RAGAgent(BaseAgent):
             config = LLMConfig(
                 model=self.model_config.get("model"),
                 temperature=self.model_config.get("temperature", 0.7),
-                max_tokens=self.model_config.get("max_tokens", 1024),
+                max_tokens=self.model_config.get("max_tokens", 8192),
             )
             response = await self.llm_client.generate(messages, config=config)
             

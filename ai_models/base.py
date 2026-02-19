@@ -146,7 +146,7 @@ class LLMConfig:
     """Provider-agnostic configuration for an LLM request."""
     model: Optional[str] = None  # None → use provider default
     temperature: float = 0.7
-    max_tokens: int = 1024
+    max_tokens: Optional[int] = 8192   # None = let the provider use its own default (uncapped)
     top_p: float = 0.9
     timeout: int = 60
     stream: bool = False
