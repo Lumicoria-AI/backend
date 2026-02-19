@@ -65,7 +65,7 @@ async def save_message(
     
     now = datetime.now(timezone.utc).isoformat()
     
-    update_ops = {
+    update_ops: Dict[str, Any] = {
         "$push": {
             "messages": {
                 "$each": [message],
@@ -73,9 +73,13 @@ async def save_message(
             },
         },
         "$set": {"updated_at": now, "user_id": user_id},
-        "$setOnInsert": {"created_at": now, "metadata": {}, "agent_history": []},
+        "$setOnInsert": {"created_at": now, "metadata": {}},
     }
     
+    # $addToSet and $setOnInsert cannot both touch 'agent_history' in MongoDB.
+    # Instead, use $push with $addToSet semantics via a separate pipeline, or
+    # simply use $addToSet when agent is present (no $setOnInsert on agent_history).
+    # The field is created as [] on insert via the first $addToSet call itself.
     if agent:
         update_ops["$addToSet"] = {"agent_history": agent}
     

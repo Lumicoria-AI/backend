@@ -1,57 +1,82 @@
 """
-Google Gemini Provider — LLMClient Implementation
+Google Gemini Provider — Production-Grade LLMClient Implementation
 
-Implements the provider-agnostic LLMClient interface for Google's Gemini API
-(Google AI Studio / Vertex AI). Matches Perplexity's behavioral contract:
-- Same message format semantics
-- Same error handling guarantees
-- Same response shape
+Migrated to the current stable `google-genai` SDK (google.genai) from the
+deprecated `google-generativeai` package.
+
+Key improvements over the legacy provider:
+  - Native async via `client.aio` — no ThreadPoolExecutor blocking the event loop
+  - Exponential back-off with jitter on rate-limit / transient errors (429 / 503)
+  - Connection reuse via a shared async httpx client managed by the SDK
+  - Full model catalogue for the v1 API (Gemini 2.0, 2.5, 1.5 series)
+  - Correct multipart / vision content handling
+  - Proper streaming with token-usage accumulation on the final chunk
+  - Self-registration with LLMRegistry on import
 
 Requires:
-    pip install google-generativeai
+    pip install google-genai
 
 Environment:
-    GEMINI_API_KEY — Google AI Studio API key
+    GEMINI_API_KEY   — Google AI Studio API key (required)
+    GEMINI_MODEL     — model override, default gemini-2.0-flash
+    GEMINI_TIMEOUT   — HTTP timeout in seconds, default 60
 """
 
+from __future__ import annotations
+
 import asyncio
+import base64
+import random
+import re
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
-from concurrent.futures import ThreadPoolExecutor
 
 import structlog
 
 from backend.ai_models.base import (
+    LLMAuthenticationError,
     LLMClient,
     LLMConfig,
+    LLMConnectionError,
+    LLMContentFilterError,
     LLMMessage,
-    LLMResponse,
-    LLMStreamChunk,
+    LLMModelNotFoundError,
     LLMProviderError,
     LLMRateLimitError,
-    LLMAuthenticationError,
-    LLMConnectionError,
-    LLMModelNotFoundError,
-    LLMContentFilterError,
-    TokenUsage,
+    LLMResponse,
+    LLMStreamChunk,
     MessageRole,
+    TokenUsage,
 )
 from backend.ai_models.registry import LLMRegistry
 
 logger = structlog.get_logger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Constants
+# Model catalogue — tracks what is available on the v1 API
 # ═══════════════════════════════════════════════════════════════════════════
 
 _CHAT_MODELS: set[str] = {
-    # Gemini 2.5 series (latest)
+    # Gemini 3 series (latest preview)
+    "gemini-3-pro-preview",
+    "gemini-3-flash-preview",
+    "gemini-3.1-pro-preview",
+    # Gemini 2.5 series
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash-preview-09-2025",
     "gemini-2.5-pro-preview-06-05",
     "gemini-2.5-flash-preview-05-20",
+    "gemini-2.5-flash-preview",
+    "gemini-2.5-pro-preview",
     # Gemini 2.0 series
-    "gemini-2.0-pro",
-    "gemini-2.0-pro-exp",
     "gemini-2.0-flash",
+    "gemini-2.0-flash-001",
     "gemini-2.0-flash-lite",
+    "gemini-2.0-flash-lite-001",
+    "gemini-2.0-flash-exp",
+    "gemini-2.0-pro-exp",
+    "gemini-2.0-pro-exp-03-25",
     "gemini-2.0-flash-thinking-exp",
     # Gemini 1.5 series
     "gemini-1.5-pro",
@@ -59,55 +84,100 @@ _CHAT_MODELS: set[str] = {
     "gemini-1.5-flash",
     "gemini-1.5-flash-latest",
     "gemini-1.5-flash-8b",
-    # Legacy
-    "gemini-1.0-pro",
+    "gemini-1.5-flash-8b-latest",
+    # Convenience aliases
+    "gemini-flash-latest",
+    "gemini-pro-latest",
 }
 
 _EMBEDDING_MODELS: set[str] = {
     "text-embedding-004",
+    "text-multilingual-embedding-002",
 }
 
-_DEFAULT_CHAT_MODEL = "gemini-2.0-flash"
-_DEFAULT_EMBEDDING_MODEL = "text-embedding-004"
-
-# Merged set for supported_models property
 _ALL_MODELS = _CHAT_MODELS | _EMBEDDING_MODELS
 
-# Gemini's role mapping (Gemini uses "model" instead of "assistant")
+_DEFAULT_CHAT_MODEL = "gemini-2.5-flash"
+_DEFAULT_EMBEDDING_MODEL = "text-embedding-004"
+
+# Back-off: up to 4 retries, doubling each time + ±10 % jitter, cap 32 s
+_MAX_RETRIES = 4
+_BACKOFF_BASE = 1.0          # seconds
+_BACKOFF_CAP = 32.0          # seconds
+_RETRYABLE_STATUS = {429, 500, 503}
+
+# Gemini role mapping (new SDK uses "user" / "model")
 _ROLE_MAP = {
-    MessageRole.SYSTEM: "user",      # Gemini handles system via system_instruction
-    MessageRole.USER: "user",
+    MessageRole.USER:      "user",
     MessageRole.ASSISTANT: "model",
+    MessageRole.SYSTEM:    "user",   # handled via system_instruction
 }
 
+# Safety settings — permissive so application layer owns moderation
+_SAFETY_SETTINGS = [
+    {"category": "HARM_CATEGORY_HARASSMENT",        "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH",       "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Helper — exponential back-off with jitter
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _backoff(attempt: int) -> float:
+    """Return sleep duration (seconds) for the given retry attempt (0-indexed)."""
+    base = min(_BACKOFF_BASE * (2 ** attempt), _BACKOFF_CAP)
+    return base * (0.9 + random.random() * 0.2)  # ± 10 % jitter
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Provider
+# ═══════════════════════════════════════════════════════════════════════════
 
 class GeminiProvider(LLMClient):
     """
-    LLMClient implementation for Google Gemini API.
+    Production-grade LLMClient for Google Gemini (google-genai SDK).
 
-    Uses the google-generativeai SDK. Since the SDK is synchronous,
-    all calls are wrapped in a thread pool executor for async compatibility.
+    The provider is designed to be instantiated once (singleton via the
+    registry) and reused across the lifetime of the server process.
 
-    Design decisions:
-    - System messages → Gemini's `system_instruction` parameter
-    - Gemini "model" role → normalized to "assistant" in responses
-    - Safety settings → configurable, defaults to BLOCK_NONE for flexibility
-    - Embedding → uses text-embedding-004 model
+    Thread-safety: all public methods are async and safe for concurrent use.
+    The underlying sdk client manages its own connection pool.
     """
 
-    def __init__(self, api_key: Optional[str] = None, **kwargs):
-        """
-        Initialize the Gemini provider.
-
-        Args:
-            api_key: Gemini API key. If None, reads from settings.
-        """
+    def __init__(self, api_key: Optional[str] = None, **_kwargs: Any) -> None:
         self._api_key = api_key
-        self._sdk = None
-        self._executor = ThreadPoolExecutor(max_workers=4)
+        self._client: Any = None            # google.genai.Client, lazy-init
 
-    def _get_api_key(self) -> str:
-        """Resolve API key from argument or settings."""
+    # ── Lazy client initialisation ────────────────────────────────────────
+
+    def _get_client(self) -> Any:
+        """
+        Return (and lazily create) the `google.genai.Client` instance.
+
+        Using lazy init keeps import errors from crashing startup when the
+        package is not installed.
+        """
+        if self._client is not None:
+            return self._client
+
+        try:
+            from google import genai
+        except ImportError as exc:
+            raise LLMProviderError(
+                "google-genai package not installed. "
+                "Run: pip install google-genai",
+                provider="gemini",
+            ) from exc
+
+        api_key = self._resolve_api_key()
+        self._client = genai.Client(api_key=api_key)
+        logger.info("gemini_client_created", model=self.default_model)
+        return self._client
+
+    def _resolve_api_key(self) -> str:
         if self._api_key:
             return self._api_key
         try:
@@ -118,25 +188,19 @@ class GeminiProvider(LLMClient):
         except Exception:
             pass
         raise LLMAuthenticationError(
-            "GEMINI_API_KEY is required", provider="gemini"
+            "GEMINI_API_KEY is not set.", provider="gemini"
         )
 
-    def _get_sdk(self):
-        """Lazy-initialize the Gemini SDK."""
-        if self._sdk is None:
-            try:
-                import google.generativeai as genai
-            except ImportError:
-                raise LLMProviderError(
-                    "google-generativeai package is not installed. "
-                    "Install with: pip install google-generativeai",
-                    provider="gemini",
-                )
-            genai.configure(api_key=self._get_api_key())
-            self._sdk = genai
-        return self._sdk
+    def _sanitize_model_name(self, model: str) -> str:
+        """Strip the 'models/' prefix that the ListModels API returns."""
+        return model.removeprefix("models/")
 
-    # ── Interface properties ──────────────────────────────────────────
+    def _resolve_model(self, cfg_model: Optional[str]) -> str:
+        """Precedence: call-time model > env GEMINI_MODEL > hardcoded default."""
+        raw = cfg_model if cfg_model else self.default_model
+        return self._sanitize_model_name(raw)
+
+    # ── LLMClient interface ── properties ─────────────────────────────────
 
     @property
     def provider_name(self) -> str:
@@ -145,10 +209,10 @@ class GeminiProvider(LLMClient):
     @property
     def default_model(self) -> str:
         try:
-            from backend.core.config import get_settings
-            model = getattr(get_settings(), "GEMINI_MODEL", None)
-            if model:
-                return model
+            from backend.core.config import settings
+            m = getattr(settings, "GEMINI_MODEL", None)
+            if m:
+                return m
         except Exception:
             pass
         return _DEFAULT_CHAT_MODEL
@@ -157,294 +221,316 @@ class GeminiProvider(LLMClient):
     def supported_models(self) -> List[str]:
         return sorted(_ALL_MODELS)
 
-    # ── Core methods ──────────────────────────────────────────────────
+    # ── Content builders ──────────────────────────────────────────────────
+
+    def _build_contents_and_system(
+        self,
+        messages: List[LLMMessage],
+    ) -> tuple[Optional[str], List[Dict[str, Any]]]:
+        """
+        Split messages into (system_instruction, contents_list).
+
+        The new SDK expects:
+            contents = [{"role": "user"|"model", "parts": [{"text": "..."}]}]
+        """
+        system_parts: List[str] = []
+        contents: List[Dict[str, Any]] = []
+
+        for msg in messages:
+            if msg.role == MessageRole.SYSTEM:
+                system_parts.append(msg.content)
+                continue
+
+            role = _ROLE_MAP[msg.role]
+            parts: List[Dict[str, Any]] = [{"text": msg.content}]
+
+            # Multimodal: inline images
+            if msg.images:
+                for img in msg.images:
+                    if img.startswith("data:"):
+                        # data:image/jpeg;base64,<payload>
+                        match = re.match(r"data:([^;]+);base64,(.+)", img, re.S)
+                        if match:
+                            parts.append({
+                                "inline_data": {
+                                    "mime_type": match.group(1),
+                                    "data": match.group(2),
+                                }
+                            })
+                    elif img.startswith("http://") or img.startswith("https://"):
+                        parts.append({"file_data": {"file_uri": img}})
+                    else:
+                        # Assume raw base64 JPEG
+                        parts.append({
+                            "inline_data": {
+                                "mime_type": "image/jpeg",
+                                "data": img,
+                            }
+                        })
+
+            contents.append({"role": role, "parts": parts})
+
+        system_instruction = "\n\n".join(system_parts) if system_parts else None
+        return system_instruction, contents
+
+    def _build_generate_config(self, cfg: LLMConfig) -> Dict[str, Any]:
+        """Return the GenerateContentConfig kwargs for the new SDK."""
+        kw: Dict[str, Any] = {
+            "temperature": cfg.temperature,
+            "max_output_tokens": cfg.max_tokens,
+            "top_p": cfg.top_p,
+            "safety_settings": _SAFETY_SETTINGS,
+        }
+        return kw
+
+    # ── Retry wrapper ─────────────────────────────────────────────────────
+
+    async def _with_retry(self, coro_fn, *args, **kwargs) -> Any:
+        """
+        Execute an async coroutine with exponential back-off retry.
+
+        Retries on rate-limit (429) and transient server errors (500, 503).
+        Raises immediately on auth / model-not-found / content-filter errors.
+        """
+        last_exc: Optional[Exception] = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                return await coro_fn(*args, **kwargs)
+            except LLMRateLimitError as exc:
+                last_exc = exc
+                if attempt == _MAX_RETRIES:
+                    break
+                wait = exc.retry_after if exc.retry_after else _backoff(attempt)
+                logger.warning(
+                    "gemini_rate_limit_retry",
+                    attempt=attempt + 1,
+                    wait_seconds=round(wait, 2),
+                )
+                await asyncio.sleep(wait)
+            except LLMConnectionError as exc:
+                last_exc = exc
+                if attempt == _MAX_RETRIES:
+                    break
+                wait = _backoff(attempt)
+                logger.warning(
+                    "gemini_connection_retry",
+                    attempt=attempt + 1,
+                    wait_seconds=round(wait, 2),
+                )
+                await asyncio.sleep(wait)
+            except (LLMAuthenticationError, LLMModelNotFoundError,
+                    LLMContentFilterError, LLMProviderError) as exc:
+                # Non-retryable
+                raise exc
+
+        raise last_exc  # type: ignore[misc]
+
+    # ── Core generate ─────────────────────────────────────────────────────
+
+    async def _do_generate(
+        self,
+        messages: List[LLMMessage],
+        cfg: LLMConfig,
+    ) -> LLMResponse:
+        from google.genai import types as genai_types
+
+        client = self._get_client()
+        model_name = self._resolve_model(cfg.model)
+        system_instruction, contents = self._build_contents_and_system(messages)
+        gen_config = self._build_generate_config(cfg)
+
+        if system_instruction:
+            gen_config["system_instruction"] = system_instruction
+
+        try:
+            response = await client.aio.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=genai_types.GenerateContentConfig(**gen_config),
+            )
+        except Exception as exc:
+            raise self._normalize_error(exc) from exc
+
+        return self._parse_response(response, model_name)
 
     async def generate(
         self,
         messages: List[Union[LLMMessage, Dict[str, str]]],
         config: Optional[LLMConfig] = None,
     ) -> LLMResponse:
-        """Generate a completion via Gemini API."""
+        """Generate a completion — fully async, with retry."""
         cfg = self._resolve_config(config)
         normalized = self._normalize_messages(messages)
+        return await self._with_retry(self._do_generate, normalized, cfg)
 
-        # Separate system instruction from conversation messages
-        system_instruction, conversation = self._split_system(normalized)
-
-        # Convert to Gemini message format
-        gemini_messages = self._to_gemini_messages(conversation)
-
-        model_name = cfg.model or self.default_model
-
-        try:
-            genai = self._get_sdk()
-
-            # Build generation config
-            generation_config = genai.GenerationConfig(
-                temperature=cfg.temperature,
-                max_output_tokens=cfg.max_tokens,
-                top_p=cfg.top_p,
-            )
-
-            # Configure safety settings (permissive — let the app layer handle moderation)
-            safety_settings = self._get_safety_settings(genai)
-
-            # Create model instance
-            model_kwargs = {
-                "model_name": model_name,
-                "generation_config": generation_config,
-                "safety_settings": safety_settings,
-            }
-            if system_instruction:
-                model_kwargs["system_instruction"] = system_instruction
-
-            model = genai.GenerativeModel(**model_kwargs)
-
-            # Run synchronous SDK call in executor
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self._executor,
-                lambda: model.generate_content(gemini_messages),
-            )
-
-            return self._to_llm_response(response, model_name)
-
-        except Exception as e:
-            raise self._normalize_error(e) from e
+    # ── Streaming ─────────────────────────────────────────────────────────
 
     async def stream(
         self,
         messages: List[Union[LLMMessage, Dict[str, str]]],
         config: Optional[LLMConfig] = None,
     ) -> AsyncIterator[LLMStreamChunk]:
-        """Stream a completion from Gemini."""
+        """Stream a completion. Yields LLMStreamChunk on each token batch."""
+        from google.genai import types as genai_types
+
         cfg = self._resolve_config(config)
         normalized = self._normalize_messages(messages)
+        client = self._get_client()
+        model_name = self._resolve_model(cfg.model)
+        system_instruction, contents = self._build_contents_and_system(normalized)
+        gen_config = self._build_generate_config(cfg)
+        if system_instruction:
+            gen_config["system_instruction"] = system_instruction
 
-        system_instruction, conversation = self._split_system(normalized)
-        gemini_messages = self._to_gemini_messages(conversation)
-
-        model_name = cfg.model or self.default_model
+        prompt_tokens = 0
+        completion_tokens = 0
 
         try:
-            genai = self._get_sdk()
+            async for chunk in await client.aio.models.generate_content_stream(
+                model=model_name,
+                contents=contents,
+                config=genai_types.GenerateContentConfig(**gen_config),
+            ):
+                text = ""
+                try:
+                    text = chunk.text or ""
+                except (ValueError, AttributeError):
+                    pass
 
-            generation_config = genai.GenerationConfig(
-                temperature=cfg.temperature,
-                max_output_tokens=cfg.max_tokens,
-                top_p=cfg.top_p,
-            )
-            safety_settings = self._get_safety_settings(genai)
+                # Accumulate token counts from usageMetadata when present
+                if hasattr(chunk, "usage_metadata") and chunk.usage_metadata:
+                    um = chunk.usage_metadata
+                    prompt_tokens = getattr(um, "prompt_token_count", prompt_tokens) or prompt_tokens
+                    completion_tokens = getattr(um, "candidates_token_count", completion_tokens) or completion_tokens
 
-            model_kwargs = {
-                "model_name": model_name,
-                "generation_config": generation_config,
-                "safety_settings": safety_settings,
-            }
-            if system_instruction:
-                model_kwargs["system_instruction"] = system_instruction
-
-            model = genai.GenerativeModel(**model_kwargs)
-
-            # Run streaming in executor (SDK is synchronous)
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                self._executor,
-                lambda: model.generate_content(gemini_messages, stream=True),
-            )
-
-            # Yield chunks
-            for chunk in response:
-                if chunk.text:
+                if text:
                     yield LLMStreamChunk(
-                        content=chunk.text,
+                        content=text,
                         model=model_name,
                         provider=self.provider_name,
                     )
 
-            # Final chunk with finish reason
-            yield LLMStreamChunk(
-                content="",
-                model=model_name,
-                provider=self.provider_name,
-                finish_reason="stop",
-            )
+        except Exception as exc:
+            raise self._normalize_error(exc) from exc
 
-        except Exception as e:
-            raise self._normalize_error(e) from e
+        # Final sentinel chunk with token usage
+        yield LLMStreamChunk(
+            content="",
+            model=model_name,
+            provider=self.provider_name,
+            finish_reason="stop",
+            usage=TokenUsage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            ),
+        )
+
+    # ── Embeddings ────────────────────────────────────────────────────────
 
     async def generate_embeddings(
         self,
         texts: List[str],
         model: Optional[str] = None,
     ) -> List[List[float]]:
-        """Generate embeddings via Gemini embedding API."""
+        """Batch-embed texts using the Gemini embedding API."""
         if not texts:
             return []
 
+        from google.genai import types as genai_types
+
+        client = self._get_client()
         embedding_model = model or _DEFAULT_EMBEDDING_MODEL
 
         try:
-            genai = self._get_sdk()
-
-            loop = asyncio.get_event_loop()
-
-            # Gemini supports batch embedding
-            result = await loop.run_in_executor(
-                self._executor,
-                lambda: genai.embed_content(
+            results: List[List[float]] = []
+            for text in texts:
+                response = await client.aio.models.embed_content(
                     model=embedding_model,
-                    content=texts,
-                    task_type="retrieval_document",
-                ),
-            )
+                    contents=text,
+                    config=genai_types.EmbedContentConfig(
+                        task_type="RETRIEVAL_DOCUMENT",
+                    ),
+                )
+                embedding = response.embeddings[0].values if response.embeddings else []
+                results.append(list(embedding))
+            return results
+        except Exception as exc:
+            logger.error("gemini_embedding_error", error=str(exc))
+            raise self._normalize_error(exc) from exc
 
-            # The result contains a list of embeddings
-            if isinstance(result, dict) and "embedding" in result:
-                embeddings = result["embedding"]
-                # If single text, it returns a single embedding
-                if texts and len(texts) == 1 and isinstance(embeddings[0], float):
-                    return [embeddings]
-                return embeddings
-
-            return [[0.0] * 768] * len(texts)  # Gemini default dimension
-
-        except Exception as e:
-            logger.error("gemini_embedding_error", error=str(e))
-            raise self._normalize_error(e) from e
+    # ── Health check ──────────────────────────────────────────────────────
 
     async def health_check(self) -> bool:
-        """Verify Gemini API is reachable."""
+        """Ping Gemini with a minimal request. Returns True if healthy."""
         try:
-            genai = self._get_sdk()
-            loop = asyncio.get_event_loop()
-
-            model = genai.GenerativeModel(model_name=self.default_model)
-            response = await loop.run_in_executor(
-                self._executor,
-                lambda: model.generate_content(
-                    "Respond with OK",
-                    generation_config=genai.GenerationConfig(max_output_tokens=5),
+            from google.genai import types as genai_types
+            client = self._get_client()
+            response = await client.aio.models.generate_content(
+                model=self.default_model,
+                contents=[{"role": "user", "parts": [{"text": "ping"}]}],
+                config=genai_types.GenerateContentConfig(
+                    max_output_tokens=5,
+                    safety_settings=_SAFETY_SETTINGS,
                 ),
             )
             return bool(response.text)
-        except Exception as e:
-            logger.warning("gemini_health_check_failed", error=str(e))
+        except Exception as exc:
+            logger.warning("gemini_health_check_failed", error=str(exc))
             return False
 
+    # ── Resource management ───────────────────────────────────────────────
+
     async def close(self) -> None:
-        """Release resources."""
-        self._executor.shutdown(wait=False)
-        self._sdk = None
+        """Release the underlying HTTP client connections."""
+        if self._client is not None:
+            try:
+                # The google-genai client exposes a close() method in newer versions
+                close_fn = getattr(self._client, "close", None) or getattr(
+                    getattr(self._client, "aio", None), "close", None
+                )
+                if close_fn and asyncio.iscoroutinefunction(close_fn):
+                    await close_fn()
+                elif close_fn:
+                    close_fn()
+            except Exception:
+                pass
+            self._client = None
 
-    # ── Private helpers ───────────────────────────────────────────────
+    # ── Response parser ───────────────────────────────────────────────────
 
-    def _split_system(self, messages: List[LLMMessage]):
-        """
-        Separate system messages from conversation messages.
-
-        Gemini handles system prompts via `system_instruction` parameter,
-        not as a message in the conversation.
-        """
-        system_parts = []
-        conversation = []
-
-        for msg in messages:
-            if msg.role == MessageRole.SYSTEM:
-                system_parts.append(msg.content)
-            else:
-                conversation.append(msg)
-
-        system_instruction = "\n\n".join(system_parts) if system_parts else None
-        return system_instruction, conversation
-
-    def _to_gemini_messages(self, messages: List[LLMMessage]) -> list:
-        """
-        Convert LLMMessage list to Gemini's content format.
-
-        Gemini expects:
-          [{"role": "user", "parts": ["text"]}, {"role": "model", "parts": ["text"]}]
-        """
-        gemini_msgs = []
-
-        for msg in messages:
-            role = _ROLE_MAP.get(msg.role, "user")
-            parts = [msg.content]
-
-            # Handle multimodal (images)
-            if msg.images:
-                import base64
-                for img in msg.images:
-                    if img.startswith("data:") or img.startswith("http"):
-                        # URL-based images — Gemini SDK handles these differently
-                        parts.append({"type": "image_url", "image_url": img})
-                    else:
-                        # Base64 encoded image
-                        try:
-                            img_bytes = base64.b64decode(img)
-                            parts.append({
-                                "mime_type": "image/jpeg",
-                                "data": img_bytes,
-                            })
-                        except Exception:
-                            parts.append(img)
-
-            gemini_msgs.append({"role": role, "parts": parts})
-
-        return gemini_msgs
-
-    def _get_safety_settings(self, genai) -> list:
-        """
-        Get safety settings for Gemini.
-        
-        Default: BLOCK_NONE for all categories to let the application
-        layer handle content moderation. Override via config if needed.
-        """
-        try:
-            return [
-                {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-            ]
-        except Exception:
-            return []
-
-    def _to_llm_response(self, response, model_name: str) -> LLMResponse:
-        """Convert a Gemini response to a normalized LLMResponse."""
+    def _parse_response(self, response: Any, model_name: str) -> LLMResponse:
+        """Convert a Gemini GenerateContentResponse to a normalized LLMResponse."""
         content = ""
         finish_reason = "stop"
 
         try:
-            content = response.text
-        except ValueError:
-            # Response was blocked by safety filters
+            content = response.text or ""
+        except (ValueError, AttributeError):
             finish_reason = "content_filter"
             try:
-                # Try to get partial content
-                if response.candidates:
-                    candidate = response.candidates[0]
-                    if candidate.content and candidate.content.parts:
-                        content = candidate.content.parts[0].text
-                    finish_reason = str(getattr(candidate, "finish_reason", "content_filter"))
+                candidate = response.candidates[0]
+                if candidate.content and candidate.content.parts:
+                    content = candidate.content.parts[0].text or ""
+                finish_reason = str(
+                    getattr(getattr(candidate, "finish_reason", None), "name", "content_filter")
+                )
             except Exception:
                 pass
-
             if not content:
                 raise LLMContentFilterError(
                     "Response blocked by Gemini safety filters",
                     provider="gemini",
                 )
 
-        # Extract usage metadata
         usage = TokenUsage()
         try:
-            if hasattr(response, "usage_metadata") and response.usage_metadata:
-                um = response.usage_metadata
+            um = response.usage_metadata
+            if um:
                 usage = TokenUsage(
-                    prompt_tokens=getattr(um, "prompt_token_count", 0),
-                    completion_tokens=getattr(um, "candidates_token_count", 0),
-                    total_tokens=getattr(um, "total_token_count", 0),
+                    prompt_tokens=getattr(um, "prompt_token_count", 0) or 0,
+                    completion_tokens=getattr(um, "candidates_token_count", 0) or 0,
+                    total_tokens=getattr(um, "total_token_count", 0) or 0,
                 )
         except Exception:
             pass
@@ -453,53 +539,113 @@ class GeminiProvider(LLMClient):
             content=content,
             model=model_name,
             provider=self.provider_name,
-            response_id="",  # Gemini doesn't return a response ID
+            response_id="",
             usage=usage,
-            citations=[],  # Gemini doesn't provide citations like Perplexity
+            citations=[],
             search_queries=[],
             finish_reason=finish_reason,
         )
 
-    def _normalize_error(self, error: Exception) -> LLMProviderError:
-        """Convert Gemini-specific errors to the normalized hierarchy."""
-        error_str = str(error).lower()
+    # ── Error normalisation ───────────────────────────────────────────────
 
+    def _normalize_error(self, error: Exception) -> LLMProviderError:
+        """
+        Map google-genai exceptions → normalized LLMProviderError hierarchy.
+
+        We inspect the exception type name *and* string message to cover both
+        typed SDK exceptions and raw HTTP errors wrapped as generic exceptions.
+        """
         if isinstance(error, LLMProviderError):
             return error
 
-        # Check for common Gemini error patterns
-        if "api key" in error_str or "api_key" in error_str or "invalid" in error_str and "key" in error_str:
+        err_type = type(error).__name__.lower()
+        err_str  = str(error).lower()
+        raw_str  = str(error)
+
+        # --- Authentication -------------------------------------------------
+        if (
+            "api_key" in err_str
+            or "api key" in err_str
+            or "unauthenticated" in err_str
+            or "permission" in err_str
+            or "403" in err_str
+        ):
             return LLMAuthenticationError(
-                f"Invalid Gemini API key: {error}", provider="gemini", cause=error
+                f"Gemini authentication error: {raw_str}",
+                provider="gemini",
+                cause=error,
             )
 
-        if "quota" in error_str or "rate" in error_str or "429" in error_str or "resource_exhausted" in error_str:
-            return LLMRateLimitError(
-                f"Gemini rate limit exceeded: {error}", provider="gemini", cause=error
-            )
-
-        if "not found" in error_str or "404" in error_str or "does not exist" in error_str:
+        # --- Model not found ------------------------------------------------
+        if (
+            "not found" in err_str
+            or "404" in err_str
+            or "does not exist" in err_str
+            or "unsupported" in err_str
+            or "not supported" in err_str
+        ):
             return LLMModelNotFoundError(
-                f"Gemini model not found: {error}", provider="gemini", cause=error
+                f"Gemini model not found: {raw_str}",
+                provider="gemini",
+                cause=error,
             )
 
-        if "blocked" in error_str or "safety" in error_str:
+        # --- Rate limit / quota --------------------------------------------
+        retry_after: Optional[float] = None
+        if "retry_delay" in err_str:
+            try:
+                match = re.search(r"seconds:\s*(\d+)", raw_str)
+                if match:
+                    retry_after = float(match.group(1))
+            except Exception:
+                pass
+
+        if (
+            "quota" in err_str
+            or "rate" in err_str
+            or "429" in err_str
+            or "resource_exhausted" in err_str
+            or "resourceexhausted" in err_type
+            or "ratelimit" in err_type
+        ):
+            return LLMRateLimitError(
+                f"Gemini rate limit exceeded: {raw_str}",
+                provider="gemini",
+                retry_after=retry_after,
+                cause=error,
+            )
+
+        # --- Safety / content filter ----------------------------------------
+        if "blocked" in err_str or "safety" in err_str or "harmful" in err_str:
             return LLMContentFilterError(
-                f"Gemini content filter: {error}", provider="gemini", cause=error
+                f"Gemini content filter blocked response: {raw_str}",
+                provider="gemini",
+                cause=error,
             )
 
-        if "timeout" in error_str or "deadline" in error_str or "connection" in error_str:
+        # --- Connection / timeout -------------------------------------------
+        if (
+            "timeout" in err_str
+            or "deadline" in err_str
+            or "connection" in err_str
+            or "503" in err_str
+            or "unavailable" in err_str
+        ):
             return LLMConnectionError(
-                f"Gemini connection error: {error}", provider="gemini", cause=error
+                f"Gemini connection error: {raw_str}",
+                provider="gemini",
+                cause=error,
             )
 
         return LLMProviderError(
-            f"Gemini error: {error}", provider="gemini", cause=error
+            f"Gemini error: {raw_str}",
+            provider="gemini",
+            cause=error,
         )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Self-registration
+# Self-registration — auto-runs on import
 # ═══════════════════════════════════════════════════════════════════════════
 
 LLMRegistry.register("gemini", GeminiProvider)

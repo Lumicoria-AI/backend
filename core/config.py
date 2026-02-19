@@ -150,7 +150,7 @@ class Settings(BaseSettings):
         ),
     )
     GEMINI_MODEL: str = Field(
-        default="gemini-2.0-flash",
+        default="gemini-2.5-flash",
         description=(
             "Default Gemini chat model. Options: gemini-2.5-pro-preview-06-05, "
             "gemini-2.5-flash-preview-05-20, gemini-2.0-pro, gemini-2.0-flash, "

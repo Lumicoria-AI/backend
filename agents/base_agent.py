@@ -40,8 +40,12 @@ class BaseAgent(ABC):
             self.perplexity_client = self.llm_client
             
         except Exception as e:
-            logger.error(f"Error initializing LLM client: {str(e)}")
-            raise
+            # Don't re-raise — let the agent register without a client.
+            # _call_model_async already handles None llm_client gracefully.
+            # The error will surface on the first actual LLM call, not at startup.
+            logger.warning(f"LLM client failed to initialize (will retry on first call): {str(e)}")
+            self.llm_client = None
+            self.perplexity_client = None
 
     def _resolve_provider(self) -> Optional[str]:
         """
@@ -154,9 +158,16 @@ class BaseAgent(ABC):
         Returns:
             The response text from the LLM.
         """
+        # Lazy re-initialization: if client failed at startup, try again now
         if not self.llm_client:
-            logger.error("LLM client not initialized")
-            return "Error: LLM client not initialized correctly."
+            try:
+                provider = self._resolve_provider()
+                self.llm_client = get_llm_client(provider=provider)
+                self.perplexity_client = self.llm_client
+                logger.info("LLM client lazily initialized on first call")
+            except Exception as e:
+                logger.error(f"LLM client re-initialization failed: {str(e)}")
+                return f"I'm sorry, the AI service is temporarily unavailable ({str(e)[:120]}). Please try again shortly."
             
         try:
             # Build config

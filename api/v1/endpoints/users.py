@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Request
 from fastapi.responses import JSONResponse
 from typing import Any, List
 from backend.api.deps import get_db, get_current_user, get_current_active_user
@@ -13,6 +13,7 @@ router = APIRouter()
 @router.get("/me", response_model=UserResponse)
 @rate_limit()
 async def get_current_user_profile(
+    request: Request,
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
     """Get current user profile."""
@@ -21,6 +22,7 @@ async def get_current_user_profile(
 @router.put("/me", response_model=UserResponse)
 @rate_limit()
 async def update_current_user(
+    request: Request,
     user_update: UserUpdate,
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
@@ -38,6 +40,7 @@ async def update_current_user(
 @router.get("/me/profile", response_model=UserResponse)
 @rate_limit()
 async def get_user_profile(
+    request: Request,
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
     """Get detailed user profile."""
@@ -46,6 +49,7 @@ async def get_user_profile(
 @router.put("/me/profile", response_model=UserResponse)
 @rate_limit()
 async def update_user_profile(
+    request: Request,
     user_update: UserUpdate,
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
@@ -63,14 +67,19 @@ async def update_user_profile(
 @router.get("/me/settings", response_model=dict)
 @rate_limit()
 async def get_user_settings(
+    request: Request,
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
     """Get user settings."""
-    return current_user.preferences
+    user_settings = await user_repository.get_user_settings(str(current_user.id))
+    if user_settings:
+        return user_settings.model_dump()
+    return {}
 
 @router.put("/me/settings", response_model=dict)
 @rate_limit()
 async def update_user_settings(
+    request: Request,
     settings: dict,
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
@@ -91,6 +100,7 @@ async def update_user_settings(
 @router.post("/me/avatar", response_model=UserResponse)
 @rate_limit()
 async def upload_user_avatar(
+    request: Request,
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_active_user)
 ) -> Any:

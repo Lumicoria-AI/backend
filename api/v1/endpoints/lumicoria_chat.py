@@ -170,9 +170,15 @@ async def ask_lumicoria(
         try:
             agent = agent_service.get_agent(agent_key)
         except (ValueError, KeyError):
-            # Agent not loaded — try to fall back to general
+            # Agent not loaded — try the general agent first, then instantiate on-demand
             logger.warning("agent_not_loaded_falling_back", agent=agent_key)
-            agent = agent_service.get_agent("general")
+            try:
+                agent = agent_service.get_agent("general")
+            except (ValueError, KeyError):
+                # general agent also not loaded — create a minimal instance on-demand
+                logger.warning("general_agent_not_loaded_instantiating", agent=agent_key)
+                from ....agents.general_agent import GeneralAgent
+                agent = GeneralAgent({})
             agent_key = "general"
         
         # Build agent input — include conversation history for context

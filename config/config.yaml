@@ -5,7 +5,7 @@ ai_models:
   perplexity:
     model: "sonar-large-online"
   gemini:
-    model: "gemini-2.0-flash"
+    model: "gemini-2.5-flash"
   openai:
     model: "gpt-4o-mini"
   anthropic:
