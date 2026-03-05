@@ -32,6 +32,10 @@ from backend.models.billing import (
     SubscriptionPlan,
     PLAN_LIMITS,
     get_plan_limits,
+    InvoiceListResponse,
+    InvoiceResponse,
+    CreditBalanceResponse,
+    CreditLedgerResponse,
 )
 from backend.services import billing_service
 import stripe
@@ -302,3 +306,208 @@ async def admin_override_plan(
     )
 
     return await billing_service.get_user_subscription(request.user_id)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Invoice & Receipt Export
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get(
+    "/invoices",
+    response_model=InvoiceListResponse,
+    summary="Get user invoices",
+)
+async def get_invoices(
+    token_data: dict = Depends(verify_token),
+    limit: int = 50,
+    skip: int = 0,
+    status: str = None,
+):
+    """
+    Get user's invoice history with pagination.
+    Invoices are synced from Stripe webhooks.
+    """
+    user_id = token_data.get("user_id") or token_data.get("uid")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+        )
+
+    try:
+        from backend.db.mongodb.repositories.billing_repository import get_invoice_repository
+        invoice_repo = await get_invoice_repository()
+        return await billing_service.get_user_invoices(
+            user_id=user_id,
+            invoice_repo=invoice_repo,
+            limit=limit,
+            skip=skip,
+            status=status,
+        )
+    except Exception as e:
+        logger.error("Failed to fetch invoices", user_id=user_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch invoices",
+        )
+
+
+@router.get(
+    "/invoices/{invoice_id}/pdf",
+    summary="Get invoice PDF URL",
+)
+async def get_invoice_pdf(
+    invoice_id: str,
+    token_data: dict = Depends(verify_token),
+):
+    """
+    Get Stripe-hosted PDF URL for an invoice.
+    Returns redirect URL or direct PDF link.
+    """
+    user_id = token_data.get("user_id") or token_data.get("uid")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+        )
+
+    try:
+        from backend.db.mongodb.repositories.billing_repository import get_invoice_repository
+        invoice_repo = await get_invoice_repository()
+        pdf_url = await billing_service.get_invoice_pdf(user_id, invoice_id, invoice_repo)
+        
+        if not pdf_url:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Invoice not found or access denied",
+            )
+        
+        return {"pdf_url": pdf_url}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to fetch invoice PDF", invoice_id=invoice_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch invoice PDF",
+        )
+
+
+@router.get(
+    "/invoices/{invoice_id}/export",
+    summary="Export invoice data",
+)
+async def export_invoice(
+    invoice_id: str,
+    token_data: dict = Depends(verify_token),
+):
+    """
+    Export invoice data as JSON for download.
+    Useful for accounting integrations.
+    """
+    user_id = token_data.get("user_id") or token_data.get("uid")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+        )
+
+    try:
+        from backend.db.mongodb.repositories.billing_repository import get_invoice_repository
+        invoice_repo = await get_invoice_repository()
+        invoice_data = await billing_service.export_invoice(user_id, invoice_id, invoice_repo)
+        
+        if not invoice_data:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Invoice not found or access denied",
+            )
+        
+        return invoice_data
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to export invoice", invoice_id=invoice_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to export invoice",
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Credits Ledger
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get(
+    "/credits/balance",
+    response_model=CreditBalanceResponse,
+    summary="Get credit balance",
+)
+async def get_credit_balance(
+    token_data: dict = Depends(verify_token),
+):
+    """
+    Get user's current credit balance.
+    Credits are earned through payments and spent on usage.
+    """
+    user_id = token_data.get("user_id") or token_data.get("uid")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+        )
+
+    try:
+        from backend.db.mongodb.repositories.billing_repository import get_credits_repository
+        credits_repo = await get_credits_repository()
+        balance = await billing_service.get_credit_balance(user_id, credits_repo)
+        
+        return CreditBalanceResponse(
+            user_id=user_id,
+            balance=balance,
+            currency="credits",
+        )
+    except Exception as e:
+        logger.error("Failed to fetch credit balance", user_id=user_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch credit balance",
+        )
+
+
+@router.get(
+    "/credits/ledger",
+    response_model=CreditLedgerResponse,
+    summary="Get credit transaction history",
+)
+async def get_credit_ledger(
+    token_data: dict = Depends(verify_token),
+    limit: int = 50,
+    skip: int = 0,
+):
+    """
+    Get user's credit transaction history with pagination.
+    Shows all credits earned and spent over time.
+    """
+    user_id = token_data.get("user_id") or token_data.get("uid")
+    if not user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required",
+        )
+
+    try:
+        from backend.db.mongodb.repositories.billing_repository import get_credits_repository
+        credits_repo = await get_credits_repository()
+        return await billing_service.get_credit_ledger(
+            user_id=user_id,
+            credits_repo=credits_repo,
+            limit=limit,
+            skip=skip,
+        )
+    except Exception as e:
+        logger.error("Failed to fetch credit ledger", user_id=user_id, error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to fetch credit ledger",
+        )

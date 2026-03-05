@@ -177,6 +177,62 @@ class PaymentEventInDB(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class TransactionType(str, Enum):
+    """Credit transaction types."""
+    CREDIT = "credit"  # Adding credits
+    DEBIT = "debit"    # Spending credits
+    REFUND = "refund"  # Refunding credits
+    ADJUSTMENT = "adjustment"  # Admin adjustment
+    BONUS = "bonus"    # Promotional credits
+
+
+class CreditLedgerInDB(BaseModel):
+    """MongoDB document for credits transaction ledger."""
+    user_id: str
+    transaction_type: TransactionType
+    amount: int = Field(..., description="Amount in credits (positive for credit, negative for debit)")
+    balance_after: int = Field(..., description="User's credit balance after this transaction")
+    description: str = Field(..., description="Human-readable description of the transaction")
+    # Associated entities
+    stripe_invoice_id: Optional[str] = None
+    stripe_payment_intent_id: Optional[str] = None
+    agent_run_id: Optional[str] = None
+    document_id: Optional[str] = None
+    # Metadata
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+    created_by: Optional[str] = Field(None, description="User ID who created this transaction (for admin adjustments)")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class InvoiceInDB(BaseModel):
+    """MongoDB document for invoice/receipt storage."""
+    user_id: str
+    stripe_invoice_id: str
+    stripe_customer_id: str
+    stripe_subscription_id: Optional[str] = None
+    # Invoice details
+    invoice_number: Optional[str] = None
+    invoice_pdf_url: Optional[str] = None  # Stripe-hosted PDF
+    hosted_invoice_url: Optional[str] = None  # Stripe-hosted invoice page
+    amount_due: int = Field(..., description="Amount in cents")
+    amount_paid: int = Field(..., description="Amount paid in cents")
+    currency: str = "usd"
+    status: str = Field(..., description="Invoice status (draft, open, paid, void, uncollectible)")
+    # Dates
+    invoice_date: datetime
+    due_date: Optional[datetime] = None
+    paid_at: Optional[datetime] = None
+    # Line items (simplified)
+    line_items: List[Dict[str, Any]] = Field(default_factory=list)
+    # Metadata
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # API Request / Response Models
 # ─────────────────────────────────────────────────────────────────────────────
@@ -251,3 +307,51 @@ class AdminOverrideRequest(BaseModel):
     plan: SubscriptionPlan
     expires_at: Optional[datetime] = None
     reason: Optional[str] = None
+
+
+class CreditBalanceResponse(BaseModel):
+    """User's current credit balance."""
+    user_id: str
+    balance: int
+    currency: str = "credits"
+
+
+class CreditTransactionResponse(BaseModel):
+    """Single credit transaction entry."""
+    transaction_type: TransactionType
+    amount: int
+    balance_after: int
+    description: str
+    created_at: datetime
+    metadata: Optional[Dict[str, Any]] = None
+
+
+class CreditLedgerResponse(BaseModel):
+    """Paginated credit transaction history."""
+    balance: int
+    transactions: List[CreditTransactionResponse]
+    total_count: int
+    page: int
+    page_size: int
+
+
+class InvoiceResponse(BaseModel):
+    """Invoice/receipt data."""
+    invoice_id: str
+    invoice_number: Optional[str]
+    amount_due: int
+    amount_paid: int
+    currency: str
+    status: str
+    invoice_date: datetime
+    paid_at: Optional[datetime]
+    invoice_pdf_url: Optional[str]
+    hosted_invoice_url: Optional[str]
+    line_items: List[Dict[str, Any]]
+
+
+class InvoiceListResponse(BaseModel):
+    """List of invoices."""
+    invoices: List[InvoiceResponse]
+    total_count: int
+

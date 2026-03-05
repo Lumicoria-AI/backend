@@ -45,6 +45,8 @@ from backend.db.mongodb.repositories.billing_repository import (
     usage_tracking_repository,
     payment_event_repository,
 )
+from backend.db.mongodb.repositories.credits_repository import CreditLedgerRepository
+from backend.db.mongodb.repositories.invoice_repository import InvoiceRepository
 from backend.services.notification_service import notification_service
 import structlog
 
@@ -485,9 +487,26 @@ async def _handle_subscription_deleted(event: stripe.Event):
 
 
 async def _handle_payment_succeeded(event: stripe.Event):
-    """Handle invoice.payment_succeeded — record successful payment."""
+    """Handle invoice.payment_succeeded — record successful payment, save invoice, grant credits."""
     invoice = event.data.object
     customer_id = invoice.customer
+    
+    # Get user_id from subscription or customer metadata
+    user_id = None
+    sub = await subscription_repository.get_by_stripe_customer_id(customer_id)
+    if sub:
+        user_id = sub.user_id
+
+    # Save invoice to database
+    if user_id:
+        from backend.db.mongodb.repositories.billing_repository import get_invoice_repository
+        invoice_repo = await get_invoice_repository()
+        await invoice_repo.create_or_update_from_stripe(user_id, invoice)
+        
+        # Grant credits for payment
+        from backend.db.mongodb.repositories.billing_repository import get_credits_repository
+        credits_repo = await get_credits_repository()
+        await grant_credits_for_payment(user_id, credits_repo, invoice.amount_paid, invoice.id)
 
     # Update subscription period if this is a subscription invoice
     if invoice.subscription:
@@ -503,6 +522,7 @@ async def _handle_payment_succeeded(event: stripe.Event):
     logger.info(
         "Payment succeeded",
         customer_id=customer_id,
+        user_id=user_id,
         amount=invoice.amount_paid,
         currency=invoice.currency,
     )
@@ -727,3 +747,162 @@ async def check_model_access(user_id: str, model_provider: str) -> bool:
     limits = get_plan_limits(sub.plan)
     allowed_models = limits.get("allowed_models", ["default"])
     return model_provider in allowed_models or "default" in allowed_models
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Invoice & Receipt Export
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def get_user_invoices(
+    user_id: str,
+    invoice_repo: InvoiceRepository,
+    limit: int = 50,
+    skip: int = 0,
+    status: Optional[str] = None,
+):
+    """
+    Get user's invoices with pagination.
+    
+    Args:
+        user_id: User ID
+        invoice_repo: Invoice repository instance
+        limit: Max invoices to return
+        skip: Skip count for pagination
+        status: Filter by status (paid, open, etc.)
+        
+    Returns:
+        InvoiceListResponse with paginated invoices
+    """
+    return await invoice_repo.get_user_invoices(user_id, limit, skip, status)
+
+
+async def get_invoice_pdf(
+    user_id: str,
+    invoice_id: str,
+    invoice_repo: InvoiceRepository,
+) -> Optional[str]:
+    """
+    Get Stripe-hosted PDF URL for an invoice.
+    
+    Args:
+        user_id: User ID (for authorization check)
+        invoice_id: Stripe invoice ID
+        invoice_repo: Invoice repository instance
+        
+    Returns:
+        PDF URL if invoice exists and belongs to user, None otherwise
+    """
+    invoice = await invoice_repo.get_by_stripe_invoice_id(invoice_id)
+    
+    if not invoice or invoice.user_id != user_id:
+        logger.warning("Invoice access denied", user_id=user_id, invoice_id=invoice_id)
+        return None
+    
+    # If we have cached PDF URL, return it
+    if invoice.invoice_pdf_url:
+        return invoice.invoice_pdf_url
+    
+    # Otherwise, fetch from Stripe
+    try:
+        stripe_invoice = stripe.Invoice.retrieve(invoice_id)
+        pdf_url = stripe_invoice.get("invoice_pdf")
+        
+        # Update our record
+        if pdf_url:
+            await invoice_repo.collection.update_one(
+                {"stripe_invoice_id": invoice_id},
+                {"$set": {"invoice_pdf_url": pdf_url, "updated_at": datetime.utcnow()}}
+            )
+        
+        return pdf_url
+    except stripe.error.StripeError as e:
+        logger.error("Failed to fetch invoice PDF from Stripe", error=str(e))
+        return None
+
+
+async def export_invoice(
+    user_id: str,
+    invoice_id: str,
+    invoice_repo: InvoiceRepository,
+) -> Optional[Dict[str, Any]]:
+    """
+    Export invoice data for download (JSON format).
+    
+    Args:
+        user_id: User ID
+        invoice_id: Stripe invoice ID
+        invoice_repo: Invoice repository instance
+        
+    Returns:
+        Invoice data dict or None if not found/authorized
+    """
+    invoice = await invoice_repo.get_by_stripe_invoice_id(invoice_id)
+    
+    if not invoice or invoice.user_id != user_id:
+        logger.warning("Invoice export denied", user_id=user_id, invoice_id=invoice_id)
+        return None
+    
+    return {
+        "invoice_id": invoice.stripe_invoice_id,
+        "invoice_number": invoice.invoice_number,
+        "customer_id": invoice.stripe_customer_id,
+        "amount_due": invoice.amount_due / 100,  # Convert cents to dollars
+        "amount_paid": invoice.amount_paid / 100,
+        "currency": invoice.currency.upper(),
+        "status": invoice.status,
+        "invoice_date": invoice.invoice_date.isoformat(),
+        "paid_at": invoice.paid_at.isoformat() if invoice.paid_at else None,
+        "line_items": invoice.line_items,
+        "pdf_url": invoice.invoice_pdf_url,
+        "hosted_url": invoice.hosted_invoice_url,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Credits Ledger
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def get_credit_balance(user_id: str, credits_repo: CreditLedgerRepository) -> int:
+    """Get user's current credit balance."""
+    return await credits_repo.get_balance(user_id)
+
+
+async def get_credit_ledger(
+    user_id: str,
+    credits_repo: CreditLedgerRepository,
+    limit: int = 50,
+    skip: int = 0,
+):
+    """Get user's credit transaction history."""
+    return await credits_repo.get_ledger(user_id, limit, skip)
+
+
+async def grant_credits_for_payment(
+    user_id: str,
+    credits_repo: CreditLedgerRepository,
+    amount_paid: int,
+    stripe_invoice_id: str,
+):
+    """
+    Grant credits when user makes a payment.
+    Conversion rate: $1 = 100 credits
+    """
+    from backend.models.billing import TransactionType
+    
+    credits_amount = amount_paid  # amount_paid is already in cents = credits
+    
+    await credits_repo.grant_credits(
+        user_id=user_id,
+        amount=credits_amount,
+        description=f"Payment received (Invoice: {stripe_invoice_id})",
+        transaction_type=TransactionType.CREDIT,
+        metadata={"stripe_invoice_id": stripe_invoice_id},
+    )
+    
+    logger.info(
+        "Credits granted for payment",
+        user_id=user_id,
+        credits=credits_amount,
+        invoice_id=stripe_invoice_id,
+    )
+

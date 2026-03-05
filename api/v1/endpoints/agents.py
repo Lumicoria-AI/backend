@@ -21,6 +21,7 @@ from backend.models.mongodb_models import (
     AgentStatus
 )
 from backend.core.security import rate_limit
+from backend.core.billing import enforce_agent_limit, require_subscription, BillingCheck
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Import the AgentService and agent implementations
@@ -157,9 +158,10 @@ async def get_agent(
 async def chat_with_agent(
     agent_id: str,
     request: Request,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    billing: BillingCheck = Depends(enforce_agent_limit)
 ) -> Any:
-    """Chat with an agent."""
+    """Chat with an agent with billing enforcement."""
     try:
         data = await request.json()
         message = data.get("message")
@@ -189,9 +191,10 @@ async def chat_with_agent(
 async def execute_agent_task(
     agent_id: str,
     request: Request,
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
+    billing: BillingCheck = Depends(enforce_agent_limit)
 ) -> Any:
-    """Execute an agent task."""
+    """Execute an agent task with billing enforcement."""
     try:
         data = await request.json()
         task = data.get("task")

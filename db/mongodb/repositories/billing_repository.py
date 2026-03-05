@@ -434,3 +434,24 @@ class PaymentEventRepository:
 subscription_repository = SubscriptionRepository()
 usage_tracking_repository = UsageTrackingRepository()
 payment_event_repository = PaymentEventRepository()
+
+
+# Import and initialize credits and invoice repositories
+async def get_credits_repository():
+    """Get credits repository with lazy initialization."""
+    from backend.db.mongodb.mongodb import MongoDB
+    from backend.db.mongodb.repositories.credits_repository import CreditLedgerRepository
+    collection = await MongoDB.get_collection("credit_ledger")
+    repo = CreditLedgerRepository(collection)
+    await repo.ensure_indexes()
+    return repo
+
+
+async def get_invoice_repository():
+    """Get invoice repository with lazy initialization."""
+    from backend.db.mongodb.mongodb import MongoDB
+    from backend.db.mongodb.repositories.invoice_repository import InvoiceRepository
+    collection = await MongoDB.get_collection("invoices")
+    repo = InvoiceRepository(collection)
+    await repo.ensure_indexes()
+    return repo

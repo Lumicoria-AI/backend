@@ -282,11 +282,21 @@ async def ask_lumicoria_stream(
     async def event_stream() -> AsyncGenerator[str, None]:
         full_response = ""
         agent_key = "general"
-        try:
-            # 1. Conversation history
-            history = await conversation_memory.get_conversation_history(conversation_id, limit=6)
 
-            # 2. Route
+        # ── Step 1: fetch history BEFORE saving this turn (avoids it appearing in LLM context twice) ──
+        try:
+            history = await conversation_memory.get_conversation_history(conversation_id, limit=6)
+        except Exception:
+            history = []
+
+        # ── Step 2: persist user message immediately — guaranteed even if streaming fails ──
+        await conversation_memory.save_message(
+            conversation_id=conversation_id, user_id=user_id,
+            role="user", content=request.query,
+        )
+
+        try:
+            # ── Step 3: Route intent ──
             intent_router = await get_router()
             route_result = await intent_router.route(
                 message=request.query,
@@ -298,7 +308,7 @@ async def ask_lumicoria_stream(
             # First frame: metadata
             yield f"data: {json.dumps({'type': 'meta', 'conversation_id': conversation_id, 'agent_used': agent_key, 'confidence': confidence})}\n\n"
 
-            # 3. Get agent
+            # ── Step 4: Resolve agent ──
             try:
                 agent = agent_service.get_agent(agent_key)
             except (ValueError, KeyError):
@@ -309,12 +319,11 @@ async def ask_lumicoria_stream(
                     agent = GeneralAgent({})
                 agent_key = "general"
 
-            # 4. Stream via the provider's stream() method if available
+            # ── Step 5: Stream or fallback ──
             from ....ai_models.base import LLMConfig
             llm = getattr(agent, "llm_client", None) or getattr(agent, "perplexity_client", None)
 
             if llm and hasattr(llm, "stream"):
-                # Build messages the same way base_agent does
                 system_prompt = getattr(agent, "system_prompt", None) or ""
                 messages = []
                 if system_prompt:
@@ -324,13 +333,13 @@ async def ask_lumicoria_stream(
                         messages.append({"role": m.get("role", "user"), "content": m.get("content", "")})
                 messages.append({"role": "user", "content": request.query})
 
-                cfg = LLMConfig(temperature=0.7, max_tokens=None)  # None = use model's native max (65k for gemini-2.5-flash)
+                cfg = LLMConfig(temperature=0.7, max_tokens=None)  # None = model's native max (65k for gemini-2.5-flash)
                 async for chunk in llm.stream(messages, config=cfg):
                     if chunk.content:
                         full_response += chunk.content
                         yield f"data: {json.dumps({'type': 'delta', 'text': chunk.content})}\n\n"
             else:
-                # Fallback: call process_async and emit whole response as a single delta
+                # Fallback: process_async → single delta
                 agent_input = {
                     "query": request.query,
                     "content": request.query,
@@ -345,27 +354,33 @@ async def ask_lumicoria_stream(
                 full_response = normalized["response"]
                 yield f"data: {json.dumps({'type': 'delta', 'text': full_response})}\n\n"
 
-            # 5. Done frame
-            processing_time = round(time.time() - start_time, 2)
-            yield f"data: {json.dumps({'type': 'done', 'processing_time': processing_time})}\n\n"
-
-            # 6. Persist to memory (non-blocking concurrent tasks)
-            import asyncio
-            asyncio.create_task(conversation_memory.save_message(
-                conversation_id=conversation_id, user_id=user_id,
-                role="user", content=request.query,
-            ))
-            asyncio.create_task(conversation_memory.save_message(
-                conversation_id=conversation_id, user_id=user_id,
-                role="assistant", content=full_response, agent=agent_key,
-            ))
+            # ── Step 6: Persist assistant message with await (NOT create_task) before done frame ──
+            if full_response:
+                await conversation_memory.save_message(
+                    conversation_id=conversation_id, user_id=user_id,
+                    role="assistant", content=full_response, agent=agent_key,
+                )
             if not request.conversation_id:
-                asyncio.create_task(conversation_memory.generate_conversation_title(
+                import asyncio as _asyncio
+                _asyncio.create_task(conversation_memory.generate_conversation_title(
                     conversation_id=conversation_id, first_message=request.query,
                 ))
 
+            # ── Step 7: Done frame ──
+            processing_time = round(time.time() - start_time, 2)
+            yield f"data: {json.dumps({'type': 'done', 'processing_time': processing_time})}\n\n"
+
         except Exception as e:
             logger.error("stream_chat_error", error=str(e), user_id=user_id)
+            # Save any partial assistant content so the conversation is still recoverable
+            if full_response:
+                try:
+                    await conversation_memory.save_message(
+                        conversation_id=conversation_id, user_id=user_id,
+                        role="assistant", content=full_response, agent=agent_key,
+                    )
+                except Exception:
+                    pass
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
     return StreamingResponse(
