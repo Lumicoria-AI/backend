@@ -62,43 +62,141 @@ async def lifespan(app: FastAPI):
     logger.info("Starting up application", environment=settings.ENVIRONMENT)
     
     try:
+        logger.info("=" * 60)
+        logger.info("lumicoria_startup_begin", environment=settings.ENVIRONMENT, version=settings.VERSION)
+        logger.info("=" * 60)
+
         # Create upload directory if it doesn't exist
         upload_dir = Path(settings.UPLOAD_DIR)
         upload_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Initialize MongoDB
-        await init_mongodb()
-        logger.info("MongoDB initialized successfully")
 
-        # Initialize Postgres (optional)
-        await init_postgres()
-        
-        # Initialize agent service
-        await init_agent_service()
-        logger.info("Agent service initialized successfully")
+        # ── Databases ────────────────────────────────────────────
+        logger.info("─" * 40)
+        logger.info("connecting_databases")
 
-        # Initialize Cassandra (optional)
-        await CassandraClient.connect()
-        
-        # Initialize other services
-        from backend.services.context_service import initialize_context_service
-        from backend.services.document_processor import document_processor
-        
-        logger.info("Initializing context service and document processor")
-        await initialize_context_service()
-        await document_processor.initialize()
-        logger.info("Services initialized successfully")
+        # MongoDB
+        try:
+            await init_mongodb()
+            logger.info("service_connected", service="MongoDB", host=settings.db.MONGODB_URI, status="ok")
+        except Exception as e:
+            logger.error("service_connection_failed", service="MongoDB", error=str(e))
+            raise
 
-        # Initialize S3 storage service (MinIO + R2 dual-write)
+        # Redis
+        try:
+            import redis as _redis
+            r = _redis.Redis(
+                host=settings.db.REDIS_HOST,
+                port=settings.db.REDIS_PORT,
+                password=settings.db.REDIS_PASSWORD,
+                db=settings.db.REDIS_DB,
+                socket_connect_timeout=3,
+            )
+            r.ping()
+            r.close()
+            logger.info("service_connected", service="Redis", host=f"{settings.db.REDIS_HOST}:{settings.db.REDIS_PORT}", status="ok")
+        except Exception as e:
+            logger.warning("service_connection_failed", service="Redis", error=str(e))
+
+        # Postgres (optional)
+        try:
+            await init_postgres()
+            if settings.POSTGRES_ENABLED and settings.SQLALCHEMY_DATABASE_URI:
+                logger.info("service_connected", service="PostgreSQL", status="ok")
+            else:
+                logger.info("service_skipped", service="PostgreSQL", reason="not enabled")
+        except Exception as e:
+            logger.warning("service_connection_failed", service="PostgreSQL", error=str(e))
+
+        # Cassandra (optional)
+        try:
+            await CassandraClient.connect()
+            if settings.db.CASSANDRA_ENABLED:
+                logger.info("service_connected", service="Cassandra", status="ok")
+            else:
+                logger.info("service_skipped", service="Cassandra", reason="not enabled")
+        except Exception as e:
+            logger.warning("service_skipped", service="Cassandra", reason=str(e))
+
+        # ── Vector Store ─────────────────────────────────────────
+        logger.info("─" * 40)
+        logger.info("connecting_vector_store")
+
+        try:
+            if settings.db.VECTOR_STORE_ENABLED:
+                import httpx
+                vector_url = settings.db.VECTOR_STORE_URL or "http://localhost:8081"
+                vector_type = getattr(settings.db, "VECTOR_STORE_TYPE", "weaviate")
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    # Health check endpoint varies by provider
+                    health_endpoints = {
+                        "weaviate": f"{vector_url}/v1/.well-known/ready",
+                        "qdrant": f"{vector_url}/readyz",
+                        "chroma": f"{vector_url}/api/v1/heartbeat",
+                    }
+                    health_url = health_endpoints.get(vector_type, f"{vector_url}/v1/.well-known/ready")
+                    resp = await client.get(health_url)
+                    if resp.status_code == 200:
+                        logger.info("service_connected", service="VectorStore", provider=vector_type, url=vector_url, status="ok")
+                    else:
+                        logger.warning("service_degraded", service="VectorStore", provider=vector_type, url=vector_url, status_code=resp.status_code)
+            else:
+                logger.info("service_skipped", service="VectorStore", reason="not enabled")
+        except Exception as e:
+            logger.warning("service_connection_failed", service="VectorStore", error=str(e))
+
+        # ── S3 / Object Storage ──────────────────────────────────
+        logger.info("─" * 40)
+        logger.info("connecting_object_storage")
+
         from backend.services.storage_service import storage_service
         try:
             await storage_service.initialize()
-            logger.info("Storage service initialized (MinIO + R2)")
-        except Exception as storage_err:
-            logger.warning("Storage service init failed — file uploads will be unavailable", error=str(storage_err))
+            logger.info("service_connected", service="MinIO (S3)", endpoint=settings.s3.MINIO_ENDPOINT, bucket=settings.s3.MINIO_BUCKET, status="ok")
+            if settings.s3.DUAL_WRITE_ENABLED and settings.s3.R2_ENDPOINT:
+                logger.info("service_connected", service="Cloudflare R2 (backup)", endpoint=settings.s3.R2_ENDPOINT, status="ok")
+            else:
+                logger.info("service_skipped", service="Cloudflare R2 (backup)", reason="not configured")
+        except Exception as e:
+            logger.warning("service_connection_failed", service="MinIO (S3)", error=str(e))
+
+        # ── RAG & Document Processing ────────────────────────────
+        logger.info("─" * 40)
+        logger.info("initializing_rag_pipeline")
+
+        from backend.services.context_service import initialize_context_service
+        from backend.services.document_processor import document_processor
+
+        try:
+            await initialize_context_service()
+            logger.info("service_initialized", service="ContextService (RAG)", status="ok")
+        except Exception as e:
+            logger.warning("service_init_failed", service="ContextService (RAG)", error=str(e))
+
+        try:
+            await document_processor.initialize()
+            pymupdf_status = "available" if getattr(document_processor, '_has_pymupdf', True) else "unavailable (fallback mode)"
+            logger.info("service_initialized", service="DocumentProcessor", pymupdf=pymupdf_status, status="ok")
+        except Exception as e:
+            logger.warning("service_init_failed", service="DocumentProcessor", error=str(e))
+
+        # ── Agent Service ────────────────────────────────────────
+        logger.info("─" * 40)
+        logger.info("initializing_agents")
+
+        try:
+            await init_agent_service()
+            logger.info("service_initialized", service="AgentService", status="ok")
+        except Exception as e:
+            logger.warning("service_init_failed", service="AgentService", error=str(e))
+
+        # ── Startup Complete ─────────────────────────────────────
+        logger.info("=" * 60)
+        logger.info("lumicoria_startup_complete", status="ready")
+        logger.info("=" * 60)
 
     except Exception as e:
-        logger.error(f"Error during startup: {str(e)}")
+        logger.error("startup_fatal_error", error=str(e))
         raise
     
     yield

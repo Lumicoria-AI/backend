@@ -10,7 +10,7 @@ import uuid
 import structlog
 
 from backend.api.deps import get_current_active_user
-from backend.db.mongodb.repositories.document_repository import document_repository
+from backend.db.mongodb.repositories.document_repository import get_document_repository
 from backend.db.mongodb.repositories.task_repository import task_repository
 from backend.db.mongodb.repositories.permission_repository import permission_repository
 from backend.services.ai_model_service import ai_model_service
@@ -32,22 +32,55 @@ from backend.models.task import TaskCreate
 
 router = APIRouter()
 
+async def _get_doc_repo():
+    """Lazily resolve the document repository (needs async init)."""
+    return await get_document_repository()
+
+def _serialize_doc(doc) -> dict:
+    """Convert a Document model (with ObjectId fields) to a JSON-safe dict."""
+    data = doc.model_dump(by_alias=True) if hasattr(doc, "model_dump") else dict(doc)
+    # Convert ObjectId fields to strings
+    for field in ("_id", "id", "organization_id", "created_by"):
+        if field in data and data[field] is not None:
+            data[field] = str(data[field])
+    # Ensure 'id' is present
+    if "_id" in data:
+        data["id"] = data.pop("_id")
+    return data
+
 class DocumentResponse(BaseModel):
     id: str
     name: str
-    description: Optional[str]
+    description: Optional[str] = None
     document_type: DocumentType
     status: DocumentStatus
     organization_id: str
     created_by: str
     created_at: datetime
-    updated_at: Optional[datetime]
-    metadata: Optional[Dict[str, Any]]
-    file_url: Optional[str]
-    file_type: Optional[str]
-    file_size: Optional[int]
-    extraction_status: Optional[str]
-    extraction_result: Optional[Dict[str, Any]]
+    updated_at: Optional[datetime] = None
+    metadata: Optional[Dict[str, Any]] = None
+    file_url: Optional[str] = None
+    mime_type: Optional[str] = None
+    file_size: Optional[int] = None
+    extraction_status: Optional[str] = None
+    extraction_result: Optional[Dict[str, Any]] = None
+
+    model_config = {"from_attributes": True}
+
+    @classmethod
+    def from_document(cls, doc) -> "DocumentResponse":
+        """Convert a Document model (with ObjectId fields) to a response."""
+        data = doc.model_dump() if hasattr(doc, "model_dump") else doc.__dict__
+        # Convert ObjectId fields to strings
+        for field in ("id", "_id", "organization_id", "created_by"):
+            if field in data and data[field] is not None:
+                data[field] = str(data[field])
+        # Map _id to id
+        if "_id" in data and "id" not in data:
+            data["id"] = data.pop("_id")
+        elif "_id" in data:
+            data.pop("_id")
+        return cls(**data)
 
 class RecentDocumentSummary(BaseModel):
     id: str
@@ -67,8 +100,8 @@ class DocumentSummaryResponse(BaseModel):
     summary_by_status: List[Dict[str, Any]]
     summary_by_type: List[Dict[str, Any]]
 
-@router.get("", response_model=List[DocumentResponse])
-@router.get("/", response_model=List[DocumentResponse])
+@router.get("", response_model=None)
+@router.get("/", response_model=None)
 async def list_documents(
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=500),
@@ -77,14 +110,14 @@ async def list_documents(
     """
     List all documents owned by the current user.
     """
-    documents = await document_repository.get_documents_by_user(
+    documents = await (await _get_doc_repo()).get_documents_by_user(
         user_id=str(current_user.id),
         skip=skip,
         limit=limit
     )
-    return documents
+    return [_serialize_doc(d) for d in documents]
 
-@router.post("/upload", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/upload", response_model=None, status_code=status.HTTP_201_CREATED)
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -99,7 +132,7 @@ async def upload_document(
     (chunking, embedding, vector store ingestion).
     """
     user_id = str(current_user.id)
-    org_id = current_user.organization_id or user_id
+    org_id = getattr(current_user, "organization_id", None) or user_id
 
     # Read file content
     await file.seek(0)
@@ -138,14 +171,14 @@ async def upload_document(
         "organization_id": org_id,
         "created_by": user_id,
         "file_url": s3_key,
-        "file_type": file.content_type,
+        "mime_type": file.content_type or "application/octet-stream",
         "file_size": file_size,
         "metadata": {**metadata_dict, "s3_key": s3_key, "original_filename": safe_filename},
         "status": DocumentStatus.UPLOADED.value,
     }
 
     try:
-        document = await document_repository.create_document(document_data)
+        document = await (await _get_doc_repo()).create_document(document_data)
     except Exception as e:
         logger.error("Failed to create document record", error=str(e))
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to save document metadata")
@@ -154,7 +187,7 @@ async def upload_document(
     async def _process_upload(doc_id_str: str, content: bytes, filename: str):
         temp_path = None
         try:
-            await document_repository.update_document(
+            await (await _get_doc_repo()).update_document(
                 doc_id_str, org_id, {"status": DocumentStatus.PROCESSING.value}
             )
 
@@ -172,7 +205,7 @@ async def upload_document(
             )
 
             if result.get("status") == "success":
-                await document_repository.update_document(doc_id_str, org_id, {
+                await (await _get_doc_repo()).update_document(doc_id_str, org_id, {
                     "status": DocumentStatus.PROCESSED.value,
                     "extraction_status": "completed",
                     "metadata.chunk_count": result.get("chunk_count", 0),
@@ -180,7 +213,7 @@ async def upload_document(
                 })
                 logger.info("Document processed", document_id=doc_id_str, chunks=result.get("chunk_count"))
             else:
-                await document_repository.update_document(doc_id_str, org_id, {
+                await (await _get_doc_repo()).update_document(doc_id_str, org_id, {
                     "status": DocumentStatus.FAILED.value,
                     "extraction_status": "failed",
                     "extraction_error": result.get("error", "Unknown processing error"),
@@ -188,7 +221,7 @@ async def upload_document(
         except Exception as proc_err:
             logger.error("Background processing failed", document_id=doc_id_str, error=str(proc_err))
             try:
-                await document_repository.update_document(doc_id_str, org_id, {
+                await (await _get_doc_repo()).update_document(doc_id_str, org_id, {
                     "status": DocumentStatus.FAILED.value,
                     "extraction_error": str(proc_err),
                 })
@@ -201,7 +234,7 @@ async def upload_document(
     background_tasks.add_task(_process_upload, str(document.id), file_content, safe_filename)
 
     logger.info("Document uploaded to S3", document_id=str(document.id), s3_key=s3_key)
-    return document
+    return _serialize_doc(document)
 
 
 @router.get("/{document_id}/presigned-url")
@@ -212,8 +245,8 @@ async def get_presigned_url(
     """
     Get a presigned URL to view/download a document directly from S3.
     """
-    document = await document_repository.get_document_by_id(
-        document_id, organization_id=current_user.organization_id or str(current_user.id)
+    document = await (await _get_doc_repo()).get_document_by_id(
+        document_id, organization_id=getattr(current_user, "organization_id", None) or str(current_user.id)
     )
     if not document:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
@@ -229,7 +262,7 @@ async def get_presigned_url(
         logger.error("Failed to generate presigned URL", error=str(e), key=s3_key)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to generate download URL")
 
-@router.get("/{document_id}", response_model=DocumentResponse)
+@router.get("/{document_id}", response_model=None)
 async def get_document(
     document_id: str,
     current_user: User = Depends(get_current_active_user)
@@ -237,9 +270,9 @@ async def get_document(
     """
     Get document by ID.
     """
-    document = await document_repository.get_document_by_id(
+    document = await (await _get_doc_repo()).get_document_by_id(
         document_id,
-        organization_id=current_user.organization_id
+        organization_id=getattr(current_user, "organization_id", None) or str(current_user.id)
     )
     if not document:
         raise HTTPException(
@@ -247,15 +280,15 @@ async def get_document(
             detail="Document not found"
         )
 
-    if str(document.organization_id) != current_user.organization_id:
+    if str(document.organization_id) != getattr(current_user, "organization_id", None) or str(current_user.id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not authorized to access this document"
         )
 
-    return document
+    return _serialize_doc(document)
 
-@router.put("/{document_id}", response_model=DocumentResponse)
+@router.put("/{document_id}", response_model=None)
 async def update_document(
     document_id: str,
     document_in: DocumentUpdate,
@@ -266,7 +299,7 @@ async def update_document(
     """
     has_permission = await permission_repository.check_permission(
         user_id=current_user.id,
-        organization_id=current_user.organization_id,
+        organization_id=getattr(current_user, "organization_id", None) or str(current_user.id),
         resource_type="DOCUMENT",
         resource_id=document_id,
         permission_type="EDIT"
@@ -277,9 +310,9 @@ async def update_document(
             detail="Not enough permissions to update this document"
         )
 
-    document = await document_repository.update_document(
+    document = await (await _get_doc_repo()).update_document(
         document_id=document_id,
-        organization_id=current_user.organization_id,
+        organization_id=getattr(current_user, "organization_id", None) or str(current_user.id),
         update_data=document_in.dict(exclude_unset=True)
     )
     if not document:
@@ -287,7 +320,7 @@ async def update_document(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Document not found"
         )
-    return document
+    return _serialize_doc(document)
 
 @router.post("/{document_id}/extract")
 async def extract_document_data(
@@ -304,7 +337,7 @@ async def extract_document_data(
     """
     has_permission = await permission_repository.check_permission(
         user_id=current_user.id,
-        organization_id=current_user.organization_id,
+        organization_id=getattr(current_user, "organization_id", None) or str(current_user.id),
         resource_type="DOCUMENT",
         resource_id=document_id,
         permission_type="PROCESS"
@@ -317,9 +350,9 @@ async def extract_document_data(
 
     try:
         # Get document to check its status first
-        document = await document_repository.get_document_by_id(
+        document = await (await _get_doc_repo()).get_document_by_id(
             document_id=document_id,
-            organization_id=current_user.organization_id
+            organization_id=getattr(current_user, "organization_id", None) or str(current_user.id)
         )
         
         if not document:
@@ -336,32 +369,32 @@ async def extract_document_data(
             )
         
         # Update document status to PROCESSING
-        await document_repository.update_document(
+        await (await _get_doc_repo()).update_document(
             document_id=document_id,
-            organization_id=current_user.organization_id,
+            organization_id=getattr(current_user, "organization_id", None) or str(current_user.id),
             update_data={"$set": {"status": DocumentStatus.PROCESSING}}
         )
         
         # Extract data using Perplexity-powered document agent
-        result = await document_repository.extract_document_data(
+        result = await (await _get_doc_repo()).extract_document_data(
             document_id=document_id,
-            organization_id=current_user.organization_id,
+            organization_id=getattr(current_user, "organization_id", None) or str(current_user.id),
             extraction_config=extraction_config
         )
         
         # Update document status to PROCESSED
-        await document_repository.update_document(
+        await (await _get_doc_repo()).update_document(
             document_id=document_id,
-            organization_id=current_user.organization_id,
+            organization_id=getattr(current_user, "organization_id", None) or str(current_user.id),
             update_data={"$set": {"status": DocumentStatus.PROCESSED}}
         )
         
         return result
     except Exception as e:
         # Update document status to PROCESSING_FAILED
-        await document_repository.update_document(
+        await (await _get_doc_repo()).update_document(
             document_id=document_id,
-            organization_id=current_user.organization_id,
+            organization_id=getattr(current_user, "organization_id", None) or str(current_user.id),
             update_data={"$set": {"status": DocumentStatus.PROCESSING_FAILED}}
         )
         
@@ -396,7 +429,7 @@ async def query_document(
     """
     has_permission = await permission_repository.check_permission(
         user_id=current_user.id,
-        organization_id=current_user.organization_id,
+        organization_id=getattr(current_user, "organization_id", None) or str(current_user.id),
         resource_type="DOCUMENT",
         resource_id=document_id,
         permission_type="QUERY"
@@ -409,9 +442,9 @@ async def query_document(
 
     try:
         # Get document to check its status first
-        document = await document_repository.get_document_by_id(
+        document = await (await _get_doc_repo()).get_document_by_id(
             document_id=document_id,
-            organization_id=current_user.organization_id
+            organization_id=getattr(current_user, "organization_id", None) or str(current_user.id)
         )
         
         if not document:
@@ -421,9 +454,9 @@ async def query_document(
             )
         
         # Query document using Perplexity-powered document agent
-        result = await document_repository.query_document(
+        result = await (await _get_doc_repo()).query_document(
             document_id=document_id,
-            organization_id=current_user.organization_id,
+            organization_id=getattr(current_user, "organization_id", None) or str(current_user.id),
             query=query.query,
             filters=query.filters,
             include_extracted_data=query.include_extracted_data
@@ -470,7 +503,7 @@ async def create_tasks_from_document(
     """
     has_permission = await permission_repository.check_permission(
         user_id=current_user.id,
-        organization_id=current_user.organization_id,
+        organization_id=getattr(current_user, "organization_id", None) or str(current_user.id),
         resource_type="DOCUMENT",
         resource_id=document_id,
         permission_type="PROCESS"
@@ -483,9 +516,9 @@ async def create_tasks_from_document(
 
     try:
         # Get document to check its status first
-        document = await document_repository.get_document_by_id(
+        document = await (await _get_doc_repo()).get_document_by_id(
             document_id=document_id,
-            organization_id=current_user.organization_id
+            organization_id=getattr(current_user, "organization_id", None) or str(current_user.id)
         )
         
         if not document:
@@ -498,9 +531,9 @@ async def create_tasks_from_document(
         config_dict = task_config.dict() if task_config else {}
         
         # Create tasks using Perplexity-powered document agent
-        tasks = await document_repository.create_tasks_from_document(
+        tasks = await (await _get_doc_repo()).create_tasks_from_document(
             document_id=document_id,
-            organization_id=current_user.organization_id,
+            organization_id=getattr(current_user, "organization_id", None) or str(current_user.id),
             created_by=current_user.id,
             task_config=config_dict
         )
@@ -521,7 +554,7 @@ async def create_tasks_from_document(
             detail=f"Failed to create tasks: {str(e)}"
         )
 
-@router.get("/search", response_model=List[DocumentResponse])
+@router.get("/search", response_model=None)
 async def search_documents(
     query: Optional[str] = Query(None, description="Text search query", min_length=1),
     status: Optional[DocumentStatus] = Query(None),
@@ -533,21 +566,15 @@ async def search_documents(
     """
     Search documents using text search and filters.
     """
-    if not current_user.organization_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User does not belong to an organization"
-        )
-
-    documents = await document_repository.get_organization_documents(
-        organization_id=current_user.organization_id,
+    documents = await (await _get_doc_repo()).get_organization_documents(
+        organization_id=getattr(current_user, "organization_id", None) or str(current_user.id),
         status=status,
         document_type=document_type,
         search_query=query,
         skip=skip,
         limit=limit
     )
-    return documents
+    return [_serialize_doc(d) for d in documents]
 
 @router.get("/summary", response_model=DocumentSummaryResponse)
 async def get_document_summary(
@@ -556,13 +583,7 @@ async def get_document_summary(
     """
     Get summary statistics for documents in the organization.
     """
-    if not current_user.organization_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User does not belong to an organization"
-        )
-
-    summary = await document_repository.get_document_summary(organization_id=current_user.organization_id)
+    summary = await (await _get_doc_repo()).get_document_summary(organization_id=getattr(current_user, "organization_id", None) or str(current_user.id))
     return summary
 
 @router.get("/analytics", response_model=Dict[str, Any])
@@ -573,8 +594,8 @@ async def get_document_analytics(
     """
     Get document processing analytics.
     """
-    analytics = await document_repository.get_document_analytics(
-        organization_id=current_user.organization_id,
+    analytics = await (await _get_doc_repo()).get_document_analytics(
+        organization_id=getattr(current_user, "organization_id", None) or str(current_user.id),
         time_range=time_range
     )
     return analytics
@@ -587,14 +608,8 @@ async def get_recent_documents(
     """
     Get a list of recent documents with summary counts.
     """
-    if not current_user.organization_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User does not belong to an organization"
-        )
-
-    recent_documents_data = await document_repository.get_recent_documents_with_counts(
-        organization_id=current_user.organization_id,
+    recent_documents_data = await (await _get_doc_repo()).get_recent_documents_with_counts(
+        organization_id=getattr(current_user, "organization_id", None) or str(current_user.id),
         limit=limit
     )
 

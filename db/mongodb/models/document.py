@@ -1,9 +1,24 @@
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Annotated
 from enum import Enum
-from pydantic import BaseModel, Field, GetJsonSchemaHandler
-from pydantic.json_schema import JsonSchemaValue
+from pydantic import BaseModel, Field, PlainValidator, PlainSerializer
 from bson import ObjectId
+
+
+def _validate_object_id(v: Any) -> ObjectId:
+    if isinstance(v, ObjectId):
+        return v
+    if isinstance(v, str) and ObjectId.is_valid(v):
+        return ObjectId(v)
+    raise ValueError(f"Invalid ObjectId: {v}")
+
+
+PyObjectId = Annotated[
+    ObjectId,
+    PlainValidator(_validate_object_id),
+    PlainSerializer(lambda v: str(v), return_type=str),
+]
+
 
 class DocumentType(str, Enum):
     PDF = "pdf"
@@ -21,33 +36,14 @@ class DocumentStatus(str, Enum):
     FAILED = "failed"
     ARCHIVED = "archived"
 
-class PyObjectId(ObjectId):
-    @classmethod
-    def __get_validators__(cls):
-        yield cls.validate
-
-    @classmethod
-    def validate(cls, v):
-        if not ObjectId.is_valid(v):
-            raise ValueError("Invalid ObjectId")
-        return ObjectId(v)
-
-    @classmethod
-    def __get_pydantic_json_schema__(
-        cls,
-        schema_generator: Any,
-        property_schema: Any,
-    ) -> Any:
-        return { "type": "string" }
-
 class DocumentBase(BaseModel):
     name: str
     document_type: DocumentType
     organization_id: PyObjectId
     created_by: PyObjectId
-    file_url: str
-    file_size: int
-    mime_type: str
+    file_url: str = ""
+    file_size: int = 0
+    mime_type: Optional[str] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 class DocumentCreate(DocumentBase):
@@ -63,7 +59,7 @@ class DocumentUpdate(BaseModel):
     extraction_error: Optional[str] = None
 
 class Document(DocumentBase):
-    id: PyObjectId = Field(default_factory=PyObjectId, alias="_id")
+    id: PyObjectId = Field(default_factory=ObjectId, alias="_id")
     status: DocumentStatus = DocumentStatus.UPLOADED
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

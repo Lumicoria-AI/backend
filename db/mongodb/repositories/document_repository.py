@@ -29,7 +29,7 @@ class DocumentRepository(BaseRepository[Document]):
         return self._agent_service
 
     @classmethod
-    async def create(cls) -> 'DocumentRepository':
+    async def create_instance(cls) -> 'DocumentRepository':
         db = await get_mongodb()
         return cls(db)
 
@@ -40,7 +40,7 @@ class DocumentRepository(BaseRepository[Document]):
         await collection.create_index("created_by")
         await collection.create_index("status")
         await collection.create_index("document_type")
-        await collection.create_index("created_at", DESCENDING)
+        await collection.create_index([("created_at", DESCENDING)])
         # Compound indexes for filtering and sorting
         await collection.create_index([
             ("organization_id", ASCENDING),
@@ -528,5 +528,5 @@ document_repository: Optional[DocumentRepository] = None
 async def get_document_repository() -> DocumentRepository:
     global document_repository
     if document_repository is None:
-        document_repository = await DocumentRepository.create()
+        document_repository = await DocumentRepository.create_instance()
     return document_repository 
