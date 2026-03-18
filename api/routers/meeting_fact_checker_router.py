@@ -10,13 +10,11 @@ from backend.agents.meeting_fact_checker_agent import (
     VerificationStatus,
     ClaimSeverity
 )
-from backend.api.dependencies import get_agent_service
+from backend.core.dependencies import get_agent_service
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
-    prefix="/meeting-fact-checker",
-    tags=["meeting-fact-checker"],
     responses={404: {"description": "Not found"}},
 )
 

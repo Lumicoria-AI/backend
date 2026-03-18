@@ -88,7 +88,15 @@ async def lifespan(app: FastAPI):
         await initialize_context_service()
         await document_processor.initialize()
         logger.info("Services initialized successfully")
-        
+
+        # Initialize S3 storage service (MinIO + R2 dual-write)
+        from backend.services.storage_service import storage_service
+        try:
+            await storage_service.initialize()
+            logger.info("Storage service initialized (MinIO + R2)")
+        except Exception as storage_err:
+            logger.warning("Storage service init failed — file uploads will be unavailable", error=str(storage_err))
+
     except Exception as e:
         logger.error(f"Error during startup: {str(e)}")
         raise
@@ -360,6 +368,14 @@ async def health_check():
         # Vector store is optional — don't mark overall as unhealthy
         # healthy = False
 
+
+    # MinIO / S3 Storage
+    try:
+        from backend.services.storage_service import storage_service
+        if storage_service.is_initialized:
+            checks["minio"] = "ok" if await storage_service.health_check() else "error"
+    except Exception as e:
+        checks["minio"] = f"error: {str(e)}"
 
     status_code = 200 if healthy else 503
     return JSONResponse(

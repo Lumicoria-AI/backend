@@ -31,6 +31,12 @@ from backend.api.v1.endpoints import (
     device_tokens,
     billing,
 )
+from backend.api.routers.research_mentor import router as research_mentor_router
+from backend.api.routers.ethics_bias_router import router as ethics_bias_router
+from backend.api.routers.knowledge_graph_router import router as knowledge_graph_router
+from backend.api.routers.workspace_ergonomics_router import router as workspace_ergonomics_router
+from backend.api.routers.focus_flow_router import router as focus_flow_router
+from backend.api.routers.meeting_fact_checker_router import router as meeting_fact_checker_router
 
 api_router = APIRouter()
 
@@ -359,6 +365,90 @@ api_router.include_router(
         429: {"description": "Usage Limit Exceeded"},
         500: {"description": "Internal Server Error"},
         502: {"description": "Payment Gateway Error"},
+    }
+)
+
+# Research Mentor endpoints
+api_router.include_router(
+    research_mentor_router,
+    prefix="/research-mentor",
+    tags=["research mentor"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Ethics & Bias endpoints
+api_router.include_router(
+    ethics_bias_router,
+    prefix="/ethics-bias",
+    tags=["ethics bias"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Knowledge Graph endpoints
+api_router.include_router(
+    knowledge_graph_router,
+    prefix="/knowledge-graph",
+    tags=["knowledge graph"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Workspace Ergonomics endpoints
+api_router.include_router(
+    workspace_ergonomics_router,
+    prefix="/workspace-ergonomics",
+    tags=["workspace ergonomics"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Focus Flow endpoints
+api_router.include_router(
+    focus_flow_router,
+    prefix="/focus-flow",
+    tags=["focus flow"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Meeting Fact Checker endpoints
+api_router.include_router(
+    meeting_fact_checker_router,
+    prefix="/meeting-fact-checker",
+    tags=["meeting fact checker"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
     }
 )
 

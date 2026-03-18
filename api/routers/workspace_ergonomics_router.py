@@ -9,13 +9,11 @@ from backend.agents.workspace_ergonomics_agent import (
     ErgonomicCategory,
     IssueSeverity
 )
-from backend.api.dependencies import get_agent_service
+from backend.core.dependencies import get_agent_service
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
-    prefix="/workspace-ergonomics",
-    tags=["workspace-ergonomics"],
     responses={404: {"description": "Not found"}},
 )
 
@@ -99,8 +97,6 @@ async def analyze_workspace(
 @router.post("/analyze-image")
 async def analyze_workspace_image(
     file: UploadFile = File(...),
-    context: Dict[str, Any] = Field(default_factory=dict),
-    parameters: Dict[str, Any] = Field(default_factory=dict),
     agent_service = Depends(get_agent_service)
 ) -> Dict[str, Any]:
     """Analyze workspace conditions from uploaded image."""
@@ -117,8 +113,8 @@ async def analyze_workspace_image(
             "data": {
                 "image_data": image_data,
                 "current_conditions": {},
-                "context": context,
-                "parameters": parameters
+                "context": {},
+                "parameters": {}
             }
         })
         

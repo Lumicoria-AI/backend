@@ -4,14 +4,12 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 import logging
 
-from agents.ethics_bias_agent import EthicsBiasAgent, EthicsCategory, BiasType, IssueSeverity
-from api.dependencies import get_agent_service
+from backend.agents.ethics_bias_agent import EthicsBiasAgent, EthicsCategory, BiasType, IssueSeverity
+from backend.core.dependencies import get_agent_service
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
-    prefix="/ethics-bias",
-    tags=["ethics-bias"],
     responses={404: {"description": "Not found"}},
 )
 

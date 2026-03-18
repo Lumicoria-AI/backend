@@ -30,6 +30,13 @@ from langchain_community.document_loaders import (
 )
 from langchain_core.documents import Document as LangchainDocument
 
+# PyMuPDF for position-aware PDF extraction (optional — graceful fallback)
+try:
+    import fitz  # PyMuPDF
+    HAS_PYMUPDF = True
+except ImportError:
+    HAS_PYMUPDF = False
+
 from ..db.vector_stores import get_vector_store
 from ..core.config import settings
 from ..ai_models import get_embedding_client, LLMClient
@@ -41,6 +48,16 @@ class DocumentChunk(BaseModel):
     text: str
     metadata: Dict[str, Any] = Field(default_factory=dict)
     
+class PositionMetadata(BaseModel):
+    """Position data for a text chunk — enables citation linking."""
+    page_number: int = 0
+    block_index: int = 0
+    start_char: int = 0
+    end_char: int = 0
+    bbox: Optional[List[float]] = None  # [x0, y0, x1, y1]
+    page_width: Optional[float] = None
+    page_height: Optional[float] = None
+
 class ProcessedDocument(BaseModel):
     """Result of document processing."""
     document_id: str
@@ -307,20 +324,77 @@ class DocumentProcessor:
     async def _load_document(self, file_path: str, mime_type: str) -> List[LangchainDocument]:
         """Load a document using appropriate loader based on MIME type."""
         try:
-            # Get the appropriate loader
+            # For PDFs, prefer PyMuPDF for position-aware extraction
+            if mime_type == "application/pdf" and HAS_PYMUPDF:
+                return await asyncio.to_thread(self._load_pdf_with_positions, file_path)
+
+            # Fallback to LangChain loaders
             loader_class = self.loaders.get(mime_type)
             if not loader_class:
                 raise ValueError(f"Unsupported MIME type: {mime_type}")
-                
-            # Create and use the loader
+
             loader = loader_class(file_path)
             documents = loader.load()
-            
             return documents
-            
+
         except Exception as e:
             logger.error("Error loading document", error=str(e), file_path=file_path, mime_type=mime_type)
             raise
+
+    def _load_pdf_with_positions(self, file_path: str) -> List[LangchainDocument]:
+        """
+        Load a PDF using PyMuPDF with full position metadata per text block.
+        Each block gets page_number, block_index, and bounding box coordinates
+        so citations can link directly to the source location.
+        """
+        documents: List[LangchainDocument] = []
+
+        doc = fitz.open(file_path)
+        for page_idx in range(len(doc)):
+            page = doc[page_idx]
+            page_dict = page.get_text("dict", sort=True)
+            page_width = page_dict.get("width", page.rect.width)
+            page_height = page_dict.get("height", page.rect.height)
+
+            blocks = page_dict.get("blocks", [])
+            char_offset = 0
+
+            for block_idx, block in enumerate(blocks):
+                # Skip image blocks (type 1)
+                if block.get("type", 0) != 0:
+                    continue
+
+                # Gather text from all lines/spans in this block
+                block_text_parts: List[str] = []
+                for line in block.get("lines", []):
+                    line_text = ""
+                    for span in line.get("spans", []):
+                        line_text += span.get("text", "")
+                    block_text_parts.append(line_text)
+
+                block_text = "\n".join(block_text_parts).strip()
+                if not block_text:
+                    continue
+
+                bbox = block.get("bbox", [0, 0, page_width, page_height])
+
+                documents.append(LangchainDocument(
+                    page_content=block_text,
+                    metadata={
+                        "page_number": page_idx + 1,  # 1-indexed
+                        "block_index": block_idx,
+                        "start_char": char_offset,
+                        "end_char": char_offset + len(block_text),
+                        "bbox": list(bbox),
+                        "page_width": page_width,
+                        "page_height": page_height,
+                    },
+                ))
+                char_offset += len(block_text) + 1  # +1 for separator
+
+        doc.close()
+        logger.info("PDF loaded with positions", pages=page_idx + 1, blocks=len(documents), file=file_path)
+        return documents
     
     def _detect_mime_type(self, file_path: str) -> str:
         """Detect MIME type of a file based on extension."""
@@ -374,22 +448,33 @@ class DocumentProcessor:
             )
             
             chunked_docs = []
+            global_chunk_idx = 0
             for doc in documents:
                 # Combine document metadata with overall metadata
                 combined_metadata = {**metadata, **doc.metadata}
-                
+
                 # Split into chunks
                 chunks = text_splitter.split_text(doc.page_content)
-                
-                # Add chunk-specific metadata
-                for i, chunk_text in enumerate(chunks):
+
+                # Track character offsets within this document block
+                search_start = 0
+                for chunk_text in chunks:
                     chunk_metadata = combined_metadata.copy()
-                    chunk_metadata["chunk_id"] = i
-                    
+                    chunk_metadata["chunk_id"] = global_chunk_idx
+
+                    # Compute start_char/end_char within this block
+                    pos = doc.page_content.find(chunk_text, search_start)
+                    if pos != -1:
+                        base_start = combined_metadata.get("start_char", 0)
+                        chunk_metadata["start_char"] = base_start + pos
+                        chunk_metadata["end_char"] = base_start + pos + len(chunk_text)
+                        search_start = pos + len(chunk_text)
+
                     chunked_docs.append(DocumentChunk(
                         text=chunk_text,
-                        metadata=chunk_metadata
+                        metadata=chunk_metadata,
                     ))
+                    global_chunk_idx += 1
                     
             # Step 2: Get embeddings for all chunks
             await self.initialize()  # Ensure client is initialized

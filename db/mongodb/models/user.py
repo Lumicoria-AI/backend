@@ -83,6 +83,13 @@ class User(UserBase):
     updated_at: Optional[datetime] = None
     profile: Optional[UserProfile] = None
     settings: Optional[UserSettings] = None
+    # Onboarding fields
+    onboarding_completed: bool = False
+    onboarding_completed_at: Optional[datetime] = None
+    job_title: Optional[str] = None
+    company: Optional[str] = None
+    timezone: str = "UTC"
+    preferred_language: str = "en"
 
     model_config = {
         "json_encoders": {ObjectId: str},

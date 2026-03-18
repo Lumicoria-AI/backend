@@ -60,6 +60,32 @@ class DatabaseSettings(BaseSettings):
 
 
 # ---------------------------------------------------------------------------
+# S3 / Object Storage Settings (nested)
+# ---------------------------------------------------------------------------
+
+class S3Settings(BaseSettings):
+    """S3-compatible object storage with dual-write to MinIO + Cloudflare R2."""
+    model_config = ConfigDict(extra="allow", case_sensitive=True)
+
+    # MinIO (primary)
+    MINIO_ENDPOINT: str = "localhost:9000"
+    MINIO_ACCESS_KEY: str = "minioadmin"
+    MINIO_SECRET_KEY: str = "minioadmin"
+    MINIO_BUCKET: str = "lumicoria-documents"
+    MINIO_USE_SSL: bool = False
+
+    # Cloudflare R2 (backup — simultaneous dual-write)
+    R2_ENDPOINT: Optional[str] = None
+    R2_ACCESS_KEY: Optional[str] = None
+    R2_SECRET_KEY: Optional[str] = None
+    R2_BUCKET: str = "lumicoria-documents"
+
+    # Dual-write behaviour
+    DUAL_WRITE_ENABLED: bool = True
+    PRESIGNED_URL_EXPIRY: int = 3600  # seconds
+
+
+# ---------------------------------------------------------------------------
 # Rate Limiting Settings
 # ---------------------------------------------------------------------------
 
@@ -283,6 +309,7 @@ class Settings(BaseSettings):
 
     # ── Nested database config ─────────────────────────────────────────
     db: DatabaseSettings = Field(default_factory=DatabaseSettings)
+    s3: S3Settings = Field(default_factory=S3Settings)
 
     # ── PostgreSQL / SQLAlchemy (optional) ─────────────────────────────
     POSTGRES_ENABLED: bool = False

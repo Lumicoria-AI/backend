@@ -123,6 +123,27 @@ class DocumentRepository(BaseRepository[Document]):
         result = await self.delete_one(filters)
         return result.deleted_count > 0
 
+    async def get_documents_by_user(
+        self,
+        user_id: str,
+        skip: int = 0,
+        limit: int = 50,
+        sort_by: str = "created_at",
+        sort_order: int = DESCENDING
+    ) -> List[Document]:
+        """Get all documents owned by a specific user."""
+        try:
+            filters = {"created_by": ObjectId(user_id)}
+        except Exception:
+            filters = {"created_by": user_id}
+        sort_criteria = [(sort_by, sort_order)]
+        return await self.find_many(
+            filters,
+            skip=skip,
+            limit=limit,
+            sort=sort_criteria,
+        )
+
     async def get_organization_documents(
         self,
         organization_id: str,
@@ -156,6 +177,7 @@ class DocumentRepository(BaseRepository[Document]):
             # Projection for text search score if needed
             projection={"score": {"$meta": "textScore"}} if search_query and not sort_by else None
         )
+
 
     async def get_document_summary(
         self,

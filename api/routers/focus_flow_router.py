@@ -5,13 +5,11 @@ from datetime import datetime
 import logging
 
 from backend.agents.focus_flow_agent import FocusFlowAgent, FocusState, DistractionType, ProductivityTechnique
-from backend.api.dependencies import get_agent_service
+from backend.core.dependencies import get_agent_service
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
-    prefix="/focus-flow",
-    tags=["focus-flow"],
     responses={404: {"description": "Not found"}},
 )
 

@@ -1,229 +1,199 @@
-from typing import Any, List, Optional, Dict, Union
+from typing import Any, List, Optional, Dict
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Body
 from pydantic import BaseModel, Field
 from datetime import datetime
+from bson import ObjectId
+import structlog
 
 from backend.api.deps import get_current_active_user
 from backend.models.user import User
-from backend.services.project_manager import project_manager
+from backend.db.mongodb.mongodb import get_mongodb
 
 router = APIRouter()
+logger = structlog.get_logger(__name__)
+
+
+# ─── Pydantic Models ────────────────────────────────────────────────────────
 
 class ProjectCreate(BaseModel):
-    """Request model for creating a project."""
     title: str = Field(..., description="Project title")
-    description: str = Field(..., description="Project description")
-    due_date: Optional[Union[datetime, str]] = Field(None, description="Project due date (ISO format)")
+    description: Optional[str] = Field("", description="Project description")
+    due_date: Optional[str] = Field(None, description="Due date (ISO string)")
     status: Optional[str] = Field("Not Started", description="Project status")
-    integration_type: Optional[str] = Field("notion", description="Integration type (notion, etc.)")
-    integration_id: Optional[str] = Field(None, description="Specific integration ID to use")
+    color: Optional[str] = Field("#6366f1", description="Project colour")
 
-class ProjectDatabaseCreate(BaseModel):
-    """Request model for creating a project database."""
-    title: str = Field(..., description="Database title")
-    integration_type: Optional[str] = Field("notion", description="Integration type (notion, etc.)")
-    integration_id: Optional[str] = Field(None, description="Specific integration ID to use")
-    parent_id: Optional[str] = Field(None, description="Parent page/folder ID")
 
-class ProjectTaskCreate(BaseModel):
-    """Request model for creating a task."""
-    database_id: str = Field(..., description="Database ID")
-    task_name: str = Field(..., description="Task name")
-    description: str = Field(..., description="Task description")
-    due_date: Optional[Union[datetime, str]] = Field(None, description="Task due date (ISO format)")
-    status: Optional[str] = Field("Not Started", description="Task status")
-    priority: Optional[str] = Field("Medium", description="Task priority (Low, Medium, High)")
-    assigned_to: Optional[str] = Field(None, description="Person assigned to the task")
-    integration_type: Optional[str] = Field("notion", description="Integration type (notion, etc.)")
-    integration_id: Optional[str] = Field(None, description="Specific integration ID to use")
+class ProjectUpdate(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    due_date: Optional[str] = None
+    status: Optional[str] = None
+    color: Optional[str] = None
 
-class MeetingExport(BaseModel):
-    """Request model for exporting a meeting to a project tool."""
-    meeting_data: Dict[str, Any] = Field(..., description="Meeting data from MeetingAgent")
-    integration_type: Optional[str] = Field("notion", description="Integration type (notion, etc.)")
-    integration_id: Optional[str] = Field(None, description="Specific integration ID to use")
 
-class TasksQuery(BaseModel):
-    """Request model for querying tasks."""
-    database_id: str = Field(..., description="Database ID")
-    filter_status: Optional[str] = Field(None, description="Filter by status")
-    filter_priority: Optional[str] = Field(None, description="Filter by priority")
-    integration_type: Optional[str] = Field("notion", description="Integration type (notion, etc.)")
-    integration_id: Optional[str] = Field(None, description="Specific integration ID to use")
+class TaskCreate(BaseModel):
+    title: str
+    description: Optional[str] = ""
+    due_date: Optional[str] = None
+    status: Optional[str] = "Not Started"
+    priority: Optional[str] = "Medium"
+
 
 class ProjectResponse(BaseModel):
-    """Response model for project operations."""
-    status: str
-    message: str
-    project_id: Optional[str] = None
-    project_data: Optional[Dict[str, Any]] = None
+    id: str
+    user_id: str
+    title: str
+    description: Optional[str] = ""
+    due_date: Optional[str] = None
+    status: str = "Not Started"
+    color: str = "#6366f1"
+    tasks: List[Dict] = []
+    created_at: str
+    updated_at: str
 
-class DatabaseResponse(BaseModel):
-    """Response model for database operations."""
-    status: str
-    message: str
-    database_id: Optional[str] = None
-    database_data: Optional[Dict[str, Any]] = None
 
-class TaskResponse(BaseModel):
-    """Response model for task operations."""
-    status: str
-    message: str
-    task_id: Optional[str] = None
-    task_data: Optional[Dict[str, Any]] = None
+# ─── Helpers ─────────────────────────────────────────────────────────────────
 
-class TasksResponse(BaseModel):
-    """Response model for task queries."""
-    status: str
-    tasks: Optional[List[Dict[str, Any]]] = None
-    count: Optional[int] = None
-    message: Optional[str] = None
+async def _get_col():
+    db = await get_mongodb()
+    return db["lumicoria_projects"]
 
-class ExportResponse(BaseModel):
-    """Response model for meeting export."""
-    status: str
-    message: str
-    page_id: Optional[str] = None
-    page_data: Optional[Dict[str, Any]] = None
 
-@router.post("/projects", response_model=ProjectResponse)
+def _serialize(doc: dict) -> dict:
+    doc["id"] = str(doc.pop("_id"))
+    return doc
+
+
+# ─── Endpoints ───────────────────────────────────────────────────────────────
+
+@router.get("/projects", response_model=List[ProjectResponse])
+async def list_projects(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """List all projects for the authenticated user."""
+    col = await _get_col()
+    cursor = col.find(
+        {"user_id": str(current_user.id)},
+        sort=[("created_at", -1)],
+        skip=skip,
+        limit=limit,
+    )
+    docs = await cursor.to_list(length=limit)
+    return [_serialize(d) for d in docs]
+
+
+@router.post("/projects", response_model=ProjectResponse, status_code=status.HTTP_201_CREATED)
 async def create_project(
     project_data: ProjectCreate = Body(...),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
 ) -> Any:
-    """
-    Create a new project in the specified project management tool.
-    
-    This endpoint creates a project page or entry in the integrated project management 
-    system (e.g., Notion).
-    """
-    result = await project_manager.create_project(
-        organization_id=str(current_user.organization_id),
-        title=project_data.title,
-        description=project_data.description,
-        due_date=project_data.due_date,
-        status=project_data.status,
-        integration_type=project_data.integration_type,
-        integration_id=project_data.integration_id
-    )
-    
-    if result.get("status") == "error":
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=result.get("message", "Failed to create project")
-        )
-        
-    return result
+    """Create a new project."""
+    col = await _get_col()
+    now = datetime.utcnow().isoformat()
+    doc = {
+        "user_id": str(current_user.id),
+        "title": project_data.title,
+        "description": project_data.description or "",
+        "due_date": project_data.due_date,
+        "status": project_data.status or "Not Started",
+        "color": project_data.color or "#6366f1",
+        "tasks": [],
+        "created_at": now,
+        "updated_at": now,
+    }
+    result = await col.insert_one(doc)
+    doc["_id"] = result.inserted_id
+    return _serialize(doc)
 
-@router.post("/databases", response_model=DatabaseResponse)
-async def create_project_database(
-    database_data: ProjectDatabaseCreate = Body(...),
-    current_user: User = Depends(get_current_active_user)
-) -> Any:
-    """
-    Create a new project database or board in the specified project management tool.
-    
-    This endpoint creates a structured database for tracking projects in the integrated
-    project management system (e.g., Notion database).
-    """
-    result = await project_manager.create_project_database(
-        organization_id=str(current_user.organization_id),
-        title=database_data.title,
-        integration_type=database_data.integration_type,
-        integration_id=database_data.integration_id,
-        parent_id=database_data.parent_id
-    )
-    
-    if result.get("status") == "error":
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=result.get("message", "Failed to create project database")
-        )
-        
-    return result
 
-@router.post("/tasks", response_model=TaskResponse)
-async def add_task(
-    task_data: ProjectTaskCreate = Body(...),
-    current_user: User = Depends(get_current_active_user)
+@router.get("/projects/{project_id}", response_model=ProjectResponse)
+async def get_project(
+    project_id: str,
+    current_user: User = Depends(get_current_active_user),
 ) -> Any:
-    """
-    Add a task to a project database or board.
-    
-    This endpoint adds a task entry to the specified project database in the integrated
-    project management system.
-    """
-    result = await project_manager.add_task(
-        organization_id=str(current_user.organization_id),
-        database_id=task_data.database_id,
-        task_name=task_data.task_name,
-        description=task_data.description,
-        due_date=task_data.due_date,
-        status=task_data.status,
-        priority=task_data.priority,
-        assigned_to=task_data.assigned_to,
-        integration_type=task_data.integration_type,
-        integration_id=task_data.integration_id
-    )
-    
-    if result.get("status") == "error":
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=result.get("message", "Failed to add task")
-        )
-        
-    return result
+    """Get a project by ID."""
+    col = await _get_col()
+    try:
+        oid = ObjectId(project_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid project ID")
+    doc = await col.find_one({"_id": oid, "user_id": str(current_user.id)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return _serialize(doc)
 
-@router.post("/export-meeting", response_model=ExportResponse)
-async def export_meeting(
-    export_data: MeetingExport = Body(...),
-    current_user: User = Depends(get_current_active_user)
-) -> Any:
-    """
-    Export meeting data to a project management tool.
-    
-    This endpoint takes meeting data from MeetingAgent and exports it as a structured
-    page in the integrated project management system.
-    """
-    result = await project_manager.export_meeting_to_project(
-        organization_id=str(current_user.organization_id),
-        meeting_data=export_data.meeting_data,
-        integration_type=export_data.integration_type,
-        integration_id=export_data.integration_id
-    )
-    
-    if result.get("status") == "error":
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=result.get("message", "Failed to export meeting")
-        )
-        
-    return result
 
-@router.post("/query-tasks", response_model=TasksResponse)
-async def query_tasks(
-    query_data: TasksQuery = Body(...),
-    current_user: User = Depends(get_current_active_user)
+@router.put("/projects/{project_id}", response_model=ProjectResponse)
+async def update_project(
+    project_id: str,
+    update: ProjectUpdate = Body(...),
+    current_user: User = Depends(get_current_active_user),
 ) -> Any:
-    """
-    Query tasks from a project database or board.
-    
-    This endpoint retrieves tasks from the specified project database in the integrated
-    project management system with optional filtering.
-    """
-    result = await project_manager.get_tasks(
-        organization_id=str(current_user.organization_id),
-        database_id=query_data.database_id,
-        filter_status=query_data.filter_status,
-        filter_priority=query_data.filter_priority,
-        integration_type=query_data.integration_type,
-        integration_id=query_data.integration_id
+    """Update a project."""
+    col = await _get_col()
+    try:
+        oid = ObjectId(project_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid project ID")
+    update_data = {k: v for k, v in update.model_dump(exclude_unset=True).items() if v is not None}
+    update_data["updated_at"] = datetime.utcnow().isoformat()
+    doc = await col.find_one_and_update(
+        {"_id": oid, "user_id": str(current_user.id)},
+        {"$set": update_data},
+        return_document=True,
     )
-    
-    if result.get("status") == "error":
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=result.get("message", "Failed to query tasks")
-        )
-        
-    return result
+    if not doc:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return _serialize(doc)
+
+
+@router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_project(
+    project_id: str,
+    current_user: User = Depends(get_current_active_user),
+) -> None:
+    """Delete a project."""
+    col = await _get_col()
+    try:
+        oid = ObjectId(project_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid project ID")
+    result = await col.delete_one({"_id": oid, "user_id": str(current_user.id)})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+
+@router.post("/projects/{project_id}/tasks", response_model=ProjectResponse)
+async def add_task_to_project(
+    project_id: str,
+    task: TaskCreate = Body(...),
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """Add a task to a project."""
+    col = await _get_col()
+    try:
+        oid = ObjectId(project_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid project ID")
+    task_doc = {
+        "id": str(ObjectId()),
+        "title": task.title,
+        "description": task.description or "",
+        "due_date": task.due_date,
+        "status": task.status or "Not Started",
+        "priority": task.priority or "Medium",
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    doc = await col.find_one_and_update(
+        {"_id": oid, "user_id": str(current_user.id)},
+        {
+            "$push": {"tasks": task_doc},
+            "$set": {"updated_at": datetime.utcnow().isoformat()},
+        },
+        return_document=True,
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return _serialize(doc)

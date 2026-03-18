@@ -5,13 +5,11 @@ from datetime import datetime
 import logging
 
 from backend.agents.knowledge_graph_agent import KnowledgeGraphAgent, GraphNodeType, GraphRelationType
-from backend.api.dependencies import get_agent_service
+from backend.core.dependencies import get_agent_service
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(
-    prefix="/knowledge-graph",
-    tags=["knowledge-graph"],
     responses={404: {"description": "Not found"}},
 )
 

@@ -47,6 +47,9 @@ class RAGAgent(BaseAgent):
             "If the context doesn't contain relevant information, draw on your general knowledge "
             "but prioritize what's in the user's documents. "
             "Be clear when you're using information from their documents vs. your general knowledge.\n\n"
+            "IMPORTANT: When you use information from the context, cite the source using its number "
+            "in square brackets, e.g. [1], [2]. Place citations inline right after the relevant statement. "
+            "This helps the user trace information back to the original document.\n\n"
             "{context}"
         )
 
@@ -182,9 +185,9 @@ class RAGAgent(BaseAgent):
             if total_chars + chunk_chars > (self.max_context_tokens * 4):
                 break
                 
-            # Add source metadata
+            # Add source metadata with numbered citation
             source_info = self._get_source_info(chunk)
-            formatted_chunk = f"[CONTEXT {i+1}]\n{chunk_text}\nSource: {source_info}\n"
+            formatted_chunk = f"[{i+1}] {chunk_text}\n(Source: {source_info})\n"
             
             formatted_chunks.append(formatted_chunk)
             total_chars += chunk_chars
@@ -208,42 +211,40 @@ class RAGAgent(BaseAgent):
             return metadata.get("title", f"Document ({source_type})")
     
     def _extract_sources(self, context_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Extract source information from context chunks for citation."""
+        """Extract source information from context chunks for citation.
+
+        Includes position metadata (page_number, bbox) so the frontend
+        can scroll to and highlight the exact source location.
+        """
         sources = []
-        seen_sources = set()
-        
-        for chunk in context_chunks:
+
+        for i, chunk in enumerate(context_chunks):
             metadata = chunk.get("metadata", {})
-            source_type = chunk.get("source", "unknown")
-            
-            # Create a key to deduplicate sources
-            source_key = None
-            if source_type == "upload" or source_type == "drive":
-                source_key = metadata.get("document_id")
-            elif source_type == "web":
-                source_key = metadata.get("url")
-            elif source_type == "chat_history":
-                source_key = metadata.get("conversation_id")
-                
-            if not source_key or source_key in seen_sources:
-                continue
-                
-            seen_sources.add(source_key)
-            
+            source_type = chunk.get("source", metadata.get("source", "unknown"))
+
             source_info = {
+                "index": i + 1,
                 "type": source_type,
-                "title": metadata.get("title", "Unnamed document")
+                "title": metadata.get("title", "Unnamed document"),
+                # Position metadata for citation linking
+                "page_number": metadata.get("page_number"),
+                "bbox": metadata.get("bbox"),
+                "page_width": metadata.get("page_width"),
+                "page_height": metadata.get("page_height"),
+                "chunk_text": chunk.get("text", chunk.get("content", ""))[:200],
             }
-            
+
             # Add source-specific fields
             if source_type == "web":
                 source_info["url"] = metadata.get("url")
             elif source_type in ["upload", "drive"]:
                 source_info["document_id"] = metadata.get("document_id")
                 source_info["created_at"] = metadata.get("created_at")
-                
+            elif source_type == "chat_history":
+                source_info["conversation_id"] = metadata.get("conversation_id")
+
             sources.append(source_info)
-            
+
         return sources
 
     async def query_async(self, query: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:

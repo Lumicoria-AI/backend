@@ -1,9 +1,12 @@
 from typing import Any, List, Optional, Dict
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Query, Form, Body
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, UploadFile, File, Query, Form, Body
 from pydantic import BaseModel, Field
 from datetime import datetime
 from enum import Enum
 import json
+import os
+import tempfile
+import uuid
 import structlog
 
 from backend.api.deps import get_current_active_user
@@ -11,6 +14,8 @@ from backend.db.mongodb.repositories.document_repository import document_reposit
 from backend.db.mongodb.repositories.task_repository import task_repository
 from backend.db.mongodb.repositories.permission_repository import permission_repository
 from backend.services.ai_model_service import ai_model_service
+from backend.services.storage_service import storage_service
+from backend.services.context_service import context_service
 from backend.models.user import User
 from backend.models.document import (
     Document,
@@ -62,59 +67,167 @@ class DocumentSummaryResponse(BaseModel):
     summary_by_status: List[Dict[str, Any]]
     summary_by_type: List[Dict[str, Any]]
 
+@router.get("", response_model=List[DocumentResponse])
+@router.get("/", response_model=List[DocumentResponse])
+async def list_documents(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=500),
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """
+    List all documents owned by the current user.
+    """
+    documents = await document_repository.get_documents_by_user(
+        user_id=str(current_user.id),
+        skip=skip,
+        limit=limit
+    )
+    return documents
+
 @router.post("/upload", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
 async def upload_document(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     name: str = Form(...),
     description: Optional[str] = Form(None),
     document_type: DocumentType = Form(...),
     metadata: Optional[str] = Form(None),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_active_user),
 ) -> Any:
     """
-    Upload and process a new document.
+    Upload a document to S3 (MinIO + R2) and trigger background processing
+    (chunking, embedding, vector store ingestion).
     """
-    if not current_user.organization_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User does not belong to an organization"
-        )
+    user_id = str(current_user.id)
+    org_id = current_user.organization_id or user_id
 
-    file_location = f"uploads/{current_user.organization_id}/{file.filename}"
+    # Read file content
     await file.seek(0)
     file_content = await file.read()
     file_size = len(file_content)
 
-    metadata_dict = {}
+    # Parse optional metadata JSON
+    metadata_dict: Dict[str, Any] = {}
     if metadata:
         try:
             metadata_dict = json.loads(metadata)
         except json.JSONDecodeError:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid metadata JSON format"
-            )
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid metadata JSON")
 
+    # Generate document ID and S3 key
+    doc_id = str(uuid.uuid4())
+    safe_filename = file.filename or "document"
+    s3_key = f"{user_id}/{doc_id}/{safe_filename}"
+
+    # 1. Upload to S3 (dual-write MinIO + R2)
+    try:
+        await storage_service.upload_file(
+            file_content=file_content,
+            key=s3_key,
+            content_type=file.content_type or "application/octet-stream",
+        )
+    except Exception as e:
+        logger.error("S3 upload failed", error=str(e), key=s3_key)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="File storage failed")
+
+    # 2. Create document record in MongoDB
     document_data = {
         "name": name,
         "description": description,
         "document_type": document_type.value,
-        "organization_id": current_user.organization_id,
-        "created_by": current_user.id,
-        "file_url": file_location,
+        "organization_id": org_id,
+        "created_by": user_id,
+        "file_url": s3_key,
         "file_type": file.content_type,
         "file_size": file_size,
-        "metadata": metadata_dict,
-        "status": DocumentStatus.UPLOADED.value
+        "metadata": {**metadata_dict, "s3_key": s3_key, "original_filename": safe_filename},
+        "status": DocumentStatus.UPLOADED.value,
     }
 
     try:
         document = await document_repository.create_document(document_data)
-        await logger.info("Document uploaded and metadata created", document_id=document.id, filename=file.filename)
-        return document
     except Exception as e:
-        await logger.error("Error uploading document", error=str(e), filename=file.filename)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to upload document")
+        logger.error("Failed to create document record", error=str(e))
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to save document metadata")
+
+    # 3. Background task: process document (chunk → embed → vector store)
+    async def _process_upload(doc_id_str: str, content: bytes, filename: str):
+        temp_path = None
+        try:
+            await document_repository.update_document(
+                doc_id_str, org_id, {"status": DocumentStatus.PROCESSING.value}
+            )
+
+            # Write to temp file for document processor
+            suffix = os.path.splitext(filename)[1] or ".pdf"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(content)
+                temp_path = tmp.name
+
+            result = await context_service.add_document_from_file(
+                file_path=temp_path,
+                user_id=user_id,
+                title=name,
+                tags=metadata_dict.get("tags", []),
+            )
+
+            if result.get("status") == "success":
+                await document_repository.update_document(doc_id_str, org_id, {
+                    "status": DocumentStatus.PROCESSED.value,
+                    "extraction_status": "completed",
+                    "metadata.chunk_count": result.get("chunk_count", 0),
+                    "metadata.vector_ids": result.get("vector_ids", []),
+                })
+                logger.info("Document processed", document_id=doc_id_str, chunks=result.get("chunk_count"))
+            else:
+                await document_repository.update_document(doc_id_str, org_id, {
+                    "status": DocumentStatus.FAILED.value,
+                    "extraction_status": "failed",
+                    "extraction_error": result.get("error", "Unknown processing error"),
+                })
+        except Exception as proc_err:
+            logger.error("Background processing failed", document_id=doc_id_str, error=str(proc_err))
+            try:
+                await document_repository.update_document(doc_id_str, org_id, {
+                    "status": DocumentStatus.FAILED.value,
+                    "extraction_error": str(proc_err),
+                })
+            except Exception:
+                pass
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.unlink(temp_path)
+
+    background_tasks.add_task(_process_upload, str(document.id), file_content, safe_filename)
+
+    logger.info("Document uploaded to S3", document_id=str(document.id), s3_key=s3_key)
+    return document
+
+
+@router.get("/{document_id}/presigned-url")
+async def get_presigned_url(
+    document_id: str,
+    current_user: User = Depends(get_current_active_user),
+) -> Dict[str, Any]:
+    """
+    Get a presigned URL to view/download a document directly from S3.
+    """
+    document = await document_repository.get_document_by_id(
+        document_id, organization_id=current_user.organization_id or str(current_user.id)
+    )
+    if not document:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
+
+    s3_key = document.file_url
+    if not s3_key:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No file associated with this document")
+
+    try:
+        url = await storage_service.get_presigned_url(s3_key)
+        return {"url": url, "document_id": document_id, "expires_in": storage_service._primary and storage_service._primary.bucket}
+    except Exception as e:
+        logger.error("Failed to generate presigned URL", error=str(e), key=s3_key)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to generate download URL")
 
 @router.get("/{document_id}", response_model=DocumentResponse)
 async def get_document(
