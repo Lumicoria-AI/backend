@@ -106,6 +106,14 @@ firebase-credentials.json
 *.pfx
 backend/config/config.yaml
 
+# ── Uploads & Cache ──────────────────────────────────────────────────
+uploads/
+**/uploads/
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+.mypy_cache/
+
 # For your specific virtual environment name 'lumicoria_venv'
 lumicoria_venv/
 lumicoria_ai_venv/
