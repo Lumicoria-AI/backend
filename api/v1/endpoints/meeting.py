@@ -10,6 +10,7 @@ from backend.agents.agent_service import AgentService
 from backend.agents.meeting_agent import MeetingAgent
 from backend.models.user import User
 from backend.services.project_manager import project_manager
+from backend.services.activity_logger import log_activity
 
 # Configure logger
 logger = structlog.get_logger(__name__)
@@ -125,7 +126,15 @@ async def process_meeting_transcript(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=result["error"]
             )
-        
+
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="meeting.summarized",
+            details={"meeting_type": request.metadata.type, "title": request.metadata.title},
+            related_resource_type="AGENT",
+            agent_name="Meeting Agent",
+        )
         return result
     except Exception as e:
         logger.error("Error processing meeting transcript", error=str(e))
@@ -215,7 +224,15 @@ async def process_uploaded_transcript(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=result["error"]
             )
-        
+
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="meeting.summarized",
+            details={"meeting_type": parsed_metadata.type, "title": parsed_metadata.title, "source": "file_upload"},
+            related_resource_type="AGENT",
+            agent_name="Meeting Agent",
+        )
         return result
     except Exception as e:
         logger.error("Error processing uploaded transcript", error=str(e))
@@ -281,7 +298,15 @@ async def process_status_meeting(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=result["error"]
             )
-        
+
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="meeting.summarized",
+            details={"meeting_type": "status_update", "title": request.metadata.title},
+            related_resource_type="AGENT",
+            agent_name="Meeting Agent",
+        )
         return result
     except Exception as e:
         logger.error("Error processing status update meeting", error=str(e))
@@ -347,7 +372,15 @@ async def process_planning_meeting(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=result["error"]
             )
-        
+
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="meeting.summarized",
+            details={"meeting_type": "planning", "title": request.metadata.title},
+            related_resource_type="AGENT",
+            agent_name="Meeting Agent",
+        )
         return result
     except Exception as e:
         logger.error("Error processing planning meeting", error=str(e))
@@ -413,7 +446,15 @@ async def process_decision_meeting(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=result["error"]
             )
-        
+
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="meeting.summarized",
+            details={"meeting_type": "decision_making", "title": request.metadata.title},
+            related_resource_type="AGENT",
+            agent_name="Meeting Agent",
+        )
         return result
     except Exception as e:
         logger.error("Error processing decision-making meeting", error=str(e))
@@ -479,7 +520,15 @@ async def process_client_meeting(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=result["error"]
             )
-        
+
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="meeting.summarized",
+            details={"meeting_type": "client", "title": request.metadata.title},
+            related_resource_type="AGENT",
+            agent_name="Meeting Agent",
+        )
         return result
     except Exception as e:
         logger.error("Error processing client meeting", error=str(e))
@@ -545,7 +594,15 @@ async def process_brainstorming_meeting(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=result["error"]
             )
-        
+
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="meeting.summarized",
+            details={"meeting_type": "brainstorming", "title": request.metadata.title},
+            related_resource_type="AGENT",
+            agent_name="Meeting Agent",
+        )
         return result
     except Exception as e:
         logger.error("Error processing brainstorming meeting", error=str(e))
@@ -611,7 +668,15 @@ async def process_problem_solving_meeting(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=result["error"]
             )
-        
+
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="meeting.summarized",
+            details={"meeting_type": "problem_solving", "title": request.metadata.title},
+            related_resource_type="AGENT",
+            agent_name="Meeting Agent",
+        )
         return result
     except Exception as e:
         logger.error("Error processing problem-solving meeting", error=str(e))
@@ -654,6 +719,14 @@ async def export_meeting_to_notion(
             meeting_response["notion_export_status"] = "failed"
             meeting_response["notion_export_error"] = export_result.get("message", "Unknown error")
         
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="meeting.exported",
+            details={"meeting_type": request.metadata.type, "export_target": "notion"},
+            related_resource_type="AGENT",
+            agent_name="Meeting Agent",
+        )
         return meeting_response
     except Exception as e:
         logger.error("Error processing and exporting meeting", error=str(e))
@@ -697,6 +770,14 @@ async def export_meeting_to_google_workspace(
             meeting_response["google_export_status"] = "failed"
             meeting_response["google_export_error"] = export_result.get("message", "Unknown error")
         
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="meeting.exported",
+            details={"meeting_type": request.metadata.type, "export_target": "google_workspace"},
+            related_resource_type="AGENT",
+            agent_name="Meeting Agent",
+        )
         return meeting_response
     except Exception as e:
         logger.error("Error processing and exporting meeting to Google Workspace", error=str(e))

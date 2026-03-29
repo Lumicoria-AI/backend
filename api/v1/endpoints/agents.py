@@ -22,6 +22,7 @@ from backend.models.mongodb_models import (
 )
 from backend.core.security import rate_limit
 from backend.core.billing import enforce_agent_limit, require_subscription, BillingCheck
+from backend.services.activity_logger import log_activity
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Import the AgentService and agent implementations
@@ -176,6 +177,17 @@ async def chat_with_agent(
             user_id=str(current_user.id),
             message=message
         )
+
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="agent.chat",
+            details={"agent_id": agent_id, "message_preview": message[:100]},
+            related_resource_type="AGENT",
+            related_resource_id=agent_id,
+            agent_id=agent_id,
+        )
+
         return response
     except HTTPException:
         raise
@@ -209,6 +221,17 @@ async def execute_agent_task(
             user_id=str(current_user.id),
             task=task
         )
+
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="agent.executed",
+            details={"agent_id": agent_id, "task_preview": str(task)[:100]},
+            related_resource_type="AGENT",
+            related_resource_id=agent_id,
+            agent_id=agent_id,
+        )
+
         return result
     except HTTPException:
         raise
@@ -275,6 +298,17 @@ async def create_agent(
         configuration=agent_in.configuration,
         metadata=agent_in.metadata
     )
+
+    await log_activity(
+        user_id=str(current_user.id),
+        organization_id=current_user.organization_id,
+        activity_type="agent.created",
+        details={"name": agent_in.name, "agent_type": agent_in.agent_type.value if hasattr(agent_in.agent_type, "value") else str(agent_in.agent_type)},
+        related_resource_type="AGENT",
+        related_resource_id=str(agent.get("id", "")) if isinstance(agent, dict) else str(getattr(agent, "id", "")),
+        agent_name=agent_in.name,
+    )
+
     return agent
 
 @router.put("/{agent_id}", response_model=AgentResponse)

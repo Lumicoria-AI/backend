@@ -23,10 +23,11 @@ class StudentAgent(BaseAgent):
             "assignment_tracking", "study_planning", "concept_explanation",
             "research_assistance", "motivation_support", "exam_preparation"
         ])
-        
-        # Configure with default model if not specified
-        if "model" not in self.model_config:
-            self.model_config["model"] = "sonar-large-online"  # Use Perplexity's Sonar model
+        # Do NOT hardcode a model here — let _resolve_provider() fall through
+        # to DEFAULT_LLM_PROVIDER (set by env var, currently Gemini).
+        # When a caller explicitly passes model='sonar-large-online' the
+        # provider inference in base_agent._resolve_provider() will correctly
+        # route it to Perplexity.
 
     def process(self, student_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process student data to provide academic assistance.
@@ -95,12 +96,13 @@ class StudentAgent(BaseAgent):
             logger.error(f"Error processing student request: {str(e)}")
             return {"error": f"Student assistance processing failed: {str(e)}"}
     
-    async def process_async(self, student_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def process_async(self, student_data: Dict[str, Any], history: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
         """Process student data asynchronously with optimized processing.
         
         Args:
             student_data: Dictionary containing student context, assignments, 
                          study materials, and specific requests.
+            history: Optional list of previous messages in the conversation.
             
         Returns:
             Dictionary with academic assistance, study plans, and guidance.
@@ -125,14 +127,26 @@ class StudentAgent(BaseAgent):
             system_prompt, user_prompt = self._create_async_prompts(request_type, content, student_context)
             
             # Format messages for LLM
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
+            messages = []
+            if history:
+                messages = history
+            else:
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ]
+            
+            # If we have history but no system prompt at the start, add it
+            if messages and messages[0].get("role") != "system":
+                messages.insert(0, {"role": "system", "content": system_prompt})
+            
+            # If it's a follow-up (history exists), ensure the latest prompt is appended if not already there
+            if history and content not in messages[-1].get("content", ""):
+                messages.append({"role": "user", "content": content})
             
             # Call LLM via provider-agnostic interface
             config = LLMConfig(
-                model=self.model_config.get("model"),
+                model=self.model_config.get("model"),  # None → provider will use its own default
                 temperature=0.7,
             )
             response = await self.llm_client.generate(messages, config=config)
@@ -178,7 +192,7 @@ class StudentAgent(BaseAgent):
                 "response": parsed_result,
                 "raw_response": response.content,
                 "processed_at": datetime.utcnow().isoformat(),
-                "model_used": self.model_config.get("model"),
+                "model_used": self.model_config.get("model") or "system-default",
                 "request_type": request_type
             }
             
@@ -225,7 +239,7 @@ class StudentAgent(BaseAgent):
             
             # Call LLM via provider-agnostic interface
             config = LLMConfig(
-                model=self.model_config.get("model"),
+                model=self.model_config.get("model"),  # None → provider will use its own default
                 temperature=0.7,
             )
             response = await self.llm_client.generate(messages, config=config)

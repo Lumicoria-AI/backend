@@ -28,6 +28,7 @@ from ....core.auth import get_current_user
 from ....core.config import settings
 from ....services.context_service import context_service
 from ....agents.agent_service import AgentService
+from ....services.activity_logger import log_activity
 from ....core.dependencies import get_agent_service
 from ....agents.router import get_router
 from ....agents import memory as conversation_memory
@@ -86,6 +87,8 @@ class LumicoriaChatRequest(BaseModel):
     save_to_context: bool = Field(True, description="Whether to save this interaction to context")
     include_sources: Optional[List[str]] = Field(None, description="Source types to include")
     max_sources_per_type: Optional[int] = Field(3, description="Max sources per type")
+    agent_override: Optional[str] = Field(None, description="Explicitly route to this agent (skip intent router)")
+    document_ids: Optional[List[str]] = Field(None, description="Specific document IDs to use as context (@-mentioned docs)")
 
 class ChatResponse(BaseModel):
     """Response model for chat interactions."""
@@ -157,6 +160,12 @@ async def ask_lumicoria(
         )
         agent_key = route_result["agent"]
         confidence = route_result["confidence"]
+
+        # Agent hint from /command — only override when auto-router is unsure
+        if request.agent_override:
+            if confidence < 0.7 or agent_key == "general":
+                agent_key = request.agent_override
+                confidence = max(confidence, 0.9)
         
         logger.info(
             "chat_routed",
@@ -227,6 +236,24 @@ async def ask_lumicoria(
                 first_message=request.query,
             )
         
+        # Log activity (fire-and-forget via background task)
+        background_tasks.add_task(
+            log_activity,
+            user_id=user_id,
+            organization_id=getattr(current_user, "organization_id", user_id),
+            activity_type="chat.message_sent",
+            details={
+                "query_preview": request.query[:100],
+                "agent_used": agent_key,
+                "route_confidence": confidence,
+                "processing_time": round(processing_time, 2),
+                "conversation_id": conversation_id,
+            },
+            related_resource_type="CONVERSATION",
+            related_resource_id=conversation_id,
+            agent_name=agent_key,
+        )
+
         return ChatResponse(
             response=normalized["response"],
             conversation_id=conversation_id,
@@ -237,7 +264,7 @@ async def ask_lumicoria(
             context_used=normalized.get("context_used", 0),
             success=normalized.get("success", True),
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -296,7 +323,7 @@ async def ask_lumicoria_stream(
         )
 
         try:
-            # ── Step 3: Route intent ──
+            # ── Step 3: Route intent (always runs the auto-router) ──
             intent_router = await get_router()
             route_result = await intent_router.route(
                 message=request.query,
@@ -304,6 +331,13 @@ async def ask_lumicoria_stream(
             )
             agent_key = route_result["agent"]
             confidence = route_result["confidence"]
+
+            # If user explicitly tagged an agent via /, use it as a hint:
+            # override only when auto-router has low confidence or picked "general"
+            if request.agent_override:
+                if confidence < 0.7 or agent_key == "general":
+                    agent_key = request.agent_override
+                    confidence = max(confidence, 0.9)
 
             # First frame: metadata
             yield f"data: {json.dumps({'type': 'meta', 'conversation_id': conversation_id, 'agent_used': agent_key, 'confidence': confidence})}\n\n"
@@ -319,21 +353,102 @@ async def ask_lumicoria_stream(
                     agent = GeneralAgent({})
                 agent_key = "general"
 
-            # ── Step 5: Stream or fallback ──
+            # ── Step 5: Retrieve RAG context before streaming ──
             from ....ai_models.base import LLMConfig
+            from ....services.context_service import context_service as _ctx_svc
+
+            sources = []
+            context_used = 0
+
+            # Fetch relevant document chunks from vector store
+            try:
+                # If user @-mentioned specific documents, fetch their chunks first
+                mentioned_chunks = []
+                if request.document_ids:
+                    for doc_id in request.document_ids:
+                        doc_result = await _ctx_svc.get_context_for_query(
+                            query=request.query,
+                            user_id=user_id,
+                            organization_id=current_user.get("organization_id"),
+                            k=4,
+                            filters={"document_id": doc_id},
+                        )
+                        mentioned_chunks.extend(doc_result.get("context", []))
+
+                # Then get general RAG context (reduced k if we already have @-mentioned docs)
+                general_k = max(2, 8 - len(mentioned_chunks))
+                ctx_result = await _ctx_svc.get_context_for_query(
+                    query=request.query,
+                    user_id=user_id,
+                    organization_id=current_user.get("organization_id"),
+                    k=general_k,
+                )
+                general_chunks = ctx_result.get("context", [])
+
+                # Merge: @-mentioned docs first, then general (deduplicated)
+                seen_ids = set()
+                context_chunks = []
+                for chunk in mentioned_chunks + general_chunks:
+                    chunk_key = (chunk.get("metadata", {}).get("document_id", ""), chunk.get("text", chunk.get("content", ""))[:80])
+                    if chunk_key not in seen_ids:
+                        seen_ids.add(chunk_key)
+                        context_chunks.append(chunk)
+                context_used = len(context_chunks)
+
+                # Format context into numbered citations
+                if context_chunks:
+                    formatted_parts = []
+                    for i, chunk in enumerate(context_chunks):
+                        text = chunk.get("text", chunk.get("content", ""))
+                        meta = chunk.get("metadata", {})
+                        source_title = meta.get("title", meta.get("filename", "Document"))
+                        formatted_parts.append(f"[{i+1}] {text}\n(Source: {source_title})")
+                        sources.append({
+                            "index": i + 1,
+                            "title": source_title,
+                            "type": meta.get("source", "upload"),
+                            "document_id": meta.get("document_id", ""),
+                            "page_number": meta.get("page_number"),
+                            "bbox": meta.get("bbox"),
+                            "page_width": meta.get("page_width"),
+                            "page_height": meta.get("page_height"),
+                            "chunk_text": text[:200] if text else "",
+                        })
+                    rag_context = "\n\n".join(formatted_parts)
+                else:
+                    rag_context = ""
+            except Exception as ctx_err:
+                logger.warning("rag_context_fetch_failed", error=str(ctx_err))
+                rag_context = ""
+
+            # ── Step 6: Stream with RAG context ──
             llm = getattr(agent, "llm_client", None) or getattr(agent, "perplexity_client", None)
 
             if llm and hasattr(llm, "stream"):
-                system_prompt = getattr(agent, "system_prompt", None) or ""
-                messages = []
-                if system_prompt:
-                    messages.append({"role": "system", "content": system_prompt})
+                # Build system prompt with RAG context
+                base_system = getattr(agent, "system_prompt", None) or (
+                    "You are Lumicoria.ai, a helpful AI assistant. "
+                    "Answer the user's question accurately and helpfully."
+                )
+
+                if rag_context:
+                    system_prompt = (
+                        f"{base_system}\n\n"
+                        "Use the following context from the user's documents to help answer their question. "
+                        "When you use information from the context, cite the source using its number "
+                        "in square brackets, e.g. [1], [2]. Place citations inline right after the relevant statement.\n\n"
+                        f"{rag_context}"
+                    )
+                else:
+                    system_prompt = base_system
+
+                messages = [{"role": "system", "content": system_prompt}]
                 if history:
                     for m in history[-8:]:
                         messages.append({"role": m.get("role", "user"), "content": m.get("content", "")})
                 messages.append({"role": "user", "content": request.query})
 
-                cfg = LLMConfig(temperature=0.7, max_tokens=None)  # None = model's native max (65k for gemini-2.5-flash)
+                cfg = LLMConfig(temperature=0.7, max_tokens=None)
                 async for chunk in llm.stream(messages, config=cfg):
                     if chunk.content:
                         full_response += chunk.content
@@ -352,9 +467,11 @@ async def ask_lumicoria_stream(
                 raw_result = await agent.process_async(agent_input)
                 normalized = normalize_agent_response(raw_result, agent_key=agent_key)
                 full_response = normalized["response"]
+                sources = normalized.get("sources", sources)
+                context_used = normalized.get("context_used", context_used)
                 yield f"data: {json.dumps({'type': 'delta', 'text': full_response})}\n\n"
 
-            # ── Step 6: Persist assistant message with await (NOT create_task) before done frame ──
+            # ── Step 7: Persist assistant message ──
             if full_response:
                 await conversation_memory.save_message(
                     conversation_id=conversation_id, user_id=user_id,
@@ -366,9 +483,9 @@ async def ask_lumicoria_stream(
                     conversation_id=conversation_id, first_message=request.query,
                 ))
 
-            # ── Step 7: Done frame ──
+            # ── Step 8: Done frame with sources ──
             processing_time = round(time.time() - start_time, 2)
-            yield f"data: {json.dumps({'type': 'done', 'processing_time': processing_time})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'processing_time': processing_time, 'sources': sources, 'context_used': context_used})}\n\n"
 
         except Exception as e:
             logger.error("stream_chat_error", error=str(e), user_id=user_id)
@@ -502,9 +619,10 @@ async def upload_document(
     unique_filename = f"{uuid.uuid4()}{file_ext}"
     
     # Create user's upload directory if it doesn't exist
-    user_upload_dir = settings.UPLOAD_DIR / user_id
+    from pathlib import Path
+    user_upload_dir = Path(settings.UPLOAD_DIR) / user_id
     user_upload_dir.mkdir(exist_ok=True, parents=True)
-    
+
     # Save the file
     file_path = user_upload_dir / unique_filename
     
@@ -521,6 +639,16 @@ async def upload_document(
         tags=parsed_tags
     )
     
+    # Log activity
+    await log_activity(
+        user_id=user_id,
+        organization_id=organization_id or user_id,
+        activity_type="chat.document_uploaded",
+        details={"filename": file.filename, "title": title or file.filename},
+        related_resource_type="DOCUMENT",
+        agent_name="Document Agent",
+    )
+
     return {
         "message": "Document upload received and processing started",
         "status": "processing",
@@ -615,7 +743,10 @@ async def list_documents(
     """
     user_id = current_user["id"]
     organization_id = current_user.get("organization_id")
-    
+
+    logger.info("list_documents_request", user_id=user_id, organization_id=organization_id,
+                source_types=request.source_types)
+
     result = await context_service.get_user_documents(
         user_id=user_id,
         organization_id=organization_id,
@@ -624,6 +755,9 @@ async def list_documents(
         limit=request.limit,
         offset=request.offset
     )
+
+    logger.info("list_documents_result", doc_count=len(result.get("documents", [])),
+                total=result.get("total", 0), error=result.get("error"))
     
     return result
 

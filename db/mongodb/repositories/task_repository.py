@@ -179,14 +179,29 @@ class TaskRepository(BaseRepository[Task]):
         self,
         organization_id: str,
         status: Optional[TaskStatus] = None,
+        assigned_to: Optional[str] = None,
+        document_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
         skip: int = 0,
         limit: int = 100
     ) -> List[Task]:
-        """Get tasks in an organization."""
+        """Get tasks in an organization with optional filters."""
         filters = {"organization_id": ObjectId(organization_id)}
         if status:
             filters["status"] = status
-            
+        if assigned_to:
+            try:
+                filters["assigned_to"] = ObjectId(assigned_to)
+            except Exception:
+                filters["assigned_to"] = assigned_to
+        if document_id:
+            filters["metadata.document_id"] = document_id
+        if agent_id:
+            try:
+                filters["agent_id"] = ObjectId(agent_id)
+            except Exception:
+                filters["agent_id"] = agent_id
+
         return await self.find_many(
             filters,
             skip=skip,

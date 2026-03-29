@@ -44,7 +44,7 @@ class DatabaseSettings(BaseSettings):
     VECTOR_STORE_URL: Optional[str] = "http://localhost:8081"
     VECTOR_STORE_API_KEY: Optional[str] = None
     VECTOR_STORE_COLLECTION: str = "documents"
-    VECTOR_STORE_DIMENSION: int = 1536  # Default for OpenAI embeddings
+    VECTOR_STORE_DIMENSION: int = 768  # Default for Gemini text-embedding-004
     VECTOR_STORE_ENABLED: bool = True
 
     # Cassandra Settings (optional)
@@ -312,12 +312,12 @@ class Settings(BaseSettings):
     s3: S3Settings = Field(default_factory=S3Settings)
 
     # ── PostgreSQL / SQLAlchemy (optional) ─────────────────────────────
-    POSTGRES_ENABLED: bool = False
-    POSTGRES_DUAL_WRITE: bool = False
+    POSTGRES_ENABLED: bool = True
+    POSTGRES_DUAL_WRITE: bool = True
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432
     POSTGRES_USER: str = "postgres"
-    POSTGRES_PASSWORD: str = ""
+    POSTGRES_PASSWORD: str = "lumicoria"
     POSTGRES_DB: str = "lumicoria"
     SQLALCHEMY_DATABASE_URI: Optional[str] = None
     SQLALCHEMY_ECHO: bool = False

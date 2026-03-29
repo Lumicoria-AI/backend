@@ -171,7 +171,32 @@ class UserRepository(BaseRepository[UserInDB]):
     async def get_user_settings(self, user_id: str) -> Optional[UserSettings]:
         settings_dict = await self.settings_collection.find_one({"user_id": ObjectId(user_id)})
         if settings_dict:
+            settings_dict["user_id"] = str(settings_dict["user_id"])
+            if "_id" in settings_dict:
+                settings_dict["_id"] = str(settings_dict["_id"])
             return UserSettings(**settings_dict)
+        return None
+
+    async def update_user_settings(self, user_id: str, settings_data: dict) -> Optional[UserSettings]:
+        """Update user settings, creating the document if it doesn't exist."""
+        settings_data["updated_at"] = datetime.utcnow()
+        result = await self.settings_collection.find_one_and_update(
+            {"user_id": ObjectId(user_id)},
+            {"$set": settings_data},
+            return_document=True,
+        )
+        if not result:
+            # No existing settings doc — create one
+            settings_data["user_id"] = ObjectId(user_id)
+            settings_data["created_at"] = datetime.utcnow()
+            insert_result = await self.settings_collection.insert_one(settings_data)
+            result = await self.settings_collection.find_one({"_id": insert_result.inserted_id})
+        if result:
+            # Convert ObjectId fields to str before constructing Pydantic model
+            result["user_id"] = str(result["user_id"])
+            if "_id" in result:
+                result["_id"] = str(result["_id"])
+            return UserSettings(**result)
         return None
 
     async def get_users_by_organization(self, organization_id: str, skip: int = 0, limit: int = 100) -> List[UserInDB]:

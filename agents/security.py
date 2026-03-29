@@ -20,6 +20,7 @@ class AgentPermission(Enum):
     CREATE = "create"  # Can create new agent instances
     DELETE = "delete"  # Can delete agent instances
     CONFIGURE = "configure"  # Can modify agent configuration
+    EXECUTE = "execute"  # Can execute workflows
     ADMIN = "admin"  # Full access to all operations
 
 @dataclass
@@ -27,6 +28,7 @@ class AgentSecurityContext:
     """Security context for agent operations."""
     user_id: str
     permissions: Set[AgentPermission]
+    organization_id: Optional[str] = None
     api_key: Optional[str] = None
     session_id: Optional[str] = None
     created_at: datetime = datetime.utcnow()

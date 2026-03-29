@@ -8,6 +8,7 @@ from backend.api.deps import get_current_active_user
 from backend.agents.agent_service import AgentService
 from backend.agents.research_agent import ResearchAgent
 from backend.models.user import User
+from backend.services.activity_logger import log_activity
 
 # Configure logger
 logger = structlog.get_logger(__name__)
@@ -87,6 +88,15 @@ async def research_query(
                 detail=result["error"]
             )
         
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="research.query",
+            details={"query": request.query, "depth": request.depth, "research_type": request.research_type, "model": result.get("model_used", "")},
+            related_resource_type="AGENT",
+            agent_name="Research Agent",
+        )
+
         return result
     except Exception as e:
         logger.error("Error processing research query", error=str(e))
@@ -141,6 +151,15 @@ async def research_topic(
                 detail=result["error"]
             )
         
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="research.topic",
+            details={"query": request.query, "depth": request.depth},
+            related_resource_type="AGENT",
+            agent_name="Research Agent",
+        )
+
         return result
     except Exception as e:
         logger.error("Error researching topic", error=str(e))
@@ -195,6 +214,15 @@ async def conduct_literature_review(
                 detail=result["error"]
             )
         
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="research.literature_review",
+            details={"query": request.query, "depth": request.depth},
+            related_resource_type="AGENT",
+            agent_name="Research Agent",
+        )
+
         return result
     except Exception as e:
         logger.error("Error conducting literature review", error=str(e))
@@ -249,6 +277,15 @@ async def fact_check(
                 detail=result["error"]
             )
         
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="research.fact_check",
+            details={"query": request.query, "depth": request.depth},
+            related_resource_type="AGENT",
+            agent_name="Research Agent",
+        )
+
         return result
     except Exception as e:
         logger.error("Error fact-checking", error=str(e))
@@ -303,6 +340,15 @@ async def compare_sources(
                 detail=result["error"]
             )
         
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="research.compare_sources",
+            details={"query": request.query, "depth": request.depth},
+            related_resource_type="AGENT",
+            agent_name="Research Agent",
+        )
+
         return result
     except Exception as e:
         logger.error("Error comparing sources", error=str(e))
@@ -359,6 +405,15 @@ async def comprehensive_research(
                 detail=result["error"]
             )
         
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="research.comprehensive",
+            details={"query": request.query, "depth": "deep"},
+            related_resource_type="AGENT",
+            agent_name="Research Agent",
+        )
+
         return result
     except Exception as e:
         logger.error("Error conducting comprehensive research", error=str(e))

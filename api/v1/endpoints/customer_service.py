@@ -10,6 +10,7 @@ from backend.db.mongodb.repositories.permission_repository import permission_rep
 from backend.models.user import User
 from backend.agents.agent_service import AgentService
 from backend.agents.customer_service_agent import CustomerServiceAgent
+from backend.services.activity_logger import log_activity
 
 router = APIRouter()
 
@@ -118,7 +119,15 @@ async def process_customer_service_request(
             "request_type": request.request_type,
             "context": request.context or {}
         })
-        
+
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="customer_service.ticket_handled",
+            details={"request_type": request.request_type, "content_preview": request.content[:100]},
+            related_resource_type="AGENT",
+            agent_name="Customer Service Agent",
+        )
         return result
         
     except Exception as e:

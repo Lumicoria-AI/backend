@@ -65,47 +65,108 @@ class DocumentAgent(BaseAgent):
 
     async def process_async(self, data: Dict[str, Any]) -> Dict[str, Any]:
         """Process document data asynchronously.
-        
+
+        Extracts key information **and** structured tasks from the document.
+
         Args:
             data: Dictionary containing document text and metadata
-            
+
         Returns:
-            Dictionary with extracted information and analysis
+            Dictionary with ``analysis``, ``tasks`` list, and metadata.
         """
         try:
-            # Extract document content and metadata
             document_text = data.get("text", "")
             document_metadata = data.get("metadata", {})
-            
+            user_context = data.get("user_context", {})
+
             if not document_text:
                 return {"error": "No document text provided"}
-            
-            prompt = (
+
+            if not self.llm_client:
+                return {"error": "LLM client not initialized"}
+
+            # Truncate to fit context window
+            text_for_llm = document_text[:12000]
+
+            # --- 1. General extraction ---
+            extraction_prompt = (
                 f"Analyze the following document and extract key information including "
                 f"{', '.join(self.extraction_targets)}. For each extracted item, include "
                 f"the exact text from the document and the relevant context.\n\n"
-                f"Document content:\n{document_text[:8000]}..."  # Limit document length
+                f"Document content:\n{text_for_llm}"
             )
-            
-            if self.llm_client:
-                messages = [{"role": "user", "content": prompt}]
-                response = await self.llm_client.generate(messages)
-                
-                # Process and structure the response
-                return {
-                    "analysis": response.content,
-                    "metadata": document_metadata,
-                    "extraction_targets": self.extraction_targets,
-                    "model_used": self.model_config.get("model", "unknown"),
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "confidence": 0.0
-                }
-            else:
-                return {"error": "LLM client not initialized"}
-                
+
+            # --- 2. Task extraction (structured JSON) ---
+            task_prompt = (
+                "Extract all actionable tasks, deadlines, and action items from the following document. "
+                "Return ONLY a valid JSON array where each element has these keys:\n"
+                '  "title": short task title,\n'
+                '  "description": fuller description of what needs to be done,\n'
+                '  "priority": "low" | "medium" | "high" | "critical",\n'
+                '  "deadline": deadline string if mentioned (or null),\n'
+                '  "assignee": person responsible if mentioned (or null)\n\n'
+                "Only include genuinely actionable items. If there are no tasks, return [].\n\n"
+                f"Document content:\n{text_for_llm}"
+            )
+
+            # Run both prompts concurrently
+            extraction_coro = self.llm_client.generate(
+                [{"role": "user", "content": extraction_prompt}]
+            )
+            tasks_coro = self.llm_client.generate(
+                [{"role": "user", "content": task_prompt}]
+            )
+
+            extraction_response, tasks_response = await asyncio.gather(
+                extraction_coro, tasks_coro
+            )
+
+            # Parse the tasks JSON from the LLM response
+            tasks = self._parse_tasks_json(tasks_response.content)
+
+            return {
+                "analysis": extraction_response.content,
+                "tasks": tasks,
+                "metadata": document_metadata,
+                "extraction_targets": self.extraction_targets,
+                "model_used": self.model_config.get("model", "unknown"),
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+
         except Exception as e:
             logger.error(f"Error processing document: {str(e)}")
             return {"error": f"Failed to process document: {str(e)}"}
+
+    def _parse_tasks_json(self, raw_text: str) -> List[Dict[str, Any]]:
+        """Best-effort parse of an LLM response into a list of task dicts."""
+        # Try direct JSON parse first
+        try:
+            parsed = json.loads(raw_text)
+            if isinstance(parsed, list):
+                return parsed
+            if isinstance(parsed, dict) and "tasks" in parsed:
+                return parsed["tasks"]
+        except json.JSONDecodeError:
+            pass
+
+        # Try extracting JSON array from markdown code fences
+        json_match = re.search(r"```(?:json)?\s*(\[[\s\S]*?\])\s*```", raw_text)
+        if json_match:
+            try:
+                return json.loads(json_match.group(1))
+            except json.JSONDecodeError:
+                pass
+
+        # Try finding any JSON array in the text
+        bracket_match = re.search(r"\[[\s\S]*\]", raw_text)
+        if bracket_match:
+            try:
+                return json.loads(bracket_match.group(0))
+            except json.JSONDecodeError:
+                pass
+
+        # Last resort: fall back to the existing regex parser
+        return self._parse_tasks(raw_text)
             
     def process(self, document_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process a document to extract key information and generate tasks.

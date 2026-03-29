@@ -91,14 +91,14 @@ _CHAT_MODELS: set[str] = {
 }
 
 _EMBEDDING_MODELS: set[str] = {
-    "text-embedding-004",
-    "text-multilingual-embedding-002",
+    "gemini-embedding-001",
+    "gemini-embedding-2-preview",
 }
 
 _ALL_MODELS = _CHAT_MODELS | _EMBEDDING_MODELS
 
 _DEFAULT_CHAT_MODEL = "gemini-2.5-flash"
-_DEFAULT_EMBEDDING_MODEL = "text-embedding-004"
+_DEFAULT_EMBEDDING_MODEL = "gemini-embedding-001"
 
 # Back-off: up to 4 retries, doubling each time + ±10 % jitter, cap 32 s
 _MAX_RETRIES = 4
@@ -451,6 +451,7 @@ class GeminiProvider(LLMClient):
                     contents=text,
                     config=genai_types.EmbedContentConfig(
                         task_type="RETRIEVAL_DOCUMENT",
+                        output_dimensionality=768,
                     ),
                 )
                 embedding = response.embeddings[0].values if response.embeddings else []

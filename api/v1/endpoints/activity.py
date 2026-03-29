@@ -1,5 +1,5 @@
 from typing import Any, List, Optional, Dict
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, Body
 from pydantic import BaseModel
 from datetime import datetime
 
@@ -8,6 +8,7 @@ from backend.models.user import User
 from backend.db.mongodb.repositories.activity_repository import activity_repository
 from backend.db.cassandra.activity_repository import cassandra_activity_repository
 from backend.core.config import settings
+from backend.services.activity_logger import log_activity
 
 router = APIRouter()
 
@@ -15,11 +16,11 @@ class ActivityEntry(BaseModel):
     id: str
     user_id: str
     organization_id: str
-    activity_type: str # e.g., 'document_uploaded', 'agent_executed', 'task_created', 'break_suggested'
+    activity_type: str # e.g., 'document.uploaded', 'agent.executed', 'task.created'
     timestamp: datetime
     details: Dict[str, Any] # Specific details about the activity
-    related_resource_type: Optional[str] # e.g., 'DOCUMENT', 'AGENT', 'TASK'
-    related_resource_id: Optional[str]
+    related_resource_type: Optional[str] = None # e.g., 'DOCUMENT', 'AGENT', 'TASK'
+    related_resource_id: Optional[str] = None
 
 class ActivitySummaryResponse(BaseModel):
     total_events: int
@@ -27,21 +28,27 @@ class ActivitySummaryResponse(BaseModel):
     by_severity: Dict[str, int]
     time_range: Dict[str, Optional[datetime]]
 
+class InternalLogRequest(BaseModel):
+    activity_type: str
+    details: Dict[str, Any] = {}
+    related_resource_type: Optional[str] = None
+    related_resource_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    agent_name: Optional[str] = None
+    severity: str = "info"
+
 @router.get("/recent", response_model=List[ActivityEntry])
 async def get_recent_activity(
     limit: int = Query(10, ge=1, le=50),
     skip: int = Query(0, ge=0),
     activity_type: Optional[str] = None,
+    agent_id: Optional[str] = None,
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
     """
     Get a list of recent activities for the user or organization.
+    Optionally filter by activity_type or agent_id.
     """
-    # In a real implementation, this would involve querying a dedicated activity log
-    # or aggregating recent entries from various repositories (documents, tasks, agent runs, wellbeing events)
-    # For now, returning dummy data
-    # print(f"Fetching recent activity for user {current_user.id} in organization {current_user.organization_id}")
-
     if settings.db.CASSANDRA_ENABLED:
         activities = await cassandra_activity_repository.get_recent_activity(
             organization_id=current_user.organization_id,
@@ -53,12 +60,46 @@ async def get_recent_activity(
     else:
         activities = await activity_repository.get_recent_activity(
             organization_id=current_user.organization_id,
-            user_id=current_user.id, # Assuming the feed is primarily for the current user
+            user_id=current_user.id,
             activity_type=activity_type,
             limit=limit,
             skip=skip
         )
+
+    # Post-filter by agent_id if requested (in-memory, since the repo
+    # doesn't natively support agent_id filtering yet)
+    if agent_id:
+        activities = [
+            a for a in activities
+            if getattr(a, "details", {}).get("agent_id") == agent_id
+        ]
+
     return activities
+
+@router.get("/by-agent/{agent_id}", response_model=List[ActivityEntry])
+async def get_activity_by_agent(
+    agent_id: str,
+    limit: int = Query(20, ge=1, le=100),
+    skip: int = Query(0, ge=0),
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """
+    Get activities for a specific agent.
+    """
+    activities = await activity_repository.get_recent_activity(
+        organization_id=current_user.organization_id,
+        user_id=current_user.id,
+        limit=200,  # fetch more to filter
+        skip=0
+    )
+
+    # Filter by agent_id in details
+    agent_activities = [
+        a for a in activities
+        if getattr(a, "details", {}).get("agent_id") == agent_id
+    ]
+
+    return agent_activities[skip:skip + limit]
 
 @router.get("/summary", response_model=ActivitySummaryResponse)
 async def get_activity_summary(
@@ -103,36 +144,26 @@ async def get_activity_summary(
         "time_range": {"start": start_date, "end": end_date},
     }
 
-# You might also want endpoints for creating activity logs from different parts of the application
-# For example, an internal endpoint called by other services/repositories
-# @router.post("/internal/log", status_code=status.HTTP_201_CREATED)
-# async def log_activity_internal(
-#     activity_type: str,
-#     details: Dict[str, Any],
-#     organization_id: str = Body(...), # Assuming organization_id is passed in the body for internal calls
-#     user_id: str = Body(...), # Assuming user_id is passed in the body
-#     related_resource_type: Optional[str] = Body(None),
-#     related_resource_id: Optional[str] = Body(None),
-# ) -> Any:
-#     """
-#     (Internal) Log a new activity entry.
-#     """
-#     try:
-#         await activity_repository.create_log_entry(
-#             organization_id=organization_id,
-#             user_id=user_id,
-#             activity_type=activity_type,
-#             details=details,
-#             related_resource_type=related_resource_type,
-#             related_resource_id=related_resource_id
-#         )
-#         return {"message": "Activity logged successfully"}
-#     except Exception as e:
-#         raise HTTPException(
-#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-#             detail=str(e)
-#         )
+# --- Internal debug endpoint (keep for development) ---
 
-# You would also need to ensure that other parts of the backend (repositories, services)
-# call activity_repository.create_log_entry whenever a relevant event occurs
-# (e.g., document upload, agent execution, task creation, goal completion, etc.) 
+@router.post("/internal/log", status_code=status.HTTP_201_CREATED)
+async def log_activity_internal(
+    body: InternalLogRequest,
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """
+    (Internal / Debug) Manually log an activity entry.
+    Useful for testing the activity pipeline during development.
+    """
+    await log_activity(
+        user_id=str(current_user.id),
+        organization_id=current_user.organization_id,
+        activity_type=body.activity_type,
+        details=body.details,
+        related_resource_type=body.related_resource_type,
+        related_resource_id=body.related_resource_id,
+        agent_id=body.agent_id,
+        agent_name=body.agent_name,
+        severity=body.severity,
+    )
+    return {"message": "Activity logged successfully"}

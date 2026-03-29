@@ -601,3 +601,24 @@ class WellbeingData(BaseModel):
     goals: List[WellbeingGoal] = []
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+# Student Models
+class StudentInteraction(MongoBaseModel):
+    """Model for storing student agent interactions."""
+    user_id: PyObjectId
+    request_type: str  # assignment_help, study_plan, etc.
+    content: str
+    context: Dict[str, Any] = {}
+    response: Dict[str, Any]
+    raw_response: Optional[str] = None
+    model_used: str
+    citations: List[Dict[str, Any]] = []
+    parent_id: Optional[PyObjectId] = None  # Link to previous interaction for threading
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    metadata: Dict[str, Any] = {}
+
+    model_config = {
+        'populate_by_name': True,
+        'arbitrary_types_allowed': True,
+        'json_encoders': {ObjectId: str}
+    }

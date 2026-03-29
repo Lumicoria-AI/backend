@@ -25,22 +25,28 @@ logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 
-# Initialize the StudioService - in production this should be handled via dependency injection
+# Shared singleton StudioService so in-memory workflow cache persists across requests
+_studio_service_instance: Optional[StudioService] = None
+
 async def get_studio_service(
     db: AsyncSession | None = Depends(get_optional_async_db)
 ) -> StudioService:
-    agent_factory = AgentFactory()
-    security_manager = AgentSecurityManager(jwt_secret="temp-secret-for-dev")  # In production, load from environment
-    workflow_repo = None
+    global _studio_service_instance
+    if _studio_service_instance is None:
+        agent_factory = AgentFactory()
+        security_manager = AgentSecurityManager(jwt_secret="temp-secret-for-dev")  # In production, load from environment
+        _studio_service_instance = StudioService(
+            agent_factory,
+            security_manager,
+            mongo_workflow_repo=workflow_repository,
+            dual_write=settings.POSTGRES_DUAL_WRITE
+        )
+    # Update per-request Postgres repo if available
     if settings.POSTGRES_ENABLED and db is not None:
-        workflow_repo = PostgresWorkflowRepository(db)
-    return StudioService(
-        agent_factory,
-        security_manager,
-        workflow_repo=workflow_repo,
-        mongo_workflow_repo=workflow_repository,
-        dual_write=settings.POSTGRES_DUAL_WRITE
-    )
+        _studio_service_instance._workflow_repo = PostgresWorkflowRepository(db)
+    else:
+        _studio_service_instance._workflow_repo = None
+    return _studio_service_instance
 
 # Pydantic models for request/response
 class ComponentDefinitionModel(BaseModel):

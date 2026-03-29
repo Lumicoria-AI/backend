@@ -4,13 +4,12 @@ API endpoints for device token management.
 Provides endpoints for registering and managing push notification device tokens.
 """
 
-from typing import Optional
+from typing import Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 import structlog
 
-from backend.api.deps import get_current_active_user
-from backend.models.user import User
+from backend.core.auth import get_current_user
 from backend.db.mongodb.models.device_token import (
     DeviceToken,
     DevicePlatform,
@@ -41,38 +40,39 @@ class DeregisterTokenRequest(BaseModel):
 @router.post("/register", response_model=DeviceTokenResponse)
 async def register_device_token(
     request: RegisterTokenRequest,
-    current_user: User = Depends(get_current_active_user)
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
     Register a device token for push notifications.
-    
+
     This should be called when:
     - User logs in on a new device
     - FCM token is refreshed
     - User enables push notifications
     """
+    user_id = current_user["id"]
     repository = await get_device_token_repository()
-    
+
     device_token, is_new = await repository.register_token(
-        user_id=str(current_user.id),
+        user_id=user_id,
         token=request.token,
         platform=request.platform,
         device_name=request.device_name,
         app_version=request.app_version
     )
-    
+
     # Send test/welcome notification to active device ONLY if it's a new registration
     if is_new:
         try:
             await push_notification_service.send_to_device(
                 device_token=request.token,
                 title="Notifications Enabled 🔔",
-                body=f"Welcome back, {current_user.full_name}! Push notifications are now active on this device."
+                body=f"Welcome back, {current_user.get('full_name', 'User')}! Push notifications are now active on this device."
             )
         except Exception as e:
             logger.error("failed_to_send_welcome_push", error=str(e))
 
-    
+
     return DeviceTokenResponse(
         id=str(device_token.id),
         user_id=device_token.user_id,
@@ -86,36 +86,36 @@ async def register_device_token(
 @router.delete("/deregister")
 async def deregister_device_token(
     request: DeregisterTokenRequest,
-    current_user: User = Depends(get_current_active_user)
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """
     Deregister a device token.
-    
+
     This should be called when:
     - User logs out
     - User disables push notifications
     """
     repository = await get_device_token_repository()
-    
+
     success = await repository.delete_token(
-        user_id=str(current_user.id),
+        user_id=current_user["id"],
         token=request.token
     )
-    
+
     if not success:
         raise HTTPException(status_code=404, detail="Token not found")
-    
+
     return {"status": "success", "message": "Token deregistered"}
 
 
 @router.get("/")
 async def get_my_device_tokens(
-    current_user: User = Depends(get_current_active_user)
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """Get all device tokens for the current user."""
     repository = await get_device_token_repository()
-    tokens = await repository.get_user_tokens(str(current_user.id))
-    
+    tokens = await repository.get_user_tokens(current_user["id"])
+
     return [
         DeviceTokenResponse(
             id=str(token.id),
@@ -131,12 +131,12 @@ async def get_my_device_tokens(
 
 @router.delete("/all")
 async def delete_all_my_tokens(
-    current_user: User = Depends(get_current_active_user)
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """Delete all device tokens for the current user."""
     repository = await get_device_token_repository()
-    deleted_count = await repository.delete_all_user_tokens(str(current_user.id))
-    
+    deleted_count = await repository.delete_all_user_tokens(current_user["id"])
+
     return {
         "status": "success",
         "deleted_count": deleted_count
@@ -145,10 +145,10 @@ async def delete_all_my_tokens(
 
 @router.get("/stats")
 async def get_token_stats(
-    current_user: User = Depends(get_current_active_user)
+    current_user: Dict[str, Any] = Depends(get_current_user)
 ):
     """Get device token statistics for the current user."""
     repository = await get_device_token_repository()
-    stats = await repository.get_platform_stats(str(current_user.id))
-    
+    stats = await repository.get_platform_stats(current_user["id"])
+
     return stats

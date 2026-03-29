@@ -65,27 +65,36 @@ class ContextService:
         # Build filters
         search_filters = filters or {}
         
-        # Add user and org filters
+        # Filter by user_id in Weaviate. organization_id is post-filtered
+        # to support docs with no org set (personal uploads before org was configured).
         search_filters["user_id"] = user_id
-        if organization_id:
-            search_filters["organization_id"] = organization_id
-            
+
         # Add source filter if specified
         if include_sources:
             search_filters["source"] = include_sources
-            
+
         # Search vector store
         try:
             if not settings.db.VECTOR_STORE_ENABLED:
                 return {"context": [], "error": "Vector store disabled"}
 
             vector_store = get_vector_store()
+            # Fetch extra results so post-filtering by org still yields enough
+            fetch_k = k * 2 if organization_id else k
             results = await vector_store.similarity_search(
                 query_vector=query_embedding[0],
-                k=k,
+                k=fetch_k,
                 filters=search_filters
             )
-            
+
+            # Post-filter by org: keep docs matching the org OR docs with no org
+            if organization_id:
+                results = [
+                    r for r in results
+                    if not r.get("metadata", {}).get("organization_id")
+                    or r["metadata"]["organization_id"] == organization_id
+                ][:k]
+
             # Format results
             formatted_context = self._format_context(results)
             
@@ -422,14 +431,15 @@ class ContextService:
         Returns:
             List of documents and metadata
         """
-        # Build filters
+        # Build filters — always filter by user_id.
+        # organization_id filtering is done post-query because we need OR logic:
+        # include docs matching the org OR docs with no org (personal uploads).
         filters = {"user_id": user_id}
-        
-        if organization_id:
-            filters["organization_id"] = organization_id
             
-        if source_types:
-            filters["source"] = source_types
+        # Note: don't filter by source in Weaviate query when source_types
+        # is provided — old data may have file paths instead of type labels.
+        # We'll filter after reading instead.
+        _source_filter = source_types
             
         if tags:
             filters["tags"] = tags
@@ -456,30 +466,53 @@ class ContextService:
                 offset=offset
             )
             
+            # Normalize source values — old data may have file paths instead of type labels
+            def _normalize_source(raw: str) -> str:
+                if not raw or raw in ("upload", "web", "manual_entry", "chat_history", "drive", "direct_text"):
+                    return raw or "unknown"
+                # File path → "upload"
+                if "/" in raw or "\\" in raw:
+                    return "upload"
+                return raw
+
             # Group by document_id and extract summary data
             document_map = {}
             for doc in documents:
                 doc_id = doc["metadata"].get("document_id")
                 if not doc_id:
                     continue
-                    
+
+                source = _normalize_source(doc["metadata"].get("source", "unknown"))
+
                 if doc_id not in document_map:
                     document_map[doc_id] = {
                         "document_id": doc_id,
                         "title": doc["metadata"].get("title", "Unnamed document"),
-                        "source": doc["metadata"].get("source", "unknown"),
+                        "source": source,
                         "created_at": doc["metadata"].get("created_at"),
                         "tags": doc["metadata"].get("tags", []),
                         "chunk_count": 1,
                         "url": doc["metadata"].get("url", ""),
                         "mime_type": doc["metadata"].get("mime_type", ""),
+                        "organization_id": doc["metadata"].get("organization_id", ""),
                         "summary": doc["content"][:150] + "..." if len(doc["content"]) > 150 else doc["content"]
                     }
                 else:
                     document_map[doc_id]["chunk_count"] += 1
-            
+
             # Get unique documents
             unique_documents = list(document_map.values())
+
+            # Post-filter by organization: include docs that match the org OR have no org set
+            if organization_id:
+                unique_documents = [
+                    d for d in unique_documents
+                    if not d.get("organization_id") or d["organization_id"] == organization_id
+                ]
+
+            # Post-filter by source types if requested
+            if _source_filter:
+                unique_documents = [d for d in unique_documents if d["source"] in _source_filter]
             
             # Sort by created_at (newest first)
             unique_documents.sort(
@@ -489,7 +522,7 @@ class ContextService:
             
             return {
                 "documents": unique_documents,
-                "total": total_count,
+                "total": sum(d["chunk_count"] for d in unique_documents),
                 "unique_count": len(unique_documents),
                 "limit": limit,
                 "offset": offset
@@ -540,10 +573,8 @@ class ContextService:
         total_chunks = 0
         context_by_source = {}
         
-        # Build base filters
+        # Build base filters — org_id is post-filtered to support personal + org docs
         base_filters = {"user_id": user_id}
-        if organization_id:
-            base_filters["organization_id"] = organization_id
         
         # Query each source type
         for source in source_types:
@@ -564,6 +595,13 @@ class ContextService:
                 )
                 
                 if results:
+                    # Post-filter by org: keep docs matching the org OR with no org
+                    if organization_id:
+                        results = [
+                            r for r in results
+                            if not r.get("metadata", {}).get("organization_id")
+                            or r["metadata"]["organization_id"] == organization_id
+                        ]
                     # Format results
                     formatted_results = self._format_context(results)
                     all_context.extend(formatted_results)

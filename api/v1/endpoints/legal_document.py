@@ -9,6 +9,7 @@ from backend.db.mongodb.repositories.permission_repository import permission_rep
 from backend.models.user import User
 from backend.agents.agent_service import AgentService
 from backend.agents.legal_document_agent import LegalDocumentAgent, LegalDocumentMode
+from backend.services.activity_logger import log_activity
 
 router = APIRouter()
 
@@ -126,9 +127,17 @@ async def process_legal_document(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=result["error"]
             )
-        
+
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="legal.document_analyzed",
+            details={"mode": request.mode},
+            related_resource_type="AGENT",
+            agent_name="Legal Document Agent",
+        )
         return result
-        
+
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

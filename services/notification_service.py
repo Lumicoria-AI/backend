@@ -427,6 +427,12 @@ class NotificationService:
         name: str
     ) -> None:
         """Send welcome email + in-app notification on signup."""
+        import asyncio
+
+        title = "Welcome to Lumicoria.ai! 🎉"
+        content = f"Hi {name}, your account is ready. Start exploring our AI agents to boost your productivity."
+        metadata = {"action": "signup"}
+
         try:
             # Send welcome email
             await self.send_email_notification(
@@ -443,17 +449,25 @@ class NotificationService:
             logger.error("Failed to send welcome email", user_id=user_id, error=str(e))
 
         try:
-            # Create in-app welcome notification
+            # Create in-app welcome notification (no push yet)
             await self.create_in_app_notification(
                 user_id=user_id,
-                title="Welcome to Lumicoria.ai! 🎉",
-                content=f"Hi {name}, your account is ready. Start exploring our AI agents to boost your productivity.",
+                title=title,
+                content=content,
                 notification_type=NotificationType.AUTH,
                 priority=NotificationPriority.NORMAL,
-                metadata={"action": "signup"},
+                metadata=metadata,
+                send_push=False,
             )
         except Exception as e:
             logger.error("Failed to create welcome in-app notification", user_id=user_id, error=str(e))
+
+        # Delay push so frontend has time to register FCM token
+        try:
+            await asyncio.sleep(5)
+            await self._send_push_notification(user_id, title, content, metadata)
+        except Exception as e:
+            logger.error("Failed to send welcome push notification", user_id=user_id, error=str(e))
 
     async def send_login_alert(
         self,
@@ -464,11 +478,26 @@ class NotificationService:
         device: str = None,
         activity_time: str = None,
     ) -> None:
-        """Send security alert email + in-app notification on login."""
+        """Send security alert email + in-app notification on login.
+
+        The push notification is sent after a short delay to give the
+        frontend time to register the FCM device token (which happens
+        after the login response is received).
+        """
+        import asyncio
         from datetime import datetime as dt
 
         activity_time = activity_time or dt.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
+        title = "New Sign-In Detected"
+        content = f"A new sign-in was detected from {ip_address or 'an unknown location'} at {activity_time}."
+        metadata = {
+            "action": "login",
+            "ip_address": ip_address,
+            "device": device,
+        }
+
+        # 1. Send email alert (no delay needed)
         try:
             await self.send_email_notification(
                 to_email=email,
@@ -480,27 +509,34 @@ class NotificationService:
                     "activity_time": activity_time,
                     "ip_address": ip_address or "Unknown",
                     "device": device or "Unknown device",
+                    "secure_account_url": f"{settings.BACKEND_CORS_ORIGINS[0] if settings.BACKEND_CORS_ORIGINS else 'https://lumicoria.ai'}/security",
+                    "review_activity_url": f"{settings.BACKEND_CORS_ORIGINS[0] if settings.BACKEND_CORS_ORIGINS else 'https://lumicoria.ai'}/security/activity",
                 },
                 priority=NotificationPriority.HIGH,
             )
         except Exception as e:
             logger.error("Failed to send login alert email", user_id=user_id, error=str(e))
 
+        # 2. Store in-app notification immediately (send_push=False, we handle push separately)
         try:
             await self.create_in_app_notification(
                 user_id=user_id,
-                title="New Sign-In Detected",
-                content=f"A new sign-in was detected from {ip_address or 'an unknown location'} at {activity_time}.",
+                title=title,
+                content=content,
                 notification_type=NotificationType.AUTH,
                 priority=NotificationPriority.HIGH,
-                metadata={
-                    "action": "login",
-                    "ip_address": ip_address,
-                    "device": device,
-                },
+                metadata=metadata,
+                send_push=False,  # Don't push yet — device token may not be registered
             )
         except Exception as e:
             logger.error("Failed to create login in-app notification", user_id=user_id, error=str(e))
+
+        # 3. Delay push notification so frontend has time to register FCM token
+        try:
+            await asyncio.sleep(5)
+            await self._send_push_notification(user_id, title, content, metadata)
+        except Exception as e:
+            logger.error("Failed to send login push notification", user_id=user_id, error=str(e))
 
     async def send_billing_notification(
         self,

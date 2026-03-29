@@ -30,6 +30,7 @@ from backend.api.v1.endpoints import (
     websocket,
     device_tokens,
     billing,
+    security,
 )
 from backend.api.routers.research_mentor import router as research_mentor_router
 from backend.api.routers.ethics_bias_router import router as ethics_bias_router
@@ -173,6 +174,20 @@ api_router.include_router(
     projects.router,
     prefix="/projects",
     tags=["projects"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Research endpoints
+api_router.include_router(
+    research.router,
+    prefix="/research",
+    tags=["research"],
     responses={
         200: {"description": "Success"},
         400: {"description": "Bad Request"},
@@ -348,6 +363,20 @@ api_router.include_router(
         404: {"description": "Not Found"},
         422: {"description": "Validation Error"},
         500: {"description": "Internal Server Error"}
+    }
+)
+
+# Security endpoints
+api_router.include_router(
+    security.router,
+    prefix="/security",
+    tags=["security"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        403: {"description": "Forbidden"},
+        500: {"description": "Internal Server Error"},
     }
 )
 

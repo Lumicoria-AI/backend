@@ -8,6 +8,7 @@ from backend.api.deps import get_current_active_user
 from backend.agents.agent_service import AgentService
 from backend.agents.creative_agent import CreativeAgent
 from backend.models.user import User
+from backend.services.activity_logger import log_activity
 
 # Configure logger
 logger = structlog.get_logger(__name__)
@@ -77,7 +78,15 @@ async def generate_creative_content(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=result["error"]
             )
-        
+
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="creative.content_generated",
+            details={"content_type": request.content_type, "topic": request.topic[:100]},
+            related_resource_type="AGENT",
+            agent_name="Creative Agent",
+        )
         return result
     except Exception as e:
         logger.error("Error generating creative content", error=str(e))
@@ -130,7 +139,15 @@ async def generate_marketing_content(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=result["error"]
             )
-        
+
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="creative.content_generated",
+            details={"content_type": "marketing", "topic": request.topic[:100]},
+            related_resource_type="AGENT",
+            agent_name="Creative Agent",
+        )
         return result
     except Exception as e:
         logger.error("Error generating marketing content", error=str(e))
@@ -183,7 +200,15 @@ async def generate_story(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=result["error"]
             )
-        
+
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="creative.content_generated",
+            details={"content_type": "storytelling", "topic": request.topic[:100]},
+            related_resource_type="AGENT",
+            agent_name="Creative Agent",
+        )
         return result
     except Exception as e:
         logger.error("Error generating story content", error=str(e))
@@ -236,7 +261,15 @@ async def generate_blog_post(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=result["error"]
             )
-        
+
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="creative.content_generated",
+            details={"content_type": "blog_post", "topic": request.topic[:100]},
+            related_resource_type="AGENT",
+            agent_name="Creative Agent",
+        )
         return result
     except Exception as e:
         logger.error("Error generating blog post", error=str(e))
@@ -289,7 +322,15 @@ async def generate_social_media_content(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=result["error"]
             )
-        
+
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="creative.content_generated",
+            details={"content_type": "social_media", "topic": request.topic[:100]},
+            related_resource_type="AGENT",
+            agent_name="Creative Agent",
+        )
         return result
     except Exception as e:
         logger.error("Error generating social media content", error=str(e))

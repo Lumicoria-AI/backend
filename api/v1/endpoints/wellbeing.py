@@ -12,6 +12,7 @@ from backend.db.cassandra.wellbeing_repository import cassandra_wellbeing_reposi
 from backend.core.config import settings
 from backend.db.mongodb.repositories.permission_repository import permission_repository
 from backend.models.user import User
+from backend.services.activity_logger import log_activity
 from backend.models.wellbeing import (
     WellbeingMetric,
     WellbeingMetricCreate,
@@ -98,6 +99,14 @@ async def record_wellbeing_metric(
                     )
                 except Exception:
                     pass
+            await log_activity(
+                user_id=str(current_user.id),
+                organization_id=current_user.organization_id,
+                activity_type="wellbeing.metric_recorded",
+                details={"metric_type": metric_in.metric_type, "source": metric_in.source},
+                related_resource_type="AGENT",
+                agent_name="Wellbeing Agent",
+            )
             return metric
         # Fallback to MongoDB implementation if Cassandra is disabled
         metric = await wellbeing_repository.create_metric(
@@ -107,6 +116,14 @@ async def record_wellbeing_metric(
             value=metric_in.value,
             metadata=metric_in.metadata,
             source=metric_in.source
+        )
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="wellbeing.metric_recorded",
+            details={"metric_type": metric_in.metric_type, "source": metric_in.source},
+            related_resource_type="AGENT",
+            agent_name="Wellbeing Agent",
         )
         return metric
     except Exception as e:
@@ -216,6 +233,14 @@ async def create_wellbeing_goal(
             start_date=goal_in.start_date,
             end_date=goal_in.end_date,
             metadata=goal_in.metadata
+        )
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="wellbeing.goal_created",
+            details={"goal_type": goal_in.goal_type, "target_value": goal_in.target_value},
+            related_resource_type="AGENT",
+            agent_name="Wellbeing Agent",
         )
         return goal
     except Exception as e:
@@ -565,6 +590,14 @@ async def record_activity(
             activity_type=activity_type,
             duration_minutes=duration_minutes,
             metadata=metadata
+        )
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="wellbeing.activity_recorded",
+            details={"activity_type": str(activity_type), "duration_minutes": duration_minutes},
+            related_resource_type="AGENT",
+            agent_name="Wellbeing Agent",
         )
         return activity
     except Exception as e:

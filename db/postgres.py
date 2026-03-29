@@ -126,7 +126,7 @@ async def get_optional_async_db() -> AsyncGenerator[Optional[AsyncSession], None
 
 
 async def init_postgres() -> None:
-    """Initialize Postgres connection and validate connectivity."""
+    """Initialize Postgres connection, validate connectivity, and create tables."""
     if not (settings.POSTGRES_ENABLED and settings.SQLALCHEMY_DATABASE_URI):
         logger.info("Postgres disabled or not configured; skipping init")
         return
@@ -134,7 +134,14 @@ async def init_postgres() -> None:
         engine = _get_async_engine()
         async with engine.begin() as conn:
             await conn.execute(text("SELECT 1"))
-        logger.info("Postgres initialized successfully")
+        logger.info("Postgres connection verified")
+
+        # Auto-create tables from SQLAlchemy models if they don't exist
+        # Import models so Base.metadata knows about them
+        import backend.db.postgres_models  # noqa: F401
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Postgres tables created/verified successfully")
     except Exception as e:
         logger.error("Failed to initialize Postgres", error=str(e))
         raise

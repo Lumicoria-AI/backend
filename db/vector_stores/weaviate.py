@@ -1,5 +1,5 @@
 """
-Weaviate Vector Store Implementation for Lumicoria.ai
+Weaviate Vector Store Implementation for Lumicoria.ai (v4 client)
 
 This module provides a comprehensive integration with Weaviate as a vector store
 for storing and retrieving document embeddings and context data.
@@ -8,184 +8,114 @@ for storing and retrieving document embeddings and context data.
 import uuid
 import json
 import weaviate
-from typing import Dict, Any, List, Optional, Union
-from datetime import datetime
+from weaviate.classes.init import Auth
+from weaviate.classes.config import Property, DataType, Configure
+from weaviate.classes.query import MetadataQuery, Filter
+from weaviate.classes.data import DataObject
+from typing import Dict, Any, List, Optional
+from datetime import datetime, timezone
 import structlog
-import asyncio
-from concurrent.futures import ThreadPoolExecutor
 
 from ...core.config import settings
 
 logger = structlog.get_logger(__name__)
 
+
 class WeaviateDocumentStore:
     """
-    Vector store implementation using Weaviate for document storage and retrieval.
-    This class handles document indexing, searching, and metadata management.
+    Vector store implementation using Weaviate v4 for document storage and retrieval.
     """
-    
+
     def __init__(
         self,
         collection_name: str = "Documents",
         url: Optional[str] = None,
         api_key: Optional[str] = None,
-        embedding_dimension: int = 1536,
+        embedding_dimension: int = 768,
     ):
-        """
-        Initialize the Weaviate document store.
-        
-        Args:
-            collection_name: Name of the collection to store documents
-            url: Weaviate server URL
-            api_key: Weaviate API key for authentication
-            embedding_dimension: Dimension of embedding vectors
-        """
         self.collection_name = collection_name
         self.url = url or settings.db.VECTOR_STORE_URL
         self.api_key = api_key or settings.db.VECTOR_STORE_API_KEY
         self.embedding_dimension = embedding_dimension
-        self.client = None
-        self.executor = ThreadPoolExecutor(max_workers=10)
-        
+        self.client: Optional[weaviate.WeaviateClient] = None
+
     async def connect(self) -> None:
-        """
-        Connect to Weaviate server and set up the collection schema.
-        """
+        """Connect to Weaviate server and set up the collection schema."""
         try:
-            # Connect to Weaviate
-            auth_client = None
             if self.api_key:
-                auth_client = weaviate.AuthApiKey(api_key=self.api_key)
-            
-            def _create_client():
-                return weaviate.Client(
-                    url=self.url,
-                    auth_client_secret=auth_client,
-                    timeout_config=(5, 60)  # (connect_timeout, read_timeout)
+                self.client = weaviate.connect_to_custom(
+                    http_host=self.url.replace("http://", "").replace("https://", "").split(":")[0],
+                    http_port=int(self.url.split(":")[-1]) if ":" in self.url.split("//")[-1] else 8080,
+                    http_secure=self.url.startswith("https"),
+                    grpc_host=self.url.replace("http://", "").replace("https://", "").split(":")[0],
+                    grpc_port=50051,
+                    grpc_secure=False,
+                    auth_credentials=Auth.api_key(self.api_key),
                 )
-            
-            # Run client creation in executor to avoid blocking
-            self.client = await asyncio.get_event_loop().run_in_executor(
-                self.executor, _create_client
-            )
-            
-            # Check if collection exists
-            if not self._collection_exists():
+            else:
+                # Parse host and port from URL
+                url_no_scheme = self.url.replace("http://", "").replace("https://", "")
+                parts = url_no_scheme.split(":")
+                host = parts[0]
+                port = int(parts[1]) if len(parts) > 1 else 8080
+
+                self.client = weaviate.connect_to_custom(
+                    http_host=host,
+                    http_port=port,
+                    http_secure=self.url.startswith("https"),
+                    grpc_host=host,
+                    grpc_port=50051,
+                    grpc_secure=False,
+                )
+
+            # Create collection if it doesn't exist
+            if not self.client.collections.exists(self.collection_name):
                 await self._create_collection()
-                
+
             logger.info("Connected to Weaviate", url=self.url, collection=self.collection_name)
-        
+
         except Exception as e:
             logger.error("Failed to connect to Weaviate", error=str(e))
             raise
-            
-    def _collection_exists(self) -> bool:
-        """Check if collection exists in Weaviate."""
-        try:
-            schema = self.client.schema.get()
-            classes = schema.get("classes", [])
-            return any(cls["class"] == self.collection_name for cls in classes)
-        except Exception as e:
-            logger.error("Error checking if collection exists", error=str(e))
-            return False
-    
+
     async def _create_collection(self) -> None:
-        """Create collection schema in Weaviate."""
+        """Create collection schema in Weaviate v4."""
         try:
-            class_obj = {
-                "class": self.collection_name,
-                "description": "Document collection for Lumicoria RAG system",
-                "vectorizer": "none",  # We'll provide our own vectors
-                "properties": [
-                    {
-                        "name": "content",
-                        "dataType": ["text"],
-                        "description": "The text content of the document chunk"
-                    },
-                    {
-                        "name": "metadata",
-                        "dataType": ["text"],
-                        "description": "JSON string of document metadata"
-                    },
-                    {
-                        "name": "document_id",
-                        "dataType": ["string"],
-                        "description": "Original document identifier",
-                        "indexFilterable": True,
-                        "indexSearchable": True
-                    },
-                    {
-                        "name": "chunk_id",
-                        "dataType": ["int"],
-                        "description": "Chunk index within the document",
-                        "indexFilterable": True
-                    },
-                    {
-                        "name": "source",
-                        "dataType": ["string"],
-                        "description": "Source of the document (e.g., upload, drive, chat)",
-                        "indexFilterable": True,
-                        "indexSearchable": True
-                    },
-                    {
-                        "name": "user_id",
-                        "dataType": ["string"],
-                        "description": "ID of the user who owns this document",
-                        "indexFilterable": True
-                    },
-                    {
-                        "name": "organization_id",
-                        "dataType": ["string"],
-                        "description": "ID of the organization that owns this document",
-                        "indexFilterable": True
-                    },
-                    {
-                        "name": "created_at",
-                        "dataType": ["date"],
-                        "description": "Timestamp when this document was added",
-                        "indexFilterable": True
-                    },
-                    {
-                        "name": "mime_type",
-                        "dataType": ["string"],
-                        "description": "MIME type of the original document",
-                        "indexFilterable": True
-                    },
-                    {
-                        "name": "filename",
-                        "dataType": ["string"],
-                        "description": "Original filename",
-                        "indexSearchable": True
-                    },
-                    {
-                        "name": "title",
-                        "dataType": ["string"],
-                        "description": "Document title",
-                        "indexSearchable": True
-                    },
-                    {
-                        "name": "tags",
-                        "dataType": ["string[]"],
-                        "description": "List of tags associated with this document",
-                        "indexFilterable": True,
-                        "indexSearchable": True
-                    }
-                ]
-            }
-            
-            def _create_class():
-                return self.client.schema.create_class(class_obj)
-            
-            await asyncio.get_event_loop().run_in_executor(
-                self.executor, _create_class
+            self.client.collections.create(
+                name=self.collection_name,
+                description="Document collection for Lumicoria RAG system",
+                vectorizer_config=Configure.Vectorizer.none(),
+                properties=[
+                    Property(name="content", data_type=DataType.TEXT, description="Text content of the chunk"),
+                    Property(name="metadata", data_type=DataType.TEXT, description="JSON string of metadata"),
+                    Property(name="document_id", data_type=DataType.TEXT, description="Original document ID",
+                             index_filterable=True, index_searchable=True),
+                    Property(name="chunk_id", data_type=DataType.INT, description="Chunk index",
+                             index_filterable=True),
+                    Property(name="source", data_type=DataType.TEXT, description="Source (upload, drive, chat)",
+                             index_filterable=True, index_searchable=True),
+                    Property(name="user_id", data_type=DataType.TEXT, description="Owner user ID",
+                             index_filterable=True),
+                    Property(name="organization_id", data_type=DataType.TEXT, description="Owner org ID",
+                             index_filterable=True),
+                    Property(name="created_at", data_type=DataType.DATE, description="Created timestamp",
+                             index_filterable=True),
+                    Property(name="mime_type", data_type=DataType.TEXT, description="MIME type",
+                             index_filterable=True),
+                    Property(name="filename", data_type=DataType.TEXT, description="Original filename",
+                             index_searchable=True),
+                    Property(name="title", data_type=DataType.TEXT, description="Document title",
+                             index_searchable=True),
+                    Property(name="tags", data_type=DataType.TEXT_ARRAY, description="Tags",
+                             index_filterable=True, index_searchable=True),
+                ],
             )
-            
             logger.info("Created Weaviate collection", collection=self.collection_name)
-            
+
         except Exception as e:
             logger.error("Failed to create collection schema", error=str(e))
             raise
-    
+
     async def add_documents(
         self,
         texts: List[str],
@@ -193,477 +123,285 @@ class WeaviateDocumentStore:
         metadatas: Optional[List[Dict[str, Any]]] = None,
         ids: Optional[List[str]] = None,
     ) -> List[str]:
-        """
-        Add documents to the vector store with their embeddings.
-        
-        Args:
-            texts: List of text chunks to add
-            embeddings: List of embedding vectors for each text chunk
-            metadatas: Optional list of metadata dictionaries
-            ids: Optional list of document IDs
-            
-        Returns:
-            List of document IDs
-        """
+        """Add documents to the vector store with their embeddings."""
         if not self.client:
             await self.connect()
-            
-        if not all(len(emb) == self.embedding_dimension for emb in embeddings):
-            logger.error(
-                "Embedding dimension mismatch", 
-                expected=self.embedding_dimension,
-                found=[len(emb) for emb in embeddings]
-            )
-            raise ValueError("Embedding dimension mismatch")
-            
-        # Ensure metadatas and ids are properly initialized
+
         if metadatas is None:
             metadatas = [{} for _ in texts]
-            
         if ids is None:
             ids = [str(uuid.uuid4()) for _ in texts]
-            
-        # Process in batches to avoid overwhelming the server
-        batch_size = 50
+
+        collection = self.client.collections.get(self.collection_name)
         results_ids = []
-        
+        batch_size = 50
+
         for i in range(0, len(texts), batch_size):
-            batch_texts = texts[i:i+batch_size]
-            batch_embeddings = embeddings[i:i+batch_size]
-            batch_metadatas = metadatas[i:i+batch_size]
-            batch_ids = ids[i:i+batch_size]
-            
-            # Create batch objects
-            with self.client.batch as batch:
-                batch.batch_size = min(len(batch_texts), 50)
-                
-                for text, embedding, metadata, doc_id in zip(batch_texts, batch_embeddings, batch_metadatas, batch_ids):
-                    # Ensure metadata is json-serializable
-                    metadata_str = json.dumps(metadata)
-                    
-                    # Get standard metadata fields
-                    source = metadata.get("source", "upload")
-                    user_id = metadata.get("user_id", "")
-                    org_id = metadata.get("organization_id", "")
-                    doc_id_main = metadata.get("document_id", "")
-                    chunk_id = metadata.get("chunk_id", 0)
-                    created_at = metadata.get("created_at", datetime.utcnow().isoformat())
-                    mime_type = metadata.get("mime_type", "text/plain")
-                    filename = metadata.get("filename", "")
-                    title = metadata.get("title", "")
-                    tags = metadata.get("tags", [])
-                    
-                    properties = {
-                        "content": text,
-                        "metadata": metadata_str,
-                        "document_id": doc_id_main,
-                        "chunk_id": chunk_id,
-                        "source": source,
-                        "user_id": user_id,
-                        "organization_id": org_id,
-                        "created_at": created_at,
-                        "mime_type": mime_type,
-                        "filename": filename,
-                        "title": title,
-                        "tags": tags
-                    }
-                    
-                    # Add object to batch
-                    batch.add_data_object(
-                        data_object=properties,
-                        class_name=self.collection_name,
-                        uuid=doc_id,
-                        vector=embedding
-                    )
-                    
-                    results_ids.append(doc_id)
-                    
+            batch_texts = texts[i:i + batch_size]
+            batch_embeddings = embeddings[i:i + batch_size]
+            batch_metadatas = metadatas[i:i + batch_size]
+            batch_ids = ids[i:i + batch_size]
+
+            data_objects = []
+            for text, embedding, metadata, doc_id in zip(batch_texts, batch_embeddings, batch_metadatas, batch_ids):
+                metadata_str = json.dumps(metadata)
+                created_at = metadata.get("created_at", datetime.now(timezone.utc).isoformat())
+                # Ensure RFC3339 compliance — append Z if no timezone info
+                if created_at and not created_at.endswith(("Z", "+00:00")) and "+" not in created_at[19:]:
+                    created_at = created_at + "Z"
+
+                properties = {
+                    "content": text,
+                    "metadata": metadata_str,
+                    "document_id": metadata.get("document_id", ""),
+                    "chunk_id": metadata.get("chunk_id", 0),
+                    "source": metadata.get("source", "upload"),
+                    "user_id": metadata.get("user_id", ""),
+                    "organization_id": metadata.get("organization_id", ""),
+                    "created_at": created_at,
+                    "mime_type": metadata.get("mime_type", "text/plain"),
+                    "filename": metadata.get("filename", ""),
+                    "title": metadata.get("title", ""),
+                    "tags": metadata.get("tags", []),
+                }
+
+                data_objects.append(DataObject(
+                    properties=properties,
+                    uuid=doc_id,
+                    vector=embedding,
+                ))
+                results_ids.append(doc_id)
+
+            # Batch insert
+            collection.data.insert_many(data_objects)
+
             logger.info(
                 "Added documents to Weaviate batch",
                 count=len(batch_texts),
-                collection=self.collection_name
+                collection=self.collection_name,
             )
-            
+
         return results_ids
-    
+
     async def similarity_search(
         self,
         query_vector: List[float],
         k: int = 4,
-        filters: Optional[Dict[str, Any]] = None
+        filters: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        Search for similar documents based on vector similarity.
-        
-        Args:
-            query_vector: Embedding vector to search with
-            k: Number of results to return
-            filters: Optional filters for search
-            
-        Returns:
-            List of document dictionaries with content, metadata, and score
-        """
+        """Search for similar documents based on vector similarity."""
         if not self.client:
             await self.connect()
-            
-        # Construct filter if provided
-        where_filter = None
-        if filters:
-            where_filter = self._build_where_filter(filters)
-            
-        def _vector_search():
-            query_result = (
-                self.client.query
-                .get(self.collection_name, ["content", "metadata", "document_id", "chunk_id", "source"])
-                .with_near_vector({
-                    "vector": query_vector
-                })
-                .with_additional(["id", "distance"])
-                .with_limit(k)
-            )
-            
-            # Apply filter if provided
-            if where_filter:
-                query_result = query_result.with_where(where_filter)
-                
-            result = query_result.do()
-            return result
-            
-        # Execute search in executor
-        result = await asyncio.get_event_loop().run_in_executor(
-            self.executor, _vector_search
-        )
-        
-        # Process results
+
+        collection = self.client.collections.get(self.collection_name)
+
+        wv_filter = self._build_filter(filters) if filters else None
+
         try:
-            objects = result["data"]["Get"][self.collection_name]
-            
+            response = collection.query.near_vector(
+                near_vector=query_vector,
+                limit=k,
+                filters=wv_filter,
+                return_metadata=MetadataQuery(distance=True),
+                return_properties=["content", "metadata", "document_id", "chunk_id", "source"],
+            )
+
             search_results = []
-            for obj in objects:
-                # Calculate score (1 - distance) so higher is better
-                distance = obj["_additional"]["distance"]
+            for obj in response.objects:
+                distance = obj.metadata.distance if obj.metadata.distance is not None else 0.0
                 score = 1.0 - distance
-                
-                # Parse metadata
-                metadata = json.loads(obj["metadata"]) if obj["metadata"] else {}
-                
-                # Include original fields
-                metadata["document_id"] = obj["document_id"]
-                metadata["chunk_id"] = obj["chunk_id"]
-                metadata["source"] = obj["source"]
-                
-                # Create result object
+
+                metadata = json.loads(obj.properties.get("metadata", "{}")) if obj.properties.get("metadata") else {}
+                metadata["document_id"] = obj.properties.get("document_id", "")
+                metadata["chunk_id"] = obj.properties.get("chunk_id", 0)
+                metadata["source"] = obj.properties.get("source", "")
+
                 search_results.append({
-                    "id": obj["_additional"]["id"],
-                    "content": obj["content"],
+                    "id": str(obj.uuid),
+                    "content": obj.properties.get("content", ""),
                     "metadata": metadata,
-                    "score": score
+                    "score": score,
                 })
-                
+
             return search_results
-            
-        except (KeyError, json.JSONDecodeError) as e:
-            logger.error("Error processing search results", error=str(e), result=result)
+
+        except Exception as e:
+            logger.error("Error in similarity search", error=str(e))
             return []
-    
-    def _build_where_filter(self, filters: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Build a Weaviate where filter from a dictionary of filters.
-        Supports basic operators like eq, ne, gt, gte, lt, lte, in, nin.
-        
-        Args:
-            filters: Dictionary of filters {field: value} or {field: {operator: value}}
-            
-        Returns:
-            Weaviate where filter object
-        """
-        operator_map = {
-            "eq": "Equal",
-            "ne": "NotEqual", 
-            "gt": "GreaterThan",
-            "gte": "GreaterThanEqual",
-            "lt": "LessThan", 
-            "lte": "LessThanEqual",
-            "in": "ContainsAny",
-            "nin": "NotContainsAny",
-            "contains": "Like",
-            "not_contains": "NotLike"
-        }
-        
-        def build_operands(field: str, value: Any) -> Dict[str, Any]:
-            # If value is a dict with an operator
-            if isinstance(value, dict):
-                operands = []
-                for op, val in value.items():
-                    if op not in operator_map:
-                        logger.warning(f"Unsupported operator {op} for field {field}")
-                        continue
-                        
-                    operands.append({
-                        "operator": operator_map[op],
-                        "path": [field],
-                        "valueType": "string" if isinstance(val, str) else "number",
-                        "value": val
-                    })
-                return {"operands": operands, "operator": "And"}
-                
-            # Simple equality
-            return {
-                "operator": "Equal",
-                "path": [field],
-                "valueType": "string" if isinstance(value, str) else "number",
-                "value": value
-            }
-            
-        where_filter = {"operator": "And", "operands": []}
-        
+
+    def _build_filter(self, filters: Dict[str, Any]) -> Optional[Filter]:
+        """Build a Weaviate v4 Filter from a dictionary."""
+        filter_parts = []
+
         for field, value in filters.items():
-            where_filter["operands"].append(build_operands(field, value))
-            
-        return where_filter
-    
+            if isinstance(value, dict):
+                for op, val in value.items():
+                    if op == "eq":
+                        filter_parts.append(Filter.by_property(field).equal(val))
+                    elif op == "ne":
+                        filter_parts.append(Filter.by_property(field).not_equal(val))
+                    elif op == "gt":
+                        filter_parts.append(Filter.by_property(field).greater_than(val))
+                    elif op == "gte":
+                        filter_parts.append(Filter.by_property(field).greater_or_equal(val))
+                    elif op == "lt":
+                        filter_parts.append(Filter.by_property(field).less_than(val))
+                    elif op == "lte":
+                        filter_parts.append(Filter.by_property(field).less_or_equal(val))
+                    elif op == "in":
+                        filter_parts.append(Filter.by_property(field).contains_any(val))
+                    elif op == "like":
+                        filter_parts.append(Filter.by_property(field).like(val))
+            elif isinstance(value, list):
+                filter_parts.append(Filter.by_property(field).contains_any(value))
+            else:
+                filter_parts.append(Filter.by_property(field).equal(value))
+
+        if not filter_parts:
+            return None
+        if len(filter_parts) == 1:
+            return filter_parts[0]
+
+        # Chain with AND
+        result = filter_parts[0]
+        for f in filter_parts[1:]:
+            result = result & f
+        return result
+
     async def get_documents(
         self,
         filters: Optional[Dict[str, Any]] = None,
         limit: int = 100,
         offset: int = 0,
         sort_by: Optional[str] = None,
-        sort_order: str = "desc"
+        sort_order: str = "desc",
     ) -> List[Dict[str, Any]]:
-        """
-        Get documents from the vector store based on filters.
-        
-        Args:
-            filters: Optional filters to select documents
-            limit: Maximum number of documents to return
-            offset: Offset for pagination
-            sort_by: Field to sort by (e.g., created_at, title)
-            sort_order: Sort order (asc or desc)
-            
-        Returns:
-            List of document dictionaries with content and metadata
-        """
+        """Get documents from the vector store based on filters."""
         if not self.client:
             await self.connect()
-            
-        # Construct filter if provided
-        where_filter = None
-        if filters:
-            where_filter = self._build_where_filter(filters)
-            
-        def _get_documents():
-            query = (
-                self.client.query
-                .get(self.collection_name, ["content", "metadata", "document_id", "chunk_id", 
-                                          "source", "title", "created_at", "tags"])
-                .with_additional(["id"])
-                .with_limit(limit)
-                .with_offset(offset)
-            )
-            
-            # Apply sort if specified
-            if sort_by:
-                query = query.with_sort([{
-                    "path": [sort_by],
-                    "order": sort_order.lower()
-                }])
-            
-            # Apply filter if provided
-            if where_filter:
-                query = query.with_where(where_filter)
-                
-            result = query.do()
-            return result
-            
-        # Execute query in executor
-        result = await asyncio.get_event_loop().run_in_executor(
-            self.executor, _get_documents
-        )
-        
-        # Process results
+
+        collection = self.client.collections.get(self.collection_name)
+        wv_filter = self._build_filter(filters) if filters else None
+
         try:
-            objects = result["data"]["Get"][self.collection_name]
-            
+            response = collection.query.fetch_objects(
+                limit=limit,
+                offset=offset,
+                filters=wv_filter,
+                return_metadata=MetadataQuery(creation_time=True),
+                return_properties=["content", "metadata", "document_id", "chunk_id",
+                                   "source", "title", "created_at", "tags"],
+            )
+
             documents = []
-            for obj in objects:
-                # Parse metadata
-                metadata = json.loads(obj["metadata"]) if obj["metadata"] else {}
-                
-                # Include original fields
-                metadata["document_id"] = obj["document_id"]
-                metadata["chunk_id"] = obj["chunk_id"]
-                metadata["source"] = obj["source"]
-                metadata["title"] = obj["title"]
-                metadata["created_at"] = obj["created_at"]
-                if "tags" in obj:
-                    metadata["tags"] = obj["tags"]
-                
-                # Create result object
+            for obj in response.objects:
+                metadata = json.loads(obj.properties.get("metadata", "{}")) if obj.properties.get("metadata") else {}
+                metadata["document_id"] = obj.properties.get("document_id", "")
+                metadata["chunk_id"] = obj.properties.get("chunk_id", 0)
+                metadata["source"] = obj.properties.get("source", "")
+                metadata["title"] = obj.properties.get("title", "")
+                metadata["created_at"] = obj.properties.get("created_at", "")
+                if obj.properties.get("tags"):
+                    metadata["tags"] = obj.properties["tags"]
+
                 documents.append({
-                    "id": obj["_additional"]["id"],
-                    "content": obj["content"],
-                    "metadata": metadata
+                    "id": str(obj.uuid),
+                    "content": obj.properties.get("content", ""),
+                    "metadata": metadata,
                 })
-                
+
             return documents
-            
-        except (KeyError, json.JSONDecodeError) as e:
-            logger.error("Error processing document results", error=str(e), result=result)
+
+        except Exception as e:
+            logger.error("Error getting documents", error=str(e))
             return []
-    
+
     async def delete_documents(
         self,
         ids: Optional[List[str]] = None,
-        filters: Optional[Dict[str, Any]] = None
+        filters: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """
-        Delete documents from the vector store.
-        
-        Args:
-            ids: Optional list of document IDs to delete
-            filters: Optional filters to select documents to delete
-            
-        Returns:
-            True if deletion was successful
-        """
+        """Delete documents from the vector store."""
         if not self.client:
             await self.connect()
-            
-        try:            # Delete by IDs if provided
+
+        collection = self.client.collections.get(self.collection_name)
+
+        try:
             if ids:
                 for doc_id in ids:
-                    def _delete_by_id(id_to_delete):
-                        self.client.data_object.delete(
-                            uuid=id_to_delete,
-                            class_name=self.collection_name
-                        )
-                        
-                    await asyncio.get_event_loop().run_in_executor(
-                        self.executor,
-                        lambda: _delete_by_id(doc_id)
-                    )
+                    collection.data.delete_by_id(doc_id)
                 logger.info("Deleted documents by IDs", count=len(ids))
                 return True
-                
-            # Delete by filters if provided
+
             elif filters:
-                where_filter = self._build_where_filter(filters)
-                
-                def _delete_by_filter():
-                    self.client.batch.delete_objects(
-                        class_name=self.collection_name,
-                        where=where_filter
-                    )
-                
-                await asyncio.get_event_loop().run_in_executor(
-                    self.executor, _delete_by_filter
-                )
-                
-                logger.info("Deleted documents by filter", filters=filters)
-                return True
-                
+                wv_filter = self._build_filter(filters)
+                if wv_filter:
+                    collection.data.delete_many(where=wv_filter)
+                    logger.info("Deleted documents by filter", filters=filters)
+                    return True
+
             return False
-            
+
         except Exception as e:
             logger.error("Error deleting documents", error=str(e))
             return False
-    
+
     async def get_document_count(
         self,
-        filters: Optional[Dict[str, Any]] = None
+        filters: Optional[Dict[str, Any]] = None,
     ) -> int:
-        """
-        Get the total count of documents matching the filters.
-        
-        Args:
-            filters: Optional filters to count matching documents
-            
-        Returns:
-            Total number of matching documents
-        """
+        """Get the total count of documents matching the filters."""
         if not self.client:
             await self.connect()
-            
-        where_filter = None
-        if filters:
-            where_filter = self._build_where_filter(filters)
-            
-        def _get_count():
-            query = (
-                self.client.query
-                .aggregate(self.collection_name)
-                .with_meta_count()
-            )
-            
-            if where_filter:
-                query = query.with_where(where_filter)
-                
-            result = query.do()
-            return result
-            
-        result = await asyncio.get_event_loop().run_in_executor(
-            self.executor, _get_count
-        )
-        
+
+        collection = self.client.collections.get(self.collection_name)
+
         try:
-            return result["data"]["Aggregate"][self.collection_name][0]["meta"]["count"]
-        except (KeyError, IndexError):
-            logger.error("Error getting document count", result=result)
+            wv_filter = self._build_filter(filters) if filters else None
+            result = collection.aggregate.over_all(total_count=True, filters=wv_filter)
+            return result.total_count or 0
+        except Exception as e:
+            logger.error("Error getting document count", error=str(e))
             return 0
-            
+
     async def batch_add_documents(self, documents: List[Dict[str, Any]], batch_size: int = 100):
-        """
-        Add multiple documents in batches.
-        
-        Args:
-            documents: List of document dictionaries with content and metadata
-            batch_size: Number of documents to process in each batch
-        """
+        """Add multiple documents in batches."""
         if not self.client:
             await self.connect()
-            
+
+        collection = self.client.collections.get(self.collection_name)
+
         for i in range(0, len(documents), batch_size):
             batch = documents[i:i + batch_size]
-            
-            def _batch_import():
-                with self.client.batch as batch_context:
-                    # Configure batch
-                    batch_context.batch_size = batch_size
-                    batch_context.dynamic = True
-                    
-                    # Add each document
-                    for doc in batch:
-                        properties = {
-                            "content": doc["content"],
-                            "metadata": json.dumps(doc.get("metadata", {})),
-                            "document_id": doc["metadata"].get("document_id", str(uuid.uuid4())),
-                            "chunk_id": doc["metadata"].get("chunk_id", 0),
-                            "source": doc["metadata"].get("source", "unknown"),
-                            "title": doc["metadata"].get("title", ""),
-                            "created_at": doc["metadata"].get("created_at", datetime.utcnow().isoformat()),
-                            "tags": doc["metadata"].get("tags", [])
-                        }
-                        
-                        # Add document to batch
-                        batch_context.add_data_object(
-                            data_object=properties,
-                            class_name=self.collection_name
-                        )
-            
-            # Execute batch in executor
-            await asyncio.get_event_loop().run_in_executor(
-                self.executor, _batch_import
-            )
-    
+
+            data_objects = []
+            for doc in batch:
+                meta = doc.get("metadata", {})
+                properties = {
+                    "content": doc["content"],
+                    "metadata": json.dumps(meta),
+                    "document_id": meta.get("document_id", str(uuid.uuid4())),
+                    "chunk_id": meta.get("chunk_id", 0),
+                    "source": meta.get("source", "unknown"),
+                    "title": meta.get("title", ""),
+                    "created_at": meta.get("created_at", datetime.now(timezone.utc).isoformat()),
+                    "tags": meta.get("tags", []),
+                }
+                data_objects.append(DataObject(properties=properties))
+
+            collection.data.insert_many(data_objects)
+
     async def disconnect(self) -> None:
         """Disconnect from Weaviate server."""
-        self.client = None
-        self.executor.shutdown(wait=False)
+        if self.client:
+            self.client.close()
+            self.client = None
         logger.info("Disconnected from Weaviate")
+
 
 # Create a singleton instance
 weaviate_store = WeaviateDocumentStore(
     collection_name=settings.db.VECTOR_STORE_COLLECTION,
-    embedding_dimension=settings.db.VECTOR_STORE_DIMENSION
+    embedding_dimension=settings.db.VECTOR_STORE_DIMENSION,
 )
-

@@ -9,6 +9,7 @@ import base64
 from backend.api.deps import get_current_active_user
 from backend.agents.agent_service import AgentService
 from backend.models.user import User
+from backend.services.activity_logger import log_activity
 
 # Configure logger
 logger = structlog.get_logger(__name__)
@@ -94,7 +95,15 @@ async def analyze_image(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=result["error"]
             )
-        
+
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="vision.image_analyzed",
+            details={"source": "file_upload", "filename": file.filename},
+            related_resource_type="AGENT",
+            agent_name="Vision Agent",
+        )
         return result
     except Exception as e:
         await logger.error("Error analyzing image", error=str(e))
@@ -148,7 +157,15 @@ async def analyze_image_url(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=result["error"]
             )
-        
+
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="vision.image_analyzed",
+            details={"source": "url", "url_preview": request.url[:100]},
+            related_resource_type="AGENT",
+            agent_name="Vision Agent",
+        )
         return result
     except Exception as e:
         await logger.error("Error analyzing image URL", error=str(e), url=request.url)
@@ -207,6 +224,14 @@ async def extract_text_from_image(
             "processed_at": result["processed_at"]
         }
         
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=current_user.organization_id,
+            activity_type="vision.ocr_extracted",
+            details={"source": "file_upload", "filename": file.filename},
+            related_resource_type="AGENT",
+            agent_name="Vision Agent",
+        )
         return ocr_result
     except Exception as e:
         await logger.error("Error extracting text from image", error=str(e))

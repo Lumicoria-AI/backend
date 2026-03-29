@@ -1,8 +1,9 @@
 from datetime import datetime
 from typing import Optional, Dict, Any
 from enum import Enum
-from pydantic import BaseModel, EmailStr, Field, GetJsonSchemaHandler
+from pydantic import BaseModel, EmailStr, Field, GetCoreSchemaHandler
 from pydantic.json_schema import JsonSchemaValue
+from pydantic_core import CoreSchema, core_schema
 from bson import ObjectId
 
 class NotificationType(str, Enum):
@@ -23,22 +24,21 @@ class NotificationPriority(str, Enum):
 
 class PyObjectId(ObjectId):
     @classmethod
-    def __get_validators__(cls):
-        yield cls.validate
+    def __get_pydantic_core_schema__(
+        cls, source_type: Any, handler: GetCoreSchemaHandler
+    ) -> CoreSchema:
+        return core_schema.no_info_plain_validator_function(
+            cls._validate,
+            serialization=core_schema.to_string_ser_schema(),
+        )
 
     @classmethod
-    def validate(cls, v):
-        if not ObjectId.is_valid(v):
-            raise ValueError("Invalid ObjectId")
-        return ObjectId(v)
-
-    @classmethod
-    def __get_pydantic_json_schema__(
-        cls,
-        schema_generator: Any,
-        property_schema: Any,
-    ) -> Any:
-        return { "type": "string" }
+    def _validate(cls, v: Any) -> ObjectId:
+        if isinstance(v, ObjectId):
+            return v
+        if isinstance(v, str) and ObjectId.is_valid(v):
+            return ObjectId(v)
+        raise ValueError(f"Invalid ObjectId: {v}")
 
 class NotificationBase(BaseModel):
     user_id: Optional[str] = None

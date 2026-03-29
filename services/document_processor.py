@@ -451,7 +451,8 @@ class DocumentProcessor:
             global_chunk_idx = 0
             for doc in documents:
                 # Combine document metadata with overall metadata
-                combined_metadata = {**metadata, **doc.metadata}
+                # Our metadata takes precedence (e.g. source="upload" over LangChain's file path)
+                combined_metadata = {**doc.metadata, **metadata}
 
                 # Split into chunks
                 chunks = text_splitter.split_text(doc.page_content)

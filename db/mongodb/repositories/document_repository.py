@@ -2,6 +2,7 @@ from typing import Optional, List, Dict, Any
 from pymongo import ASCENDING, DESCENDING
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
+from bson.errors import InvalidId
 from datetime import datetime
 from backend.db.mongodb.base_repository import BaseRepository
 from backend.db.mongodb.models.document import (
@@ -86,11 +87,32 @@ class DocumentRepository(BaseRepository[Document]):
         document_id: str,
         organization_id: Optional[str] = None # Optional: enforce organization ownership
     ) -> Optional[Document]:
-        """Get a document by its ID."""
-        filters = {"_id": ObjectId(document_id)}
+        """Get a document by its ID (supports both ObjectId and UUID strings)."""
+        filters = self._build_id_filter(document_id, organization_id)
+        result = await self.find_one(filters)
+        # If ObjectId lookup failed, also try document_id field
+        if not result and "_id" in filters:
+            fallback = {"document_id": document_id}
+            if organization_id:
+                try:
+                    fallback["organization_id"] = ObjectId(organization_id)
+                except InvalidId:
+                    fallback["organization_id"] = organization_id
+            result = await self.find_one(fallback)
+        return result
+
+    def _build_id_filter(self, document_id: str, organization_id: Optional[str] = None) -> Dict[str, Any]:
+        """Build a filter dict, handling both ObjectId and UUID strings."""
+        try:
+            filters: Dict[str, Any] = {"_id": ObjectId(document_id)}
+        except InvalidId:
+            filters = {"document_id": document_id}
         if organization_id:
-             filters["organization_id"] = ObjectId(organization_id)
-        return await self.find_one(filters)
+            try:
+                filters["organization_id"] = ObjectId(organization_id)
+            except InvalidId:
+                filters["organization_id"] = organization_id
+        return filters
 
     async def update_document(
         self,
@@ -99,9 +121,7 @@ class DocumentRepository(BaseRepository[Document]):
         organization_id: Optional[str] = None # Optional: enforce organization ownership
     ) -> Optional[Document]:
         """Update a document."""
-        filters = {"_id": ObjectId(document_id)}
-        if organization_id:
-             filters["organization_id"] = ObjectId(organization_id)
+        filters = self._build_id_filter(document_id, organization_id)
 
         # Update updated_at timestamp
         if "$set" in update_data:
@@ -109,7 +129,13 @@ class DocumentRepository(BaseRepository[Document]):
         elif "$set" not in update_data:
             update_data["$set"] = {"updated_at": datetime.utcnow()}
 
-        return await self.update_one(filters, update_data)
+        collection = await self._get_collection()
+        result = await collection.update_one(filters, update_data)
+        if result.modified_count == 0 and result.matched_count == 0:
+            return None
+        # Return updated document
+        updated = await collection.find_one(filters)
+        return Document(**updated) if updated else None
 
     async def delete_document(
         self,
@@ -117,10 +143,9 @@ class DocumentRepository(BaseRepository[Document]):
         organization_id: Optional[str] = None # Optional: enforce organization ownership
     ) -> bool:
         """Delete a document."""
-        filters = {"_id": ObjectId(document_id)}
-        if organization_id:
-             filters["organization_id"] = ObjectId(organization_id)
-        result = await self.delete_one(filters)
+        filters = self._build_id_filter(document_id, organization_id)
+        collection = await self._get_collection()
+        result = await collection.delete_one(filters)
         return result.deleted_count > 0
 
     async def get_documents_by_user(
@@ -315,25 +340,82 @@ class DocumentRepository(BaseRepository[Document]):
     
     async def _get_document_content(self, document: Document) -> str:
         """
-        Get the content of a document.
-        
-        In a real implementation, this would retrieve the actual document content
-        from storage (e.g., S3, file system).
-        
-        Args:
-            document: Document model
-            
-        Returns:
-            Document content as text
+        Download a document from S3 and extract its text content.
+
+        Uses PyMuPDF for PDFs, python-docx for DOCX, and plain read for text
+        files.  Falls back to decoding the raw bytes as UTF-8 for unknown types.
         """
-        # TODO: Implement actual document content retrieval
-        # This is a placeholder - in a real implementation, you would:
-        # 1. Get the file from storage using document.file_url
-        # 2. Extract the text content (using appropriate parser for the file type)
-        # 3. Return the text content
-        
-        # For now, return a placeholder
-        return f"This is the content of document '{document.name}' of type {document.document_type}."
+        import asyncio
+        import tempfile
+        import os
+
+        from backend.services.storage_service import storage_service
+
+        s3_key = document.file_url
+        if not s3_key:
+            raise ValueError(f"Document '{document.name}' has no file_url — cannot retrieve content")
+
+        # Download bytes from S3
+        file_bytes = await storage_service.download_file(s3_key)
+
+        mime = (document.mime_type or "").lower()
+        doc_type = (document.document_type or "").lower() if isinstance(document.document_type, str) else (document.document_type.value if document.document_type else "")
+
+        # --- PDF ---
+        if mime == "application/pdf" or doc_type == "pdf":
+            try:
+                import fitz  # PyMuPDF
+                pdf_doc = fitz.open(stream=file_bytes, filetype="pdf")
+                pages_text = []
+                for page in pdf_doc:
+                    pages_text.append(page.get_text())
+                pdf_doc.close()
+                text = "\n\n".join(pages_text).strip()
+                if text:
+                    return text
+            except Exception as e:
+                logger.warning("PyMuPDF extraction failed, trying PyPDFLoader fallback", error=str(e))
+
+            # Fallback: write to temp file and use PyPDFLoader
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                    tmp.write(file_bytes)
+                    tmp_path = tmp.name
+                from langchain_community.document_loaders import PyPDFLoader
+                loader = PyPDFLoader(tmp_path)
+                docs = await asyncio.to_thread(loader.load)
+                os.unlink(tmp_path)
+                return "\n\n".join(d.page_content for d in docs).strip()
+            except Exception:
+                if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                raise
+
+        # --- DOCX ---
+        if mime in ("application/vnd.openxmlformats-officedocument.wordprocessingml.document",) or doc_type == "docx":
+            try:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
+                    tmp.write(file_bytes)
+                    tmp_path = tmp.name
+                from langchain_community.document_loaders import Docx2txtLoader
+                loader = Docx2txtLoader(tmp_path)
+                docs = await asyncio.to_thread(loader.load)
+                os.unlink(tmp_path)
+                return "\n\n".join(d.page_content for d in docs).strip()
+            except Exception:
+                if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                raise
+
+        # --- Plain text / CSV / Markdown / HTML ---
+        if mime.startswith("text/") or doc_type in ("txt",):
+            return file_bytes.decode("utf-8", errors="replace")
+
+        # --- Fallback: try UTF-8 decode ---
+        try:
+            return file_bytes.decode("utf-8", errors="replace")
+        except Exception:
+            raise ValueError(f"Cannot extract text from document '{document.name}' (mime={mime}, type={doc_type})")
         
     async def create_tasks_from_document(
         self,
@@ -371,9 +453,12 @@ class DocumentRepository(BaseRepository[Document]):
         }
         
         try:
-            # Create document agent
+            # Lazy import to avoid circular dependencies
+            from backend.agents.document_agent import DocumentAgent
+            from backend.db.mongodb.repositories.task_repository import task_repository
+
             document_agent = DocumentAgent(agent_config)
-            
+
             # Process document to extract tasks
             document_data = {
                 "text": document_content,
@@ -382,49 +467,60 @@ class DocumentRepository(BaseRepository[Document]):
                     "name": document.name,
                     "document_type": document.document_type
                 },
-                "user_context": task_config or {}  # Pass any task configuration as user context
+                "user_context": task_config or {}
             }
-            
-            # Extract tasks
+
+            # Extract tasks via the agent
             result = await document_agent.process_async(document_data)
-            
-            # Extract tasks from result
+
+            # process_async returns {"tasks": [...], "analysis": ...}
             tasks = result.get("tasks", [])
-            
-            # Create tasks in database
+
+            # Persist each task to the task collection
             created_tasks = []
             for task in tasks:
-                # Map extracted task properties to task model
                 task_data = {
                     "title": task.get("title", "Untitled Task"),
                     "description": task.get("description", ""),
                     "priority": task.get("priority", "medium"),
-                    "status": "open",
-                    "organization_id": ObjectId(organization_id),
-                    "created_by": ObjectId(created_by),
-                    "document_id": ObjectId(document_id),
-                    "created_at": datetime.utcnow(),
-                    "updated_at": datetime.utcnow()
+                    "status": "todo",
+                    "organization_id": str(organization_id),
+                    "created_by": str(created_by),
+                    "metadata": {
+                        "document_id": str(document_id),
+                        "document_name": document.name,
+                        "source": "document_extraction",
+                    },
+                    "tags": ["auto-generated", "document-extraction"],
                 }
-                
-                # Add deadline if present
-                if "deadline" in task:
-                    # In a real implementation, parse the deadline string to a datetime
-                    task_data["due_date"] = task["deadline"]
-                
-                # Add assignee if present
-                if "assignee" in task:
-                    # In a real implementation, look up the user ID for this assignee name
-                    # For now, just store the name
-                    task_data["assignee_name"] = task["assignee"]
-                
-                # Create task in database
-                # In a real implementation, use a task repository
-                # For now, just append to our result list
-                created_tasks.append(task_data)
-            
+
+                # Parse deadline to due_date if present
+                if "deadline" in task and task["deadline"]:
+                    from dateutil import parser as date_parser
+                    try:
+                        task_data["due_date"] = date_parser.parse(task["deadline"])
+                    except (ValueError, TypeError):
+                        task_data["metadata"]["raw_deadline"] = task["deadline"]
+
+                if "assignee" in task and task["assignee"]:
+                    task_data["metadata"]["suggested_assignee"] = task["assignee"]
+                    task_data["metadata"]["assigned_to_name"] = task["assignee"]
+
+                # Save to MongoDB via task_repository
+                from backend.models.mongodb_models import TaskCreate as TaskCreateModel
+                task_create = TaskCreateModel(**{
+                    k: v for k, v in task_data.items()
+                    if k not in ("created_by", "organization_id")
+                })
+                saved_task = await task_repository.create_task(
+                    task_data=task_create,
+                    creator_id=str(created_by),
+                    organization_id=str(organization_id),
+                )
+                created_tasks.append(saved_task)
+
             return created_tasks
-            
+
         except Exception as e:
             logger.error(f"Error creating tasks from document: {str(e)}")
             raise
@@ -467,9 +563,11 @@ class DocumentRepository(BaseRepository[Document]):
         }
         
         try:
-            # Create document agent
+            # Lazy import to avoid circular dependencies
+            from backend.agents.document_agent import DocumentAgent
+
             document_agent = DocumentAgent(agent_config)
-            
+
             # Get existing extraction if available
             extraction_result = getattr(document, "extraction_result", None)
             

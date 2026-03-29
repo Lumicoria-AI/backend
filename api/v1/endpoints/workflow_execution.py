@@ -11,21 +11,12 @@ from backend.models.user import User
 from backend.agents.studio_service import StudioService
 from backend.agents.orchestration import WorkflowOrchestrator, WorkflowStatus
 from backend.agents.security import AgentSecurityContext, AgentPermission
+from backend.api.v1.endpoints.agent_studio import get_studio_service
 
 # Configure logger
 logger = structlog.get_logger(__name__)
 
 router = APIRouter()
-
-# Initialize the StudioService and orchestrator - in production this should be handled via dependency injection
-def get_studio_service() -> StudioService:
-    # This is simplified for example purposes
-    from agents.factory import AgentFactory
-    from agents.security import AgentSecurityManager
-    
-    agent_factory = AgentFactory()
-    security_manager = AgentSecurityManager(jwt_secret="temp-secret-for-dev")  # In production, load from environment
-    return StudioService(agent_factory, security_manager)
 
 def get_orchestrator() -> WorkflowOrchestrator:
     return WorkflowOrchestrator()
@@ -67,32 +58,28 @@ async def execute_workflow(
     """
     try:
         workflow_id = request.workflow_id
-        
-        # Check if the workflow exists
-        if workflow_id not in studio_service._workflows:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Workflow not found: {workflow_id}"
-            )
-            
-        workflow = studio_service._workflows[workflow_id]
-        
+
         # Set up security context
         security_context = AgentSecurityContext(
             user_id=str(current_user.id),
             organization_id=str(current_user.organization_id) if hasattr(current_user, "organization_id") else None,
-            permissions=[AgentPermission.EXECUTE]
+            permissions={AgentPermission.READ, AgentPermission.EXECUTE}
         )
-        
-        # Check if user has permission to access this workflow
-        if (not workflow.is_public and 
-            workflow.created_by != security_context.user_id and 
-            AgentPermission.ADMIN not in security_context.permissions):
+
+        # Fetch workflow from DB via service (handles cache + DB fallback + permission check)
+        try:
+            workflow = await studio_service.get_workflow(workflow_id, security_context)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Workflow not found: {workflow_id}"
+            )
+        except PermissionError:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You don't have permission to execute this workflow"
             )
-        
+
         # Load the workflow into the orchestrator
         await orchestrator.load_workflow(workflow)
         
