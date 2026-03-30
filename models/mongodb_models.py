@@ -302,12 +302,14 @@ class AgentCreate(BaseModel):
     name: str
     description: Optional[str] = None
     agent_type: AgentType
-    capabilities: List[AgentCapability] = []
+    capabilities: List[str] = []
     configuration: Dict[str, Any] = {}
     agent_model_config: Optional[AgentConfig] = None
     is_public: bool = False
     tags: List[str] = []
     metadata: Dict[str, Any] = {}
+    status: Optional[str] = None
+    state: Optional[Dict[str, Any]] = None
 
 class AgentUpdate(BaseModel):
     name: Optional[str] = None

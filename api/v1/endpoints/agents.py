@@ -319,6 +319,7 @@ async def create_agent(
         is_public=agent_in.is_public,
         tags=agent_in.tags,
         agent_model_config=agent_in.agent_model_config.model_dump() if agent_in.agent_model_config else None,
+        initial_status=agent_in.status or "active",
     )
 
     try:

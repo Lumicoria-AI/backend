@@ -104,6 +104,7 @@ class AgentUniverseRepository(BaseRepository[Agent]):
         is_public: bool = False,
         tags: Optional[List[str]] = None,
         agent_model_config: Optional[Dict[str, Any]] = None,
+        initial_status: str = "active",
     ) -> Agent:
         """Create a new agent in MongoDB."""
         agent_data = {
@@ -118,7 +119,7 @@ class AgentUniverseRepository(BaseRepository[Agent]):
             "tags": tags or [],
             "metadata": metadata or {},
             "state": {
-                "status": "active",
+                "status": initial_status,
                 "error_count": 0,
                 "execution_count": 0,
                 "memory_usage": 0,
