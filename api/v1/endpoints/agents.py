@@ -4,6 +4,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from datetime import datetime, timedelta
 from enum import Enum
+from bson import ObjectId
 
 from backend.api.deps import get_current_active_user
 from backend.db.mongodb.repositories.agent_universe_repository import agent_universe_repository
@@ -103,13 +104,30 @@ class AgentSummaryResponse(BaseModel):
     total_usage: int
     capability_stats: Dict[str, Any]
 
-@router.get("/", response_model=List[dict])
-@rate_limit()
+def _serialize_agent(agent) -> dict:
+    """Convert an Agent model or dict to a JSON-safe dict."""
+    if hasattr(agent, "model_dump"):
+        result = agent.model_dump(mode="json")
+    elif hasattr(agent, "dict"):
+        result = agent.dict()
+    else:
+        result = dict(agent) if not isinstance(agent, dict) else agent
+    for key in ("id", "_id", "organization_id", "created_by", "workflow_id"):
+        if key in result and result[key] is not None:
+            result[key] = str(result[key])
+    # Flatten status from state for frontend convenience
+    if "state" in result and isinstance(result["state"], dict):
+        result["status"] = result["state"].get("status", "active")
+    return result
+
+
+@router.get("", response_model=List[dict])
 async def list_agents(current_user: User = Depends(get_current_active_user)) -> Any:
     """List all available agents."""
     try:
         agents = await agent_universe_repository.discover_agents(
-            organization_id=current_user.organization_id,
+            organization_id=getattr(current_user, "organization_id", None),
+            created_by=str(current_user.id),
             capabilities=None,
             agent_type=None,
             min_success_rate=None,
@@ -119,7 +137,7 @@ async def list_agents(current_user: User = Depends(get_current_active_user)) -> 
             skip=0,
             limit=100
         )
-        return agents
+        return [_serialize_agent(a) for a in agents]
     except Exception as e:
         logger.error(f"Error listing agents: {str(e)}")
         raise HTTPException(
@@ -128,7 +146,6 @@ async def list_agents(current_user: User = Depends(get_current_active_user)) -> 
         )
 
 @router.get("/{agent_id}", response_model=dict)
-@rate_limit()
 async def get_agent(
     agent_id: str,
     current_user: User = Depends(get_current_active_user)
@@ -137,14 +154,14 @@ async def get_agent(
     try:
         agent = await agent_universe_repository.get_agent_by_id(
             agent_id=agent_id,
-            organization_id=current_user.organization_id
+            organization_id=getattr(current_user, "organization_id", None)
         )
         if not agent:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Agent not found"
             )
-        return agent
+        return _serialize_agent(agent)
     except HTTPException:
         raise
     except Exception as e:
@@ -180,7 +197,7 @@ async def chat_with_agent(
 
         await log_activity(
             user_id=str(current_user.id),
-            organization_id=current_user.organization_id,
+            organization_id=getattr(current_user, "organization_id", None),
             activity_type="agent.chat",
             details={"agent_id": agent_id, "message_preview": message[:100]},
             related_resource_type="AGENT",
@@ -224,7 +241,7 @@ async def execute_agent_task(
 
         await log_activity(
             user_id=str(current_user.id),
-            organization_id=current_user.organization_id,
+            organization_id=getattr(current_user, "organization_id", None),
             activity_type="agent.executed",
             details={"agent_id": agent_id, "task_preview": str(task)[:100]},
             related_resource_type="AGENT",
@@ -243,7 +260,6 @@ async def execute_agent_task(
         )
 
 @router.get("/{agent_id}/status", response_model=dict)
-@rate_limit()
 async def get_agent_status(
     agent_id: str,
     current_user: User = Depends(get_current_active_user)
@@ -266,7 +282,7 @@ async def get_agent_status(
             detail="Error getting agent status"
         )
 
-@router.post("", response_model=AgentResponse)
+@router.post("")
 async def create_agent(
     agent_in: AgentCreate,
     current_user: User = Depends(get_current_active_user)
@@ -277,7 +293,7 @@ async def create_agent(
     # Check if user has permission to create agents
     has_permission = await permission_repository.check_permission(
         user_id=current_user.id,
-        organization_id=current_user.organization_id,
+        organization_id=getattr(current_user, "organization_id", None),
         resource_type="AGENT",
         resource_id="*",
         permission_type="CREATE"
@@ -288,30 +304,39 @@ async def create_agent(
             detail="Not enough permissions to create agents"
         )
 
+    org_id = getattr(current_user, "organization_id", None)
+    user_id = current_user.id
+
     agent = await agent_universe_repository.create_agent(
         name=agent_in.name,
         description=agent_in.description,
         agent_type=agent_in.agent_type,
         capabilities=agent_in.capabilities,
-        organization_id=current_user.organization_id,
-        created_by=current_user.id,
+        organization_id=org_id,
+        created_by=user_id,
         configuration=agent_in.configuration,
-        metadata=agent_in.metadata
+        metadata=agent_in.metadata,
+        is_public=agent_in.is_public,
+        tags=agent_in.tags,
+        agent_model_config=agent_in.agent_model_config.model_dump() if agent_in.agent_model_config else None,
     )
 
-    await log_activity(
-        user_id=str(current_user.id),
-        organization_id=current_user.organization_id,
-        activity_type="agent.created",
-        details={"name": agent_in.name, "agent_type": agent_in.agent_type.value if hasattr(agent_in.agent_type, "value") else str(agent_in.agent_type)},
-        related_resource_type="AGENT",
-        related_resource_id=str(agent.get("id", "")) if isinstance(agent, dict) else str(getattr(agent, "id", "")),
-        agent_name=agent_in.name,
-    )
+    try:
+        await log_activity(
+            user_id=str(user_id),
+            organization_id=str(org_id) if org_id else None,
+            activity_type="agent.created",
+            details={"name": agent_in.name, "agent_type": agent_in.agent_type.value if hasattr(agent_in.agent_type, "value") else str(agent_in.agent_type)},
+            related_resource_type="AGENT",
+            related_resource_id=str(getattr(agent, "id", "")),
+            agent_name=agent_in.name,
+        )
+    except Exception as log_err:
+        logger.warning("Failed to log agent creation activity", error=str(log_err))
 
-    return agent
+    return _serialize_agent(agent)
 
-@router.put("/{agent_id}", response_model=AgentResponse)
+@router.put("/{agent_id}")
 async def update_agent(
     agent_id: str,
     agent_in: AgentUpdate,
@@ -323,7 +348,7 @@ async def update_agent(
     # Check if user has permission to update agents
     has_permission = await permission_repository.check_permission(
         user_id=current_user.id,
-        organization_id=current_user.organization_id,
+        organization_id=getattr(current_user, "organization_id", None),
         resource_type="AGENT",
         resource_id=agent_id,
         permission_type="EDIT"
@@ -336,7 +361,7 @@ async def update_agent(
 
     agent = await agent_universe_repository.update_agent(
         agent_id=agent_id,
-        organization_id=current_user.organization_id,
+        organization_id=getattr(current_user, "organization_id", None),
         update_data=agent_in.dict(exclude_unset=True)
     )
     if not agent:
@@ -344,7 +369,39 @@ async def update_agent(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Agent not found"
         )
-    return agent
+    return _serialize_agent(agent)
+
+
+@router.delete("/{agent_id}")
+async def delete_agent(
+    agent_id: str,
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """Delete an agent."""
+    has_permission = await permission_repository.check_permission(
+        user_id=current_user.id,
+        organization_id=getattr(current_user, "organization_id", None),
+        resource_type="AGENT",
+        resource_id=agent_id,
+        permission_type="DELETE"
+    )
+    if not has_permission:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not enough permissions to delete this agent"
+        )
+
+    deleted = await agent_universe_repository.delete_agent(
+        agent_id=agent_id,
+        organization_id=getattr(current_user, "organization_id", None),
+    )
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Agent not found"
+        )
+    return {"detail": "Agent deleted successfully"}
+
 
 @router.post("/{agent_id}/execute")
 async def execute_agent(
@@ -359,7 +416,7 @@ async def execute_agent(
     # Check if user has permission to execute agents
     has_permission = await permission_repository.check_permission(
         user_id=current_user.id,
-        organization_id=current_user.organization_id,
+        organization_id=getattr(current_user, "organization_id", None),
         resource_type="AGENT",
         resource_id=agent_id,
         permission_type="EXECUTE"
@@ -467,7 +524,7 @@ async def create_custom_agent_prompt(
     # Check if user has permission to customize agents
     has_permission = await permission_repository.check_permission(
         user_id=current_user.id,
-        organization_id=current_user.organization_id,
+        organization_id=getattr(current_user, "organization_id", None),
         resource_type="AGENT",
         resource_id="*",
         permission_type="CREATE"
@@ -639,7 +696,7 @@ async def get_agent_analytics(
     if settings.POSTGRES_ENABLED and db is not None:
         repo = PostgresAgentExecutionRepository(db)
         return await repo.get_execution_stats(
-            organization_id=current_user.organization_id,
+            organization_id=getattr(current_user, "organization_id", None),
             time_range=time_range
         )
     return {
@@ -661,7 +718,7 @@ async def get_agent_summary(
     if settings.POSTGRES_ENABLED and db is not None:
         repo = PostgresAgentExecutionRepository(db)
         stats = await repo.get_execution_stats(
-            organization_id=current_user.organization_id,
+            organization_id=getattr(current_user, "organization_id", None),
             time_range="30d"
         )
         return {

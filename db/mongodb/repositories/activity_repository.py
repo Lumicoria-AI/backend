@@ -55,13 +55,13 @@ class ActivityRepository(BaseRepository[ActivityLogEntry]):
         Create a new activity log entry.
         """
         entry_data = {
-            "organization_id": ObjectId(organization_id),
-            "user_id": ObjectId(user_id),
+            "organization_id": ObjectId(organization_id) if organization_id else None,
+            "user_id": ObjectId(user_id) if user_id else None,
             "activity_type": activity_type,
             "details": details,
             "timestamp": datetime.utcnow(),
             "related_resource_type": related_resource_type,
-            "related_resource_id": ObjectId(related_resource_id) if related_resource_id else None # Store as ObjectId if it's a valid resource ID
+            "related_resource_id": ObjectId(related_resource_id) if related_resource_id else None,
         }
 
         try:

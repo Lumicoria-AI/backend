@@ -274,7 +274,7 @@ class Agent(MongoBaseModel):
     name: str
     description: Optional[str] = None
     agent_type: AgentType
-    capabilities: List[AgentCapability] = []
+    capabilities: List[str] = []
     configuration: Dict[str, Any] = {}
     workflow_id: Optional[PyObjectId] = None
     agent_model_config: AgentConfig = Field(default=AgentConfig())
@@ -290,10 +290,11 @@ class Agent(MongoBaseModel):
     usage_statistics: Dict[str, Any] = {}
 
     model_config = {
-        'protected_namespaces': (),  # Disable protected namespace warnings
+        'protected_namespaces': (),
         'populate_by_name': True,
         'arbitrary_types_allowed': True,
-        'json_encoders': {ObjectId: str}
+        'json_encoders': {ObjectId: str},
+        'extra': 'ignore',
     }
 
 # Create/Update Models
@@ -311,12 +312,14 @@ class AgentCreate(BaseModel):
 class AgentUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
-    capabilities: Optional[List[AgentCapability]] = None
+    capabilities: Optional[List[str]] = None
     configuration: Optional[Dict[str, Any]] = None
     agent_model_config: Optional[AgentConfig] = None
     is_public: Optional[bool] = None
     tags: Optional[List[str]] = None
     metadata: Optional[Dict[str, Any]] = None
+    status: Optional[str] = None
+    state: Optional[Dict[str, Any]] = None
 
 class ComponentCreate(BaseModel):
     name: str

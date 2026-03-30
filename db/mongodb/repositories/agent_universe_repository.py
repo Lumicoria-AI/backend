@@ -91,33 +91,138 @@ class AgentUniverseRepository(BaseRepository[Agent]):
             ("description", "text")
         ])
 
+    async def create_agent(
+        self,
+        name: str,
+        description: Optional[str],
+        agent_type,
+        capabilities: List = None,
+        organization_id: Optional[str] = None,
+        created_by: Optional[str] = None,
+        configuration: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        is_public: bool = False,
+        tags: Optional[List[str]] = None,
+        agent_model_config: Optional[Dict[str, Any]] = None,
+    ) -> Agent:
+        """Create a new agent in MongoDB."""
+        agent_data = {
+            "name": name,
+            "description": description or "",
+            "agent_type": agent_type.value if hasattr(agent_type, "value") else str(agent_type),
+            "capabilities": [c.value if hasattr(c, "value") else str(c) for c in (capabilities or [])],
+            "configuration": configuration or {},
+            "organization_id": ObjectId(organization_id) if organization_id else ObjectId(),
+            "created_by": ObjectId(str(created_by)) if created_by else ObjectId(),
+            "is_public": is_public,
+            "tags": tags or [],
+            "metadata": metadata or {},
+            "state": {
+                "status": "active",
+                "error_count": 0,
+                "execution_count": 0,
+                "memory_usage": 0,
+            },
+            "usage_statistics": {
+                "total_runs": 0,
+                "success_rate": 0.0,
+                "error_rate": 0.0,
+                "average_response_time": 0.0,
+            },
+            "version": "1.0.0",
+        }
+        if agent_model_config:
+            agent_data["agent_model_config"] = agent_model_config
+        return await self.create(agent_data)
+
+    async def get_agent_by_id(
+        self,
+        agent_id: str,
+        organization_id: Optional[str] = None,
+    ) -> Optional[Agent]:
+        """Get an agent by ID, optionally scoped to an organization."""
+        agent = await self.get_by_id(agent_id)
+        if agent and organization_id:
+            agent_org = getattr(agent, "organization_id", None)
+            if agent_org and str(agent_org) != str(organization_id):
+                return None
+        return agent
+
+    async def update_agent(
+        self,
+        agent_id: str,
+        organization_id: Optional[str] = None,
+        update_data: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Agent]:
+        """Update an agent by ID."""
+        agent = await self.get_agent_by_id(agent_id, organization_id)
+        if not agent:
+            return None
+        data = update_data or {}
+        # If status is being updated, also update state.status
+        if "status" in data:
+            state_update = data.pop("state", {})
+            state_update["status"] = data.pop("status")
+            data["state"] = {**agent.state.model_dump(), **state_update}
+        return await self.update(agent_id, data)
+
+    async def delete_agent(
+        self,
+        agent_id: str,
+        organization_id: Optional[str] = None,
+    ) -> bool:
+        """Delete an agent by ID."""
+        agent = await self.get_agent_by_id(agent_id, organization_id)
+        if not agent:
+            return False
+        return await self.delete(agent_id)
+
     async def discover_agents(
         self,
-        organization_id: str,
+        organization_id: str = None,
         capabilities: Optional[List[str]] = None,
+        agent_type: Optional[str] = None,
         status: Optional[AgentStatus] = None,
         include_public: bool = True,
         min_success_rate: Optional[int] = None,
         max_error_rate: Optional[int] = None,
+        tags: Optional[List[str]] = None,
+        search_query: Optional[str] = None,
+        created_by: Optional[str] = None,
         skip: int = 0,
         limit: int = 100
     ) -> List[Agent]:
-        """Discover agents based on capabilities and filters."""
-        filters = {
-            "$or": [
-                {"organization_id": ObjectId(organization_id)},
-                {"is_public": True} if include_public else {}
-            ]
-        }
-        
+        """Discover agents based on capabilities, type, tags, and filters."""
+        or_conditions = []
+        if organization_id:
+            try:
+                or_conditions.append({"organization_id": ObjectId(organization_id)})
+            except Exception:
+                or_conditions.append({"organization_id": organization_id})
+        if created_by:
+            try:
+                or_conditions.append({"created_by": ObjectId(created_by)})
+            except Exception:
+                or_conditions.append({"created_by": created_by})
+        if include_public:
+            or_conditions.append({"is_public": True})
+        # If no conditions, match all
+        filters = {"$or": or_conditions} if or_conditions else {}
+
         if capabilities:
-            filters["capabilities.name"] = {"$in": capabilities}
+            filters["capabilities"] = {"$in": capabilities}
+        if agent_type:
+            filters["agent_type"] = agent_type
         if status:
-            filters["status"] = status
+            filters["state.status"] = status.value if hasattr(status, "value") else status
         if min_success_rate is not None:
             filters["success_rate"] = {"$gte": min_success_rate}
         if max_error_rate is not None:
             filters["error_rate"] = {"$lte": max_error_rate}
+        if tags:
+            filters["tags"] = {"$in": tags}
+        if search_query:
+            filters["$text"] = {"$search": search_query}
 
         return await self.find_many(
             filters,
