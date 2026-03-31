@@ -513,6 +513,246 @@ class AgentService:
         except Exception:
             return
 
+    # ── Bridge methods: MongoDB agent ID → BaseAgent execution ──
+
+    def _get_or_create_agent_instance(self, agent_type: str, agent_record) -> BaseAgent:
+        """
+        Get or create a BaseAgent subclass instance for a MongoDB agent record.
+        Uses agent_type to pick the right class, caches by agent ID.
+        """
+        agent_id = str(getattr(agent_record, "id", ""))
+        cache_key = f"_db_{agent_id}"
+
+        if cache_key in self.agents:
+            return self.agents[cache_key]
+
+        # Normalise type
+        agent_type_lower = agent_type.lower().replace("-", "_")
+        agent_class = self.agent_types.get(agent_type_lower)
+        if not agent_class:
+            # Fallback to general agent
+            agent_class = self.agent_types.get("general", self.agent_types.get("document"))
+
+        # Build config from agent record
+        config = {
+            "type": agent_type_lower,
+            "agent_id": agent_id,
+            "name": getattr(agent_record, "name", ""),
+            "description": getattr(agent_record, "description", ""),
+        }
+        # Merge model config if present
+        model_cfg = getattr(agent_record, "agent_model_config", None)
+        if model_cfg:
+            if hasattr(model_cfg, "model_dump"):
+                config["agent_model_config"] = model_cfg.model_dump()
+            elif isinstance(model_cfg, dict):
+                config["agent_model_config"] = model_cfg
+
+        agent = agent_class(config)
+        self.agents[cache_key] = agent
+        return agent
+
+    async def chat_with_agent(
+        self,
+        agent_id: str,
+        user_id: str,
+        message: str,
+    ) -> Dict[str, Any]:
+        """
+        Chat with a user-created agent (stored in MongoDB).
+        Bridges the MongoDB record to a live BaseAgent execution.
+        """
+        from backend.db.mongodb.repositories.agent_universe_repository import agent_universe_repository
+
+        agent_record = await agent_universe_repository.get_agent_by_id(agent_id)
+        if not agent_record:
+            raise ValueError(f"Agent '{agent_id}' not found")
+
+        agent_type = getattr(agent_record, "agent_type", "document")
+        if hasattr(agent_type, "value"):
+            agent_type = agent_type.value
+
+        agent = self._get_or_create_agent_instance(agent_type, agent_record)
+
+        execution_id = str(uuid.uuid4())
+        start_time = datetime.utcnow()
+
+        try:
+            result = await agent.process_async({
+                "text": message,
+                "content": message,
+                "query": message,
+                "user_id": user_id,
+                "agent_id": agent_id,
+            })
+
+            self._record_execution(
+                execution_id=execution_id,
+                agent_name=getattr(agent_record, "name", agent_id),
+                agent_type=agent_type,
+                start_time=start_time,
+                end_time=datetime.utcnow(),
+                success=True,
+                agent_id=agent_id,
+                user_id=user_id,
+            )
+
+            return {
+                "response": result if isinstance(result, dict) else {"text": str(result)},
+                "execution_id": execution_id,
+                "agent_type": agent_type,
+            }
+
+        except Exception as e:
+            self._record_execution(
+                execution_id=execution_id,
+                agent_name=getattr(agent_record, "name", agent_id),
+                agent_type=agent_type,
+                start_time=start_time,
+                end_time=datetime.utcnow(),
+                success=False,
+                error_message=str(e),
+                agent_id=agent_id,
+                user_id=user_id,
+            )
+            raise
+
+    async def execute_task(
+        self,
+        agent_id: str,
+        user_id: str,
+        task: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """
+        Execute a structured task on a user-created agent.
+        """
+        from backend.db.mongodb.repositories.agent_universe_repository import agent_universe_repository
+
+        agent_record = await agent_universe_repository.get_agent_by_id(agent_id)
+        if not agent_record:
+            raise ValueError(f"Agent '{agent_id}' not found")
+
+        agent_type = getattr(agent_record, "agent_type", "document")
+        if hasattr(agent_type, "value"):
+            agent_type = agent_type.value
+
+        agent = self._get_or_create_agent_instance(agent_type, agent_record)
+
+        execution_id = str(uuid.uuid4())
+        start_time = datetime.utcnow()
+
+        try:
+            input_data = {**task, "user_id": user_id, "agent_id": agent_id}
+            result = await agent.process_async(input_data)
+
+            self._record_execution(
+                execution_id=execution_id,
+                agent_name=getattr(agent_record, "name", agent_id),
+                agent_type=agent_type,
+                start_time=start_time,
+                end_time=datetime.utcnow(),
+                success=True,
+                agent_id=agent_id,
+                user_id=user_id,
+            )
+
+            return {
+                "result": result if isinstance(result, dict) else {"output": str(result)},
+                "execution_id": execution_id,
+                "agent_type": agent_type,
+            }
+
+        except Exception as e:
+            self._record_execution(
+                execution_id=execution_id,
+                agent_name=getattr(agent_record, "name", agent_id),
+                agent_type=agent_type,
+                start_time=start_time,
+                end_time=datetime.utcnow(),
+                success=False,
+                error_message=str(e),
+                agent_id=agent_id,
+                user_id=user_id,
+            )
+            raise
+
+    async def get_agent_status(self, agent_id: str) -> Dict[str, Any]:
+        """Get the status of a user-created agent from MongoDB."""
+        from backend.db.mongodb.repositories.agent_universe_repository import agent_universe_repository
+
+        agent_record = await agent_universe_repository.get_agent_by_id(agent_id)
+        if not agent_record:
+            raise ValueError(f"Agent '{agent_id}' not found")
+
+        state = getattr(agent_record, "state", None)
+        state_dict = state.model_dump() if hasattr(state, "model_dump") else (state or {})
+
+        return {
+            "agent_id": agent_id,
+            "name": getattr(agent_record, "name", ""),
+            "status": state_dict.get("status", "unknown"),
+            "execution_count": state_dict.get("execution_count", 0),
+            "error_count": state_dict.get("error_count", 0),
+            "agent_type": str(getattr(agent_record, "agent_type", "custom")),
+        }
+
+    async def test_agent(
+        self,
+        agent_id: str,
+        user_id: str,
+        input_text: str,
+    ) -> Dict[str, Any]:
+        """
+        Test an agent without updating usage statistics.
+        Returns execution result + metadata for the test panel.
+        """
+        from backend.db.mongodb.repositories.agent_universe_repository import agent_universe_repository
+
+        agent_record = await agent_universe_repository.get_agent_by_id(agent_id)
+        if not agent_record:
+            raise ValueError(f"Agent '{agent_id}' not found")
+
+        agent_type = getattr(agent_record, "agent_type", "document")
+        if hasattr(agent_type, "value"):
+            agent_type = agent_type.value
+
+        agent = self._get_or_create_agent_instance(agent_type, agent_record)
+
+        start_time = datetime.utcnow()
+
+        try:
+            result = await agent.process_async({
+                "text": input_text,
+                "content": input_text,
+                "query": input_text,
+                "user_id": user_id,
+                "agent_id": agent_id,
+            })
+
+            end_time = datetime.utcnow()
+            execution_time_ms = int((end_time - start_time).total_seconds() * 1000)
+
+            return {
+                "success": True,
+                "result": result if isinstance(result, dict) else {"text": str(result)},
+                "execution_time_ms": execution_time_ms,
+                "agent_type": agent_type,
+                "agent_name": getattr(agent_record, "name", ""),
+                "test_mode": True,
+            }
+
+        except Exception as e:
+            end_time = datetime.utcnow()
+            execution_time_ms = int((end_time - start_time).total_seconds() * 1000)
+            return {
+                "success": False,
+                "error": str(e),
+                "execution_time_ms": execution_time_ms,
+                "agent_type": agent_type,
+                "agent_name": getattr(agent_record, "name", ""),
+                "test_mode": True,
+            }
+
     async def process_research_mentor_request(
         self,
         mode: str,

@@ -98,8 +98,8 @@ class IntegrationRepository(BaseRepository[Integration]):
             entry_dict["credentials"] = self._encrypt_credentials(entry_dict["credentials"])
         
         entry_dict.update({
-            "organization_id": ObjectId(organization_id),
-            "created_by": ObjectId(created_by),
+            "organization_id": str(organization_id),
+            "created_by": str(created_by),
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow(),
             "status": "active",
@@ -150,7 +150,7 @@ class IntegrationRepository(BaseRepository[Integration]):
         limit: int = 100
     ) -> List[Integration]:
         """Get all integrations for an organization with filtering."""
-        filters = {"organization_id": ObjectId(organization_id)}
+        filters = {"organization_id": str(organization_id)}
         if integration_type:
             filters["config.type"] = integration_type
         if status:
@@ -255,7 +255,7 @@ class IntegrationRepository(BaseRepository[Integration]):
         time_range: Optional[timedelta] = None
     ) -> Dict[str, Any]:
         """Get statistics about integrations in an organization."""
-        match = {"organization_id": ObjectId(organization_id)}
+        match = {"organization_id": str(organization_id)}
         if time_range:
             match["created_at"] = {
                 "$gte": datetime.utcnow() - time_range

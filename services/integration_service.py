@@ -12,22 +12,24 @@ from backend.integrations.slack import SlackIntegration
 from ..core.config import settings
 from backend.core.logging import get_logger
 
-# Initialize logger
 logger = get_logger("lumicoria.services.integration")
 
 
 class IntegrationService:
-    """Service for managing external integrations."""
+    """Service for managing external integrations.
+
+    Initializes server-level integrations from env vars at startup.
+    Can also create per-user integration instances from stored credentials.
+    """
 
     def __init__(self):
-        """Initialize integration service."""
         self.integrations: Dict[str, Any] = {}
         self._initialize_integrations()
 
     def _initialize_integrations(self) -> None:
-        """Initialize available integrations (each independently — one failure doesn't block the rest)."""
+        """Initialize available integrations from environment variables."""
 
-        # ── Notion ──────────────────────────────────────────────────────
+        # Notion
         if settings.NOTION_API_KEY:
             try:
                 self.integrations["notion"] = NotionIntegration(
@@ -37,7 +39,7 @@ class IntegrationService:
             except Exception as e:
                 logger.error(f"Failed to initialize Notion integration: {e}")
 
-        # ── Google Workspace ────────────────────────────────────────────
+        # Google Workspace
         if settings.GOOGLE_CREDENTIALS_FILE:
             try:
                 creds_path = Path(settings.GOOGLE_CREDENTIALS_FILE)
@@ -48,123 +50,162 @@ class IntegrationService:
                     )
                     logger.info("Google Workspace integration initialized")
                 else:
-                    logger.warning(
-                        f"Google credentials file not found: {settings.GOOGLE_CREDENTIALS_FILE}"
-                    )
+                    logger.warning(f"Google credentials file not found: {settings.GOOGLE_CREDENTIALS_FILE}")
             except Exception as e:
                 logger.error(f"Failed to initialize Google Workspace integration: {e}")
 
-        # ── Slack ───────────────────────────────────────────────────────
+        # Slack
         if settings.SLACK_BOT_TOKEN:
             try:
                 self.integrations["slack"] = SlackIntegration()
                 logger.info("Slack integration initialized")
             except Exception as e:
                 logger.error(f"Failed to initialize Slack integration: {e}")
-            
-    async def execute_integration_action(self,
-                                       integration_type: str,
-                                       action: str,
-                                       data: Dict[str, Any]) -> Dict[str, Any]:
+
+    # ── Per-user integration instances ─────────────────────────────────────
+
+    async def get_user_integration(
+        self, integration_id: str
+    ) -> Optional[Any]:
+        """
+        Create an integration instance from user-stored credentials.
+        Falls back to the server-level instance if no user credentials exist.
+        """
+        record = await integration_repository.get_integration_by_id(
+            integration_id, decrypt_credentials=True
+        )
+        if not record:
+            return None
+
+        integ_type = record.get("config", {}).get("type") or record.get("type", "")
+        credentials = record.get("credentials", {})
+
+        if not credentials:
+            return self.integrations.get(integ_type)
+
+        try:
+            if integ_type == "notion" and credentials.get("api_key"):
+                return NotionIntegration(api_token=credentials["api_key"])
+            elif integ_type == "google_workspace" and credentials.get("credentials_json"):
+                creds = credentials["credentials_json"]
+                if isinstance(creds, str):
+                    creds = json.loads(creds)
+                return GoogleWorkspaceIntegration(credentials_info=creds)
+            elif integ_type == "slack" and credentials.get("bot_token"):
+                return SlackIntegration()
+        except Exception as e:
+            logger.error(f"Failed to create user integration instance: {e}")
+
+        return self.integrations.get(integ_type)
+
+    # ── Action execution ───────────────────────────────────────────────────
+
+    async def execute_integration_action(
+        self,
+        integration_type: str,
+        action: str,
+        data: Dict[str, Any],
+        integration_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Execute an action on an integration.
-        
-        Args:
-            integration_type: Type of integration (notion, google_workspace, slack)
-            action: Action to execute
-            data: Action parameters
-            
-        Returns:
-            Dict containing action result
+        If integration_id is provided, uses per-user credentials; otherwise, server-level.
         """
         try:
-            integration = self.integrations.get(integration_type)
+            if integration_id:
+                integration = await self.get_user_integration(integration_id)
+            else:
+                integration = self.integrations.get(integration_type)
+
             if not integration:
-                raise ValueError(f"Integration type '{integration_type}' not found")
-                
-            # Map action to integration method
-            if integration_type == "notion":
-                if action == "create_project":
-                    return await integration.create_project(**data)
-                elif action == "add_task":
-                    return await integration.add_task(**data)
-                elif action == "export_meeting_notes":
-                    return await integration.export_meeting_notes(**data)
-                    
-            elif integration_type == "google_workspace":
-                if action == "create_calendar_event":
-                    return await integration.create_calendar_event(**data)
-                elif action == "create_document":
-                    return await integration.create_document(**data)
-                elif action == "send_email":
-                    return await integration.send_email(**data)
-                    
-            elif integration_type == "slack":
-                if action == "create_project_channel":
-                    return await integration.create_project_channel(**data)
-                elif action == "add_project_task":
-                    return await integration.add_project_task(**data)
-                elif action == "export_meeting_notes":
-                    return await integration.export_meeting_notes(**data)
-                elif action == "create_reminder":
-                    return await integration.create_reminder(**data)
-                elif action == "search_project_content":
-                    return await integration.search_project_content(**data)
-                elif action == "upload_project_file":
-                    return await integration.upload_project_file(**data)
-                elif action == "get_channel_members":
-                    return await integration.get_channel_members(**data)
-                elif action == "archive_project_channel":
-                    return await integration.archive_project_channel(**data)
-                    
-            raise ValueError(f"Action '{action}' not supported for integration type '{integration_type}'")
+                raise ValueError(f"Integration type '{integration_type}' not available")
+
+            method = self._resolve_action(integration, integration_type, action)
+            if not method:
+                raise ValueError(f"Action '{action}' not supported for '{integration_type}'")
+
+            return await method(**data)
 
         except Exception as e:
             logger.error(
-                f"Error executing integration action: {str(e)}",
+                f"Error executing integration action: {e}",
                 integration_type=integration_type,
-                action=action
+                action=action,
             )
             raise
-            
+
+    def _resolve_action(self, integration: Any, integration_type: str, action: str):
+        """Resolve an action name to an integration method."""
+        # Try direct method lookup first
+        method = getattr(integration, action, None)
+        if method and callable(method):
+            return method
+
+        # Fallback to explicit action maps for backwards compat
+        action_maps = {
+            "notion": {
+                "create_project": "create_project",
+                "add_task": "add_project_task",
+                "export_meeting_notes": "create_meeting_notes",
+            },
+            "google_workspace": {
+                "create_calendar_event": "create_calendar_event",
+                "create_document": "create_document",
+                "send_email": "send_email",
+            },
+            "slack": {
+                "create_project_channel": "create_project_channel",
+                "add_project_task": "add_project_task",
+                "export_meeting_notes": "export_meeting_notes",
+                "create_reminder": "create_reminder",
+                "search_project_content": "search_project_content",
+                "upload_project_file": "upload_project_file",
+                "get_channel_members": "get_channel_members",
+                "archive_project_channel": "archive_project_channel",
+            },
+        }
+
+        mapped = action_maps.get(integration_type, {}).get(action)
+        if mapped:
+            method = getattr(integration, mapped, None)
+            if method and callable(method):
+                return method
+
+        return None
+
+    # ── Availability ───────────────────────────────────────────────────────
+
     def get_available_integrations(self) -> Dict[str, Any]:
-        """
-        Get list of available integrations.
-        
-        Returns:
-            Dict containing integration information
-        """
+        """Get list of available server-level integrations."""
         return {
             "notion": {
                 "available": "notion" in self.integrations,
                 "actions": [
-                    "create_project",
-                    "add_task",
-                    "export_meeting_notes"
-                ]
+                    "create_project", "create_project_database", "add_project_task",
+                    "search_projects", "get_project_tasks", "update_task_status",
+                    "create_meeting_notes", "export_meeting_to_notion", "create_knowledge_base",
+                ],
             },
             "google_workspace": {
                 "available": "google_workspace" in self.integrations,
                 "actions": [
-                    "create_calendar_event",
-                    "create_document",
-                    "send_email"
-                ]
+                    "create_calendar_event", "list_calendars", "get_upcoming_events",
+                    "create_document", "list_files", "create_project_folder",
+                    "send_email", "create_project", "create_project_database",
+                    "add_project_task", "get_project_tasks", "update_project_task",
+                    "export_meeting_to_google_workspace",
+                ],
             },
             "slack": {
                 "available": "slack" in self.integrations,
                 "actions": [
-                    "create_project_channel",
-                    "add_project_task",
-                    "export_meeting_notes",
-                    "create_reminder",
-                    "search_project_content",
-                    "upload_project_file",
-                    "get_channel_members",
-                    "archive_project_channel"
-                ]
-            }
+                    "create_project_channel", "add_project_task", "export_meeting_notes",
+                    "create_reminder", "search_project_content", "upload_project_file",
+                    "get_channel_members", "archive_project_channel",
+                ],
+            },
         }
 
-# Create a singleton instance
-integration_service = IntegrationService() 
+
+# Singleton
+integration_service = IntegrationService()

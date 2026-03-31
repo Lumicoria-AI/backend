@@ -266,20 +266,59 @@ async def get_agent_status(
 ) -> Any:
     """Get agent status."""
     try:
-        status = await agent_service.get_agent_status(agent_id)
-        if not status:
+        agent_status = await agent_service.get_agent_status(agent_id)
+        if not agent_status:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Agent not found"
             )
-        return status
+        return agent_status
     except HTTPException:
         raise
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
     except Exception as e:
         logger.error(f"Error getting agent status: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error getting agent status"
+        )
+
+
+class TestAgentRequest(BaseModel):
+    input: str = Field(..., description="Test input text for the agent")
+
+
+@router.post("/{agent_id}/test", response_model=dict)
+async def test_agent(
+    agent_id: str,
+    request_body: TestAgentRequest,
+    current_user: User = Depends(get_current_active_user)
+) -> Any:
+    """
+    Test an agent without updating usage statistics.
+    Used for the test panel in Agent Builder and Agent Detail pages.
+    """
+    try:
+        result = await agent_service.test_agent(
+            agent_id=agent_id,
+            user_id=str(current_user.id),
+            input_text=request_body.input,
+        )
+        return result
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
+    except Exception as e:
+        logger.error(f"Error testing agent: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error testing agent"
         )
 
 @router.post("")
@@ -403,91 +442,6 @@ async def delete_agent(
         )
     return {"detail": "Agent deleted successfully"}
 
-
-@router.post("/{agent_id}/execute")
-async def execute_agent(
-    agent_id: str,
-    input_data: Dict[str, Any],
-    current_user: User = Depends(get_current_active_user),
-    agent_service: AgentService = Depends(get_agent_service) # Inject AgentService
-) -> Any:
-    """
-    Execute an agent with input data.
-    """
-    # Check if user has permission to execute agents
-    has_permission = await permission_repository.check_permission(
-        user_id=current_user.id,
-        organization_id=getattr(current_user, "organization_id", None),
-        resource_type="AGENT",
-        resource_id=agent_id,
-        permission_type="EXECUTE"
-    )
-    if not has_permission:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not enough permissions to execute this agent"
-        )
-
-    try:
-        # Retrieve the agent instance
-        agent_instance = agent_service.get_agent(agent_id)
-        
-        # Process the input data using the agent
-        result = agent_instance.process(input_data)
-        
-        return {"result": result}
-        
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(e)
-        )
-    except NotImplementedError:
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail=f"Agent '{agent_id}' has not implemented the process method."
-        )
-    except Exception as e:
-        # Log the error for debugging
-        logger.error(f"Error executing agent {agent_id}: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An error occurred during agent execution."
-        )
-
-# Add new endpoints for specific actions like document upload and camera scan
-# These might be in other endpoint files like documents.py or live_interaction.py
-# depending on the overall API design.
-# For now, I will assume these actions will internally call the appropriate agents
-# via the AgentService.
-
-# Example placeholder for a document processing endpoint (could be in documents.py)
-# @router.post("/documents/process")
-# async def process_document_endpoint(
-#     file: UploadFile = File(...),
-#     current_user: User = Depends(get_current_active_user),
-#     agent_service: AgentService = Depends(get_agent_service)
-# ):
-#     # ... file processing logic ...
-#     document_agent = agent_service.get_agent("document_agent") # Assuming "document_agent" is the configured name
-#     processing_results = document_agent.process(processed_document_data)
-#     return {"results": processing_results}
-
-# Example placeholder for a camera scan endpoint (could be in live_interaction.py)
-# @router.post("/live-interaction/scan")
-# async def scan_camera_endpoint(
-#     image_data: bytes = File(...),
-#     current_user: User = Depends(get_current_active_user),
-#     agent_service: AgentService = Depends(get_agent_service)
-# ):
-#     # ... image processing logic ...
-#     vision_agent = agent_service.get_agent("vision_agent") # Assuming "vision_agent" is the configured name
-#     scan_results = vision_agent.process(processed_image_data)
-#     return {"results": scan_results}
-
-# Example endpoint for creating a custom agent (might already be covered by POST /agents)
-# If the POST /agents endpoint handles creating different agent types based on input,
-# this might not be necessary as a separate endpoint.
 
 # Add agent customization models and endpoints
 class AgentCustomizationRequest(BaseModel):
