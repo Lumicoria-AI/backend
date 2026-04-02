@@ -1,7 +1,8 @@
 from typing import Any, Dict, List, Optional
 import structlog
 import json
-from datetime import datetime
+import httpx
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from backend.db.mongodb.repositories.integration_repository import integration_repository
@@ -69,6 +70,7 @@ class IntegrationService:
     ) -> Optional[Any]:
         """
         Create an integration instance from user-stored credentials.
+        Handles both legacy (manual paste) and OAuth credential shapes.
         Falls back to the server-level instance if no user credentials exist.
         """
         record = await integration_repository.get_integration_by_id(
@@ -84,19 +86,123 @@ class IntegrationService:
             return self.integrations.get(integ_type)
 
         try:
-            if integ_type == "notion" and credentials.get("api_key"):
-                return NotionIntegration(api_token=credentials["api_key"])
-            elif integ_type == "google_workspace" and credentials.get("credentials_json"):
-                creds = credentials["credentials_json"]
-                if isinstance(creds, str):
-                    creds = json.loads(creds)
-                return GoogleWorkspaceIntegration(credentials_info=creds)
-            elif integ_type == "slack" and credentials.get("bot_token"):
-                return SlackIntegration()
+            # ── Notion ────────────────────────────────────────────
+            if integ_type == "notion":
+                # OAuth shape: { access_token, ... }
+                # Legacy shape: { api_key }
+                token = credentials.get("access_token") or credentials.get("api_key")
+                if token:
+                    return NotionIntegration(api_token=token)
+
+            # ── Google Workspace ──────────────────────────────────
+            elif integ_type == "google_workspace":
+                # OAuth shape: { access_token, refresh_token, token_type, expires_in, scope }
+                if credentials.get("access_token"):
+                    credentials = await self._ensure_google_token_fresh(
+                        integration_id, credentials
+                    )
+                    # Build an OAuth2 credentials dict that the Google client can use
+                    oauth_creds = {
+                        "token": credentials["access_token"],
+                        "refresh_token": credentials.get("refresh_token"),
+                        "token_uri": "https://oauth2.googleapis.com/token",
+                        "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
+                        "client_secret": settings.GOOGLE_OAUTH_CLIENT_SECRET,
+                        "scopes": (credentials.get("scope") or "").split(),
+                    }
+                    return GoogleWorkspaceIntegration(credentials_info=oauth_creds)
+                # Legacy shape: { credentials_json }
+                elif credentials.get("credentials_json"):
+                    creds = credentials["credentials_json"]
+                    if isinstance(creds, str):
+                        creds = json.loads(creds)
+                    return GoogleWorkspaceIntegration(credentials_info=creds)
+
+            # ── Slack ─────────────────────────────────────────────
+            elif integ_type == "slack":
+                # OAuth shape: { access_token, ... }
+                # Legacy shape: { bot_token }
+                bot_token = credentials.get("access_token") or credentials.get("bot_token")
+                if bot_token:
+                    return SlackIntegration(bot_token=bot_token)
+
+            # ── Salesforce ────────────────────────────────────────
+            elif integ_type == "salesforce":
+                # OAuth shape: { access_token, refresh_token, instance_url }
+                # Returns credentials dict — no dedicated integration class yet,
+                # but the credentials are stored and available for future use
+                if credentials.get("access_token") and credentials.get("instance_url"):
+                    return {
+                        "type": "salesforce",
+                        "access_token": credentials["access_token"],
+                        "instance_url": credentials["instance_url"],
+                        "refresh_token": credentials.get("refresh_token"),
+                    }
+
         except Exception as e:
             logger.error(f"Failed to create user integration instance: {e}")
 
         return self.integrations.get(integ_type)
+
+    async def _ensure_google_token_fresh(
+        self, integration_id: str, credentials: dict
+    ) -> dict:
+        """
+        Check if a Google OAuth access_token is expired (or about to expire).
+        If so, use the refresh_token to obtain a new one and persist it.
+        Returns the (possibly updated) credentials dict.
+        """
+        expires_at = credentials.get("expires_at")
+        if expires_at:
+            # expires_at stored as ISO string or epoch
+            if isinstance(expires_at, (int, float)):
+                expiry = datetime.utcfromtimestamp(expires_at)
+            else:
+                expiry = datetime.fromisoformat(str(expires_at))
+            # Refresh if less than 5 minutes remaining
+            if datetime.utcnow() < expiry - timedelta(minutes=5):
+                return credentials
+
+        refresh_token = credentials.get("refresh_token")
+        if not refresh_token:
+            logger.warning("Google token may be expired but no refresh_token available")
+            return credentials
+
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    "https://oauth2.googleapis.com/token",
+                    data={
+                        "grant_type": "refresh_token",
+                        "refresh_token": refresh_token,
+                        "client_id": settings.GOOGLE_OAUTH_CLIENT_ID,
+                        "client_secret": settings.GOOGLE_OAUTH_CLIENT_SECRET,
+                    },
+                )
+                resp.raise_for_status()
+                token_data = resp.json()
+
+            # Update credentials with new token info
+            credentials["access_token"] = token_data["access_token"]
+            expires_in = token_data.get("expires_in", 3600)
+            credentials["expires_at"] = (
+                datetime.utcnow() + timedelta(seconds=expires_in)
+            ).isoformat()
+            if token_data.get("refresh_token"):
+                credentials["refresh_token"] = token_data["refresh_token"]
+
+            # Persist updated credentials back to DB
+            await integration_repository.update_integration(
+                integration_id,
+                {"credentials": credentials},
+                encrypt_credentials=True,
+            )
+            logger.info("Refreshed Google OAuth token", integration_id=integration_id)
+
+        except Exception as e:
+            logger.error(f"Failed to refresh Google token: {e}")
+
+        return credentials
 
     # ── Action execution ───────────────────────────────────────────────────
 

@@ -522,5 +522,236 @@ class WellbeingRepository(BaseRepository[WellbeingData]):
         else:
             return {}
 
+    # ── Methods required by the wellbeing API endpoints ─────────────────
+
+    async def get_recommendations(
+        self,
+        user_id: str,
+        organization_id: str
+    ) -> List[Dict[str, Any]]:
+        """Get stored wellbeing recommendations for a user."""
+        collection = await self._get_metrics_collection()
+        cursor = collection.find(
+            {"user_id": str(user_id), "record_type": "recommendation"},
+            sort=[("created_at", DESCENDING)],
+            limit=20,
+        )
+        return await cursor.to_list(length=20)
+
+    async def save_recommendation(self, recommendation) -> None:
+        """Persist a wellbeing recommendation to the database."""
+        collection = await self._get_metrics_collection()
+        doc = recommendation.dict() if hasattr(recommendation, "dict") else dict(recommendation)
+        doc["record_type"] = "recommendation"
+        doc["created_at"] = datetime.utcnow()
+        await collection.insert_one(doc)
+
+    async def log_break_recommendation(
+        self,
+        user_id: str,
+        organization_id: str,
+        recommendation: Dict[str, Any],
+    ) -> None:
+        """Log a break recommendation for auditing / analytics."""
+        collection = await self._get_metrics_collection()
+        await collection.insert_one({
+            "user_id": str(user_id),
+            "organization_id": str(organization_id),
+            "record_type": "break_recommendation",
+            "recommendation": recommendation,
+            "created_at": datetime.utcnow(),
+        })
+
+    async def get_break_recommendation(
+        self,
+        user_id: str,
+        organization_id: str,
+    ) -> Dict[str, Any]:
+        """Return a sensible default break recommendation when the AI agent is unavailable."""
+        return {
+            "break_type": "micro_break",
+            "duration_minutes": 5,
+            "reason": "You've been working for a while. A short break will help you recharge.",
+            "suggested_activities": [
+                "Take a short walk",
+                "Do some stretching",
+                "Drink a glass of water",
+            ],
+            "metadata": {"source": "default"},
+        }
+
+    async def record_activity(
+        self,
+        user_id: str,
+        organization_id: str,
+        activity_type: str,
+        duration_minutes: int,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Record a wellbeing activity (break, exercise, etc.)."""
+        collection = await self._get_metrics_collection()
+        doc = {
+            "user_id": str(user_id),
+            "organization_id": str(organization_id),
+            "record_type": "activity",
+            "activity_type": str(activity_type),
+            "duration_minutes": duration_minutes,
+            "metadata": metadata or {},
+            "created_at": datetime.utcnow(),
+        }
+        result = await collection.insert_one(doc)
+        doc["id"] = str(result.inserted_id)
+        return doc
+
+    async def get_recent_activities(
+        self,
+        user_id: str,
+        organization_id: str,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Get recent wellbeing activities for a user."""
+        collection = await self._get_metrics_collection()
+        cursor = collection.find(
+            {
+                "user_id": str(user_id),
+                "record_type": "activity",
+            },
+            sort=[("created_at", DESCENDING)],
+            limit=limit,
+        )
+        return await cursor.to_list(length=limit)
+
+    async def get_last_break_time(
+        self,
+        user_id: str,
+        organization_id: str,
+    ) -> Optional[datetime]:
+        """Get the timestamp of the user's last recorded break."""
+        collection = await self._get_metrics_collection()
+        doc = await collection.find_one(
+            {
+                "user_id": str(user_id),
+                "record_type": "activity",
+                "activity_type": {"$in": ["physical", "relaxation", "mindfulness"]},
+            },
+            sort=[("created_at", DESCENDING)],
+        )
+        return doc["created_at"] if doc else None
+
+    async def get_wellbeing_analytics(
+        self,
+        user_id: str,
+        organization_id: str,
+        time_range: str = "7d",
+    ) -> Dict[str, Any]:
+        """Get wellbeing analytics for a user over a time range."""
+        days = {"1d": 1, "7d": 7, "30d": 30, "90d": 90, "1y": 365}.get(time_range, 7)
+        since = datetime.utcnow() - timedelta(days=days)
+
+        metrics = await self.get_user_metrics(
+            user_id=user_id,
+            organization_id=organization_id,
+            start_date=since,
+            limit=1000,
+        )
+
+        # Aggregate by metric_type
+        by_type: Dict[str, list] = {}
+        for m in metrics:
+            mt = m.get("metric_type", "unknown")
+            by_type.setdefault(mt, []).append(float(m.get("value", 0)))
+
+        summary = {}
+        for mt, values in by_type.items():
+            summary[mt] = {
+                "count": len(values),
+                "avg": round(sum(values) / len(values), 2) if values else 0,
+                "min": round(min(values), 2) if values else 0,
+                "max": round(max(values), 2) if values else 0,
+                "trend": values[-7:] if len(values) >= 7 else values,
+            }
+
+        # Get activities in range
+        collection = await self._get_metrics_collection()
+        activity_cursor = collection.find(
+            {
+                "user_id": str(user_id),
+                "record_type": "activity",
+                "created_at": {"$gte": since},
+            },
+            sort=[("created_at", DESCENDING)],
+        )
+        activities = await activity_cursor.to_list(length=500)
+
+        return {
+            "time_range": time_range,
+            "total_metrics": len(metrics),
+            "total_activities": len(activities),
+            "metrics_summary": summary,
+            "recent_activities": [
+                {
+                    "type": a.get("activity_type"),
+                    "duration": a.get("duration_minutes"),
+                    "timestamp": a.get("created_at", "").isoformat() if hasattr(a.get("created_at", ""), "isoformat") else str(a.get("created_at", "")),
+                }
+                for a in activities[:20]
+            ],
+        }
+
+    async def get_organization_analytics(
+        self,
+        organization_id: str,
+        time_range: str = "7d",
+    ) -> Dict[str, Any]:
+        """Get organization-wide wellbeing analytics."""
+        days = {"1d": 1, "7d": 7, "30d": 30, "90d": 90, "1y": 365}.get(time_range, 7)
+        since = datetime.utcnow() - timedelta(days=days)
+
+        collection = await self._get_metrics_collection()
+        pipeline = [
+            {"$match": {
+                "organization_id": str(organization_id),
+                "record_type": {"$in": ["metric", None]},
+                "timestamp": {"$gte": since},
+            }},
+            {"$group": {
+                "_id": "$metric_type",
+                "count": {"$sum": 1},
+                "avg_value": {"$avg": "$value"},
+                "unique_users": {"$addToSet": "$user_id"},
+            }},
+        ]
+        results = await collection.aggregate(pipeline).to_list(length=100)
+
+        return {
+            "time_range": time_range,
+            "metrics": {
+                r["_id"]: {
+                    "count": r["count"],
+                    "avg_value": round(r["avg_value"], 2) if r["avg_value"] else 0,
+                    "unique_users": len(r["unique_users"]),
+                }
+                for r in results if r["_id"]
+            },
+        }
+
+    async def get_user_goals(
+        self,
+        user_id: str,
+        organization_id: str,
+        status: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Get wellbeing goals from the metrics collection (fallback for recommendations endpoint)."""
+        collection = await self._get_metrics_collection()
+        query: Dict[str, Any] = {
+            "user_id": str(user_id),
+            "record_type": "goal",
+        }
+        if status:
+            query["status"] = status
+        cursor = collection.find(query, sort=[("created_at", DESCENDING)])
+        return await cursor.to_list(length=50)
+
+
 # Create a singleton instance
-wellbeing_repository = WellbeingRepository() 
+wellbeing_repository = WellbeingRepository()

@@ -410,6 +410,25 @@ class Settings(BaseSettings):
     SLACK_APP_TOKEN: Optional[str] = None
     SLACK_SIGNING_SECRET: Optional[str] = None
 
+    # ── OAuth 2.0 Integration Credentials ─────────────────────────────
+    # Google Workspace (GOOGLE_OAUTH_CLIENT_ID is above in the Google OAuth section)
+    GOOGLE_OAUTH_CLIENT_SECRET: Optional[str] = None
+
+    # Slack OAuth
+    SLACK_CLIENT_ID: Optional[str] = None
+    SLACK_CLIENT_SECRET: Optional[str] = None
+
+    # Notion OAuth
+    NOTION_OAUTH_CLIENT_ID: Optional[str] = None
+    NOTION_OAUTH_CLIENT_SECRET: Optional[str] = None
+
+    # Salesforce OAuth
+    SALESFORCE_CLIENT_ID: Optional[str] = None
+    SALESFORCE_CLIENT_SECRET: Optional[str] = None
+
+    # Frontend URL for OAuth redirect URI construction
+    FRONTEND_URL: str = "http://localhost:3000"
+
     # ── Cloud Providers (optional) ─────────────────────────────────────
     AZURE_OPENAI_API_KEY: Optional[str] = None
     AZURE_OPENAI_ENDPOINT: Optional[str] = None

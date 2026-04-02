@@ -663,21 +663,106 @@ async def get_wellbeing_status(
     )
     return latest_metrics
 
-@router.get("/stats", response_model=WellbeingStats)
+@router.get("/stats")
 async def get_wellbeing_stats(
     time_range: str = Query("7d", pattern="^(1d|7d|30d|90d|1y)$"),
-    user_id: str = Depends(get_current_user_id)
-):
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
     """Get wellbeing statistics for the specified time range."""
-    # ... existing code ...
+    days_map = {"1d": 1, "7d": 7, "30d": 30, "90d": 90, "1y": 365}
+    days = days_map.get(time_range, 7)
+    since = datetime.utcnow() - timedelta(days=days)
 
-@router.get("/history", response_model=List[WellbeingRecord])
+    metrics = await wellbeing_repository.get_user_metrics(
+        user_id=current_user.id,
+        organization_id=current_user.organization_id,
+        start_date=since,
+        limit=1000,
+    )
+
+    values = {"mood": [], "energy": [], "stress": [], "sleep": []}
+    for m in metrics:
+        mt = (m.get("metric_type") or "").lower()
+        val = float(m.get("value", 0))
+        if mt in values:
+            values[mt].append(val)
+
+    def avg(lst):
+        return round(sum(lst) / len(lst), 2) if lst else 0.0
+
+    return {
+        "user_id": str(current_user.id),
+        "period_start": since.isoformat(),
+        "period_end": datetime.utcnow().isoformat(),
+        "average_mood": avg(values["mood"]),
+        "average_energy": avg(values["energy"]),
+        "average_stress": avg(values["stress"]),
+        "average_sleep": avg(values["sleep"]),
+        "total_records": len(metrics),
+        "mood_trend": values["mood"][-7:],
+        "energy_trend": values["energy"][-7:],
+        "stress_trend": values["stress"][-7:],
+        "sleep_trend": values["sleep"][-7:],
+    }
+
+
+@router.get("/history")
 async def get_wellbeing_history(
     time_range: str = Query("7d", pattern="^(1d|7d|30d|90d|1y)$"),
-    user_id: str = Depends(get_current_user_id)
-):
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
     """Get wellbeing history for the specified time range."""
-    # ... existing code ...
+    days_map = {"1d": 1, "7d": 7, "30d": 30, "90d": 90, "1y": 365}
+    days = days_map.get(time_range, 7)
+    since = datetime.utcnow() - timedelta(days=days)
 
-# Create a singleton instance
-wellbeing_repository = WellbeingRepository() 
+    metrics = await wellbeing_repository.get_user_metrics(
+        user_id=current_user.id,
+        organization_id=current_user.organization_id,
+        start_date=since,
+        limit=500,
+    )
+
+    # Group metrics by day into WellbeingRecord-like objects
+    from collections import defaultdict
+    daily: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
+        "mood_scores": [], "energy_levels": [], "stress_levels": [], "sleep_hours": [],
+        "activities": [], "notes": [],
+    })
+
+    for m in metrics:
+        ts = m.get("timestamp")
+        day_key = ts.strftime("%Y-%m-%d") if hasattr(ts, "strftime") else str(ts)[:10]
+        mt = (m.get("metric_type") or "").lower()
+        val = float(m.get("value", 0))
+        if mt in ("mood", "mood_score"):
+            daily[day_key]["mood_scores"].append(val)
+        elif mt in ("energy", "energy_level"):
+            daily[day_key]["energy_levels"].append(val)
+        elif mt in ("stress", "stress_level"):
+            daily[day_key]["stress_levels"].append(val)
+        elif mt in ("sleep", "sleep_hours"):
+            daily[day_key]["sleep_hours"].append(val)
+        note = (m.get("metadata") or {}).get("notes")
+        if note:
+            daily[day_key]["notes"].append(note)
+
+    def avg(lst):
+        return round(sum(lst) / len(lst), 1) if lst else 5
+
+    records = []
+    for day_key in sorted(daily.keys()):
+        d = daily[day_key]
+        records.append({
+            "user_id": str(current_user.id),
+            "timestamp": f"{day_key}T00:00:00Z",
+            "mood_score": int(avg(d["mood_scores"])),
+            "energy_level": int(avg(d["energy_levels"])),
+            "stress_level": int(avg(d["stress_levels"])),
+            "sleep_hours": round(avg(d["sleep_hours"]), 1),
+            "notes": "; ".join(d["notes"]) if d["notes"] else None,
+            "activities": list(set(d["activities"])),
+            "tags": [],
+        })
+
+    return records

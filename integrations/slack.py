@@ -11,15 +11,19 @@ logger = structlog.get_logger(__name__)
 class SlackIntegration:
     """Integration with Slack workspace."""
 
-    def __init__(self):
+    def __init__(self, bot_token: Optional[str] = None, app_token: Optional[str] = None):
         """Initialize Slack integration.
+
+        Args:
+            bot_token: Per-user bot token from OAuth. Falls back to env var.
+            app_token: Per-user app token. Falls back to env var.
 
         Note: Connection validation is deferred to ``validate_connection()``
         because the underlying SlackClient methods are async.
         """
         self.client = SlackClient(
-            bot_token=settings.SLACK_BOT_TOKEN,
-            app_token=settings.SLACK_APP_TOKEN,
+            bot_token=bot_token or settings.SLACK_BOT_TOKEN,
+            app_token=app_token or settings.SLACK_APP_TOKEN,
         )
         self._validated = False
 
