@@ -7,6 +7,7 @@ tasks, workflows, and agent execution logs.
 
 from __future__ import annotations
 
+import enum
 from datetime import datetime
 from typing import Optional, List
 import uuid
@@ -210,3 +211,70 @@ class AgentExecutionSQL(Base):
     input_payload = Column(JSONB, nullable=True)
     output_payload = Column(JSONB, nullable=True)
     meta = Column("metadata", JSONB, nullable=False, default=dict)
+
+
+# ── Blog ────────────────────────────────────────────────────────────
+
+class BlogPostStatus(str, enum.Enum):
+    DRAFT = "draft"
+    PUBLISHED = "published"
+    ARCHIVED = "archived"
+
+
+class AuthorType(str, enum.Enum):
+    TEAM = "team"
+    INDIVIDUAL = "individual"
+    AI_AGENT = "ai_agent"
+
+
+class BlogPostSQL(Base):
+    """Blog post stored in Postgres for persistent, public-facing content."""
+    __tablename__ = "blog_posts"
+
+    id = Column(String(36), primary_key=True, default=_uuid_str)
+    slug = Column(String(500), unique=True, nullable=False, index=True)
+    title = Column(String(500), nullable=False)
+    subtitle = Column(String(500), nullable=True)
+    content = Column(Text, nullable=False)  # TipTap HTML
+    excerpt = Column(Text, nullable=True)
+
+    # Author (denormalized for fast public reads — no cross-DB joins)
+    author_id = Column(String(64), nullable=False, index=True)
+    author_type = Column(SAEnum(AuthorType), nullable=False, default=AuthorType.INDIVIDUAL)
+    author_name = Column(String(255), nullable=False)
+    author_avatar_url = Column(String(1000), nullable=True)
+    author_title = Column(String(255), nullable=True)
+
+    cover_image_url = Column(String(1000), nullable=True)
+    category = Column(String(100), nullable=True, index=True)
+    tags = Column(ARRAY(String), nullable=False, default=list)
+    status = Column(SAEnum(BlogPostStatus), nullable=False, default=BlogPostStatus.DRAFT)
+
+    collaborator_ids = Column(ARRAY(String), nullable=False, default=list)
+    featured = Column(Boolean, nullable=False, default=False)
+    view_count = Column(Integer, nullable=False, default=0)
+
+    published_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    deleted_at = Column(DateTime, nullable=True)
+
+
+class BlogCommentSQL(Base):
+    """Comment on a blog post. Supports @mentions for users and agents."""
+    __tablename__ = "blog_comments"
+
+    id = Column(String(36), primary_key=True, default=_uuid_str)
+    post_id = Column(String(36), nullable=False, index=True)
+    user_id = Column(String(64), nullable=False, index=True)
+    user_name = Column(String(255), nullable=False)
+    user_avatar_url = Column(String(1000), nullable=True)
+
+    content = Column(Text, nullable=False)
+    mentions = Column(JSONB, nullable=False, default=list)  # [{"type": "user"|"agent", "id": "...", "name": "..."}]
+
+    parent_id = Column(String(36), nullable=True, index=True)  # For threaded replies
+
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    deleted_at = Column(DateTime, nullable=True)

@@ -32,6 +32,8 @@ from backend.api.v1.endpoints import (
     device_tokens,
     billing,
     security,
+    upload,
+    blog,
 )
 from backend.api.routers.research_mentor import router as research_mentor_router
 from backend.api.routers.ethics_bias_router import router as ethics_bias_router
@@ -470,6 +472,36 @@ api_router.include_router(
         200: {"description": "Success"},
         400: {"description": "Bad Request"},
         401: {"description": "Unauthorized"},
+        422: {"description": "Validation Error"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Upload endpoints
+api_router.include_router(
+    upload.router,
+    prefix="/upload",
+    tags=["upload"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        413: {"description": "File Too Large"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+
+# Blog endpoints
+api_router.include_router(
+    blog.router,
+    prefix="/blog",
+    tags=["blog"],
+    responses={
+        200: {"description": "Success"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        403: {"description": "Forbidden"},
+        404: {"description": "Not Found"},
         422: {"description": "Validation Error"},
         500: {"description": "Internal Server Error"}
     }

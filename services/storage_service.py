@@ -124,6 +124,44 @@ class S3Client:
             })
         return objects
 
+    def set_public_read_policy(self, prefix: str) -> None:
+        """Set a bucket policy that allows anonymous read on a given prefix."""
+        import json
+        policy = {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": f"PublicRead-{prefix.replace('/', '-')}",
+                    "Effect": "Allow",
+                    "Principal": "*",
+                    "Action": ["s3:GetObject"],
+                    "Resource": [f"arn:aws:s3:::{self.bucket}/{prefix}*"],
+                }
+            ],
+        }
+        client = self._get_client()
+        # Merge with existing policy if present
+        try:
+            existing = json.loads(client.get_bucket_policy(Bucket=self.bucket)["Policy"])
+            # Avoid duplicates
+            existing_sids = {s.get("Sid") for s in existing.get("Statement", [])}
+            new_sid = policy["Statement"][0]["Sid"]
+            if new_sid not in existing_sids:
+                existing["Statement"].extend(policy["Statement"])
+            policy = existing
+        except client.exceptions.ClientError:
+            pass  # No existing policy
+        client.put_bucket_policy(Bucket=self.bucket, Policy=json.dumps(policy))
+        logger.info("Set public-read policy", bucket=self.bucket, prefix=prefix)
+
+    def public_url(self, key: str) -> str:
+        """Return a direct (non-presigned) URL for a publicly readable object."""
+        endpoint = self.endpoint_url
+        scheme = "https" if self.use_ssl else "http"
+        if not endpoint.startswith(("http://", "https://")):
+            endpoint = f"{scheme}://{endpoint}"
+        return f"{endpoint}/{self.bucket}/{key}"
+
     def health_check(self) -> bool:
         try:
             self._get_client().head_bucket(Bucket=self.bucket)
@@ -185,6 +223,12 @@ class DualWriteStorageService:
             logger.info("Dual-write disabled or R2 not configured — MinIO only")
 
         self._initialized = True
+
+        # Set public-read policy on blog/ prefix so images are permanently accessible
+        try:
+            await asyncio.to_thread(self._primary.set_public_read_policy, "blog/")
+        except Exception as e:
+            logger.warning("Failed to set blog/ public-read policy", error=str(e))
 
     # -- Upload --------------------------------------------------------------
 
@@ -280,6 +324,18 @@ class DualWriteStorageService:
     async def health_check(self) -> bool:
         self._ensure_initialized()
         return await asyncio.to_thread(self._primary.health_check)
+
+    # -- Public URL ----------------------------------------------------------
+
+    async def set_public_read_policy(self, prefix: str) -> None:
+        """Set public-read policy on a prefix (e.g. 'blog/') in the primary store."""
+        self._ensure_initialized()
+        await asyncio.to_thread(self._primary.set_public_read_policy, prefix)
+
+    def get_public_url(self, key: str) -> str:
+        """Return a permanent, non-presigned URL for a publicly readable object."""
+        self._ensure_initialized()
+        return self._primary.public_url(key)
 
     # -- Internal ------------------------------------------------------------
 
