@@ -28,6 +28,7 @@ from backend.api.v1.endpoints import (
     workflow_execution,
     onboarding,
     websocket,
+    transcribe_websocket,
     device_tokens,
     billing,
     security,
@@ -104,6 +105,13 @@ api_router.include_router(
     websocket.router,
     prefix="/ws",
     tags=["websocket"]
+)
+
+# WebSocket endpoints for real-time speech-to-text transcription
+api_router.include_router(
+    transcribe_websocket.router,
+    prefix="/ws",
+    tags=["websocket", "transcription"]
 )
 
 # Device token endpoints for push notifications

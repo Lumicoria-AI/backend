@@ -68,6 +68,9 @@ anthropic>=0.39.0
 # Mistral (optional — only needed if DEFAULT_LLM_PROVIDER=mistral)
 mistralai>=1.0.0
 
+# ── Speech-to-Text (Faster-Whisper) ──────────────────────────────────
+faster-whisper>=1.0.0
+
 # ── Document Processing ──────────────────────────────────────────────
 PyMuPDF>=1.24
 

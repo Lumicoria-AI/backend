@@ -3,7 +3,7 @@ from typing import Any, List, Optional, Dict
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 from backend.api.deps import get_current_active_user
-from backend.db.mongodb.repositories.user_repository import user_repository
+from backend.db.mongodb.repositories.user_repository import get_user_repository
 from backend.models.user import User, UserUpdate
 from backend.core.security import rate_limit, verify_password, get_password_hash
 from backend.services.activity_logger import log_activity
@@ -61,7 +61,7 @@ async def get_security_overview(
     user_id = str(current_user.id)
 
     # Get full user data from DB for security fields
-    full_user = await user_repository.get_user_by_id(user_id)
+    full_user = await (await get_user_repository()).get_user_by_id(user_id)
     if not full_user:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -247,7 +247,7 @@ async def change_password(
     user_id = str(current_user.id)
 
     # Get full user with hashed_password
-    full_user = await user_repository.get_user_by_id(user_id)
+    full_user = await (await get_user_repository()).get_user_by_id(user_id)
     if not full_user:
         raise HTTPException(status_code=404, detail="User not found")
 
@@ -281,7 +281,7 @@ async def change_password(
 
     # Hash and save new password
     new_hashed = get_password_hash(password_data.new_password)
-    await user_repository.update_user(user_id, {
+    await (await get_user_repository()).update_user(user_id, {
         "hashed_password": new_hashed,
         "last_password_change": datetime.utcnow(),
     })
@@ -314,7 +314,7 @@ async def revoke_all_sessions(
     # Invalidate refresh token so other sessions can't refresh
     import secrets
     new_refresh = secrets.token_urlsafe(32)
-    await user_repository.update_user(user_id, {"refresh_token": new_refresh})
+    await (await get_user_repository()).update_user(user_id, {"refresh_token": new_refresh})
 
     # Log the action
     await log_activity(

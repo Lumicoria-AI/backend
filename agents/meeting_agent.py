@@ -20,19 +20,15 @@ class MeetingAgent(BaseAgent):
         super().__init__(config)
         # Default extraction targets if not specified in config
         self.extraction_targets = config.get("extraction_targets", [
-            "action_items", "decisions", "key_points", "follow_ups", 
+            "action_items", "decisions", "key_points", "follow_ups",
             "questions", "concerns", "deadlines"
         ])
-        
+
         # Default meeting types if not specified in config
         self.meeting_types = config.get("meeting_types", [
             "status_update", "planning", "brainstorming", "decision_making",
             "problem_solving", "review", "team_building", "client"
         ])
-        
-        # Configure with default model if not specified
-        if "model" not in self.model_config:
-            self.model_config["model"] = "sonar-large-online"
             
     def process(self, meeting_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process meeting transcript to extract key information and generate summary.
@@ -336,9 +332,26 @@ class MeetingAgent(BaseAgent):
         """
         try:
             # First, try to parse as JSON (since we asked for JSON format)
+            # LLMs often wrap JSON in markdown code fences — strip them
             try:
-                return json.loads(response_text)
-            except json.JSONDecodeError:
+                cleaned = response_text.strip()
+                if cleaned.startswith("```"):
+                    # Remove opening fence (```json or ```)
+                    cleaned = re.sub(r"^```(?:json)?\s*\n?", "", cleaned)
+                    # Remove closing fence
+                    cleaned = re.sub(r"\n?```\s*$", "", cleaned)
+                parsed = json.loads(cleaned)
+                # Ensure action_items have the right shape
+                if "action_items" in parsed and isinstance(parsed["action_items"], list):
+                    for i, item in enumerate(parsed["action_items"]):
+                        if isinstance(item, str):
+                            parsed["action_items"][i] = {"task": item, "assignee": "Unassigned", "deadline": "No deadline specified"}
+                        elif isinstance(item, dict):
+                            item.setdefault("assignee", "Unassigned")
+                            item.setdefault("deadline", "No deadline specified")
+                            item.setdefault("task", "")
+                return parsed
+            except (json.JSONDecodeError, ValueError):
                 # If not JSON, use regex-based parsing
                 pass
             

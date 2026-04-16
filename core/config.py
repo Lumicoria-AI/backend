@@ -385,6 +385,28 @@ class Settings(BaseSettings):
         description="Sentry performance traces sample rate (0.0-1.0). Use 1.0 only in dev.",
     )
 
+    # ── Speech-to-Text (Faster-Whisper) ─────────────────────────────────
+    STT_MODEL_SIZE: str = Field(
+        default="base",
+        description="Faster-Whisper model size: tiny, base, small, medium, large-v3.",
+    )
+    STT_DEVICE: str = Field(
+        default="cpu",
+        description="Device for STT inference: cpu or cuda.",
+    )
+    STT_COMPUTE_TYPE: str = Field(
+        default="int8",
+        description="Compute type: int8 (CPU), float16 (GPU), float32.",
+    )
+    STT_LANGUAGE: Optional[str] = Field(
+        default="en",
+        description="Default STT language code (ISO 639-1). None = auto-detect.",
+    )
+    STT_CHUNK_DURATION: float = Field(
+        default=4.0,
+        description="Seconds of audio to buffer before transcribing a chunk.",
+    )
+
     # ── File Upload ────────────────────────────────────────────────────
     UPLOAD_DIR: str = str(Path(__file__).parent.parent / "uploads")
     MAX_UPLOAD_SIZE: int = 10 * 1024 * 1024  # 10 MB

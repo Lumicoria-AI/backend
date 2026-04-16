@@ -23,10 +23,6 @@ class VisionAgent(BaseAgent):
     
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        # Configure with default model if not specified
-        if "model" not in self.model_config:
-            # Use Perplexity's Sonar model which has best support for image understanding
-            self.model_config["model"] = "sonar-large-online"
             
         # Define default vision analysis components
         self.vision_tasks = config.get("vision_tasks", [

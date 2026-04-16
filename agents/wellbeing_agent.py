@@ -14,9 +14,6 @@ logger = structlog.get_logger(__name__)
 class WellbeingAgent(BaseAgent):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        # Configure with default model if not specified
-        if "model" not in self.model_config:
-            self.model_config["model"] = "sonar-large-online"
 
     def process(self, user_data: Dict[str, Any]) -> Dict[str, Any]:
         """

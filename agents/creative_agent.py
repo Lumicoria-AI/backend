@@ -20,13 +20,9 @@ class CreativeAgent(BaseAgent):
         super().__init__(config)
         # Default creative content types if not specified in config
         self.creative_types = config.get("creative_types", [
-            "marketing", "storytelling", "poetry", "scriptwriting", 
+            "marketing", "storytelling", "poetry", "scriptwriting",
             "product_description", "social_media", "blog_post"
         ])
-        
-        # Configure with default model if not specified
-        if "model" not in self.model_config:
-            self.model_config["model"] = "sonar-large-online"
     
     def process(self, creative_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process a creative request to generate content.

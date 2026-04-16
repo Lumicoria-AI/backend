@@ -84,6 +84,110 @@ class WorkflowSQL(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
+# ── Meeting Library ──────────────────────────────────────────────────
+
+class MeetingSQL(Base):
+    """Processed meeting stored in Postgres for persistent history."""
+    __tablename__ = "meetings"
+
+    id = Column(String(36), primary_key=True, default=_uuid_str)
+    user_id = Column(String(64), nullable=False, index=True)
+    organization_id = Column(String(64), nullable=True, index=True)
+
+    # Core meeting data
+    title = Column(String(500), nullable=True)
+    meeting_type = Column(String(50), nullable=False, default="general")
+    transcript = Column(Text, nullable=False)
+    summary = Column(Text, nullable=True)
+    raw_response = Column(Text, nullable=True)
+    model_used = Column(String(100), nullable=True)
+
+    # Structured results stored as JSONB
+    action_items = Column(JSONB, nullable=False, default=list)
+    decisions = Column(JSONB, nullable=False, default=list)
+    key_points = Column(JSONB, nullable=False, default=list)
+    follow_ups = Column(JSONB, nullable=False, default=list)
+    questions = Column(JSONB, nullable=False, default=list)
+    concerns = Column(JSONB, nullable=False, default=list)
+
+    # Metadata
+    meeting_date = Column(String(50), nullable=True)
+    duration = Column(String(50), nullable=True)
+    participants = Column(JSONB, nullable=False, default=list)
+    context = Column(JSONB, nullable=False, default=dict)
+    tags = Column(ARRAY(String), nullable=False, default=list)
+
+    # Source tracking
+    source = Column(String(50), nullable=False, default="manual")  # manual, file_upload, audio_upload, stt
+
+    processed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    deleted_at = Column(DateTime, nullable=True)
+
+
+class MeetingDraftSQL(Base):
+    """Draft transcript saved while user is typing or recording — one per user."""
+    __tablename__ = "meeting_drafts"
+
+    id = Column(String(36), primary_key=True, default=_uuid_str)
+    user_id = Column(String(64), nullable=False, unique=True, index=True)
+    transcript = Column(Text, nullable=False, default="")
+    meeting_type = Column(String(50), nullable=True, default="general")
+    title = Column(String(500), nullable=True)
+    participants = Column(JSONB, nullable=False, default=list)
+    context = Column(JSONB, nullable=False, default=dict)
+
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+# ── Fact-Checker Sessions & Claims ──────────────────────────────
+
+class FactCheckSessionSQL(Base):
+    """A fact-checking session stored in Postgres."""
+    __tablename__ = "fact_check_sessions"
+
+    id = Column(String(36), primary_key=True, default=_uuid_str)
+    user_id = Column(String(64), nullable=False, index=True)
+    organization_id = Column(String(64), nullable=True, index=True)
+
+    title = Column(String(500), nullable=False)
+    participants = Column(JSONB, nullable=False, default=list)
+    summary = Column(Text, nullable=True)
+    verification_stats = Column(JSONB, nullable=False, default=dict)
+
+    started_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    ended_at = Column(DateTime, nullable=True)
+    deleted_at = Column(DateTime, nullable=True)
+
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class FactCheckClaimSQL(Base):
+    """An individual verified claim within a fact-check session."""
+    __tablename__ = "fact_check_claims"
+
+    id = Column(String(36), primary_key=True, default=_uuid_str)
+    session_id = Column(String(36), nullable=False, index=True)
+    user_id = Column(String(64), nullable=False, index=True)
+
+    content = Column(Text, nullable=False)
+    speaker = Column(String(255), nullable=False, default="Unknown")
+    claim_type = Column(String(50), nullable=False, default="assertion")
+
+    verification_status = Column(String(50), nullable=False, default="pending")
+    confidence = Column(Integer, nullable=False, default=0)  # 0-100
+    severity = Column(String(50), nullable=False, default="medium")
+
+    citations = Column(JSONB, nullable=False, default=list)
+    corrections = Column(JSONB, nullable=False, default=list)
+    summary = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+
 class AgentExecutionSQL(Base):
     __tablename__ = "agent_executions"
 

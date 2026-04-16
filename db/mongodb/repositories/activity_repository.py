@@ -20,7 +20,7 @@ class ActivityRepository(BaseRepository[ActivityLogEntry]):
         await collection.create_index("organization_id")
         await collection.create_index("user_id")
         await collection.create_index("activity_type")
-        await collection.create_index("timestamp", DESCENDING)
+        await collection.create_index([("timestamp", DESCENDING)])
         # Compound indexes for filtering and sorting
         await collection.create_index([
             ("organization_id", ASCENDING),

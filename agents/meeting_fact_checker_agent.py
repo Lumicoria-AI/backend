@@ -67,7 +67,7 @@ class MeetingFactCheckerAgent(BaseAgent):
     def __init__(self, config: Dict[str, Any]):
         """Initialize the Meeting Fact Checker Agent."""
         super().__init__(config)
-        
+
         # Set default capabilities
         self.capabilities = {
             "real_time_verification": True,
@@ -76,15 +76,22 @@ class MeetingFactCheckerAgent(BaseAgent):
             "correction_generation": True,
             "meeting_summary": True
         }
-        
-        # Configure model for fact checking
+
+        # Force Perplexity as the provider — it's the only model with live
+        # web search, which is essential for real-time fact verification.
         self.model_config.update({
-            "temperature": 0.3,  # Lower temperature for more precise verification
+            "provider": "perplexity",
+            "model": "sonar",
+            "temperature": 0.3,
             "max_tokens": 2000,
             "top_p": 0.9,
             "frequency_penalty": 0.1,
-            "presence_penalty": 0.1
+            "presence_penalty": 0.1,
         })
+
+        # Re-initialize the LLM client now that model_config has perplexity set
+        self.initialize_models()
+        logger.info("Fact-checker agent initialized with Perplexity (sonar-large-online)")
         
         # Initialize active sessions and claim history
         self.active_sessions: Dict[str, MeetingSession] = {}
@@ -326,29 +333,110 @@ class MeetingFactCheckerAgent(BaseAgent):
             logger.error(f"Error getting session summary: {str(e)}")
             raise
 
+    async def _process_with_model(
+        self,
+        system_prompt: str,
+        user_content: str,
+        parameters: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Call the LLM with a system prompt and user content, return parsed JSON dict."""
+        import re
+
+        response_text = await self._call_model_async(
+            prompt=user_content,
+            system_prompt=system_prompt + "\n\nRespond ONLY with valid JSON.",
+            temperature=parameters.get("temperature", 0.3),
+            max_tokens=parameters.get("max_tokens", 2000),
+        )
+
+        # Strip markdown fences if present
+        cleaned = response_text.strip()
+        if cleaned.startswith("```"):
+            cleaned = re.sub(r"^```(?:json)?\s*\n?", "", cleaned)
+            cleaned = re.sub(r"\n?```\s*$", "", cleaned)
+
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            logger.warning("Failed to parse LLM response as JSON, wrapping as summary")
+            return {"summary": response_text.strip()}
+
+    def _parse_verification(self, response: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract structured verification data from the LLM response."""
+        status_raw = response.get("verification_status", response.get("status", "pending")).lower()
+
+        # Normalize to valid enum values
+        status_map = {
+            "verified": "verified",
+            "true": "verified",
+            "partially_verified": "partially_verified",
+            "partially true": "partially_verified",
+            "partial": "partially_verified",
+            "disputed": "disputed",
+            "false": "disputed",
+            "unverifiable": "unverifiable",
+            "unverified": "unverifiable",
+            "unknown": "unverifiable",
+            "pending": "pending",
+        }
+        status = status_map.get(status_raw, "pending")
+
+        severity_raw = response.get("severity", "medium").lower()
+        severity_map = {
+            "critical": "critical", "high": "high", "medium": "medium",
+            "low": "low", "info": "info",
+        }
+        severity = severity_map.get(severity_raw, "medium")
+
+        confidence = response.get("confidence", 0.5)
+        if isinstance(confidence, (int, float)):
+            # Normalize to 0-1 range if given as percentage
+            if confidence > 1:
+                confidence = confidence / 100.0
+        else:
+            confidence = 0.5
+
+        return {
+            "status": VerificationStatus(status),
+            "severity": ClaimSeverity(severity),
+            "confidence": confidence,
+            "citations": response.get("citations", []),
+            "corrections": response.get("corrections", []),
+            "summary": response.get("summary", response.get("explanation", "")),
+        }
+
     def _create_verification_prompt(
         self,
         context: Dict[str, Any],
         parameters: Dict[str, Any]
     ) -> str:
         """Create system prompt for claim verification."""
-        return f"""You are a specialized fact-checking assistant for meetings. Verify claims and provide accurate information.
-        
-        Context:
-        - Meeting Type: {context.get('meeting_type', 'general')}
-        - Topic: {context.get('topic', 'unknown')}
-        - Participants: {context.get('participants', 'unknown')}
-        - Previous Claims: {context.get('previous_claims', 'none')}
-        
-        Verify claims by:
-        1. Identifying the type of claim (statistic, fact, reference, quote, assertion)
-        2. Searching for supporting evidence
-        3. Providing relevant citations
-        4. Suggesting corrections if needed
-        5. Assessing severity of any inaccuracies
-        
-        Provide detailed verification with specific evidence and research citations.
-        """
+        return f"""You are a real-time fact-checking assistant with live web access. Your job is to make a deep research and verify claims made during meetings using current, up-to-date information from the internet.
+
+Context:
+- Meeting Type: {context.get('meeting_type', 'general')}
+- Topic: {context.get('topic', 'unknown')}
+- Participants: {context.get('participants', 'unknown')}
+- Previous Claims: {context.get('previous_claims', 'none')}
+
+IMPORTANT: You have live web access. Use it to:
+1. Search for the most current data to verify or refute the claim
+2. Find real, authoritative sources (company filings, news articles, official reports, press releases)
+3. Provide actual URLs to the sources you found
+4. Compare the claim against the latest available data
+5. Suggest specific corrections with evidence if the claim is inaccurate
+
+Return your response as JSON with these exact fields:
+{{
+  "verification_status": "verified" | "partially_verified" | "disputed" | "unverifiable",
+  "confidence": 0.0 to 1.0,
+  "severity": "critical" | "high" | "medium" | "low" | "info",
+  "summary": "detailed explanation citing specific data points you found online",
+  "citations": ["https://real-url-to-source-1", "https://real-url-to-source-2"],
+  "corrections": ["specific correction with evidence if claim is inaccurate weather True or Not"]
+}}
+
+For citations, always provide real URLs when possible. If you cannot find a direct URL, describe the source precisely (e.g. "SEC 10-K filing, Q2 2025, page 12")."""
 
     async def _generate_session_summary(
         self,

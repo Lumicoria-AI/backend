@@ -190,6 +190,23 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("service_init_failed", service="AgentService", error=str(e))
 
+        # ── Speech-to-Text (Faster-Whisper) ─────────────────────
+        logger.info("─" * 40)
+        logger.info("initializing_stt_service")
+
+        try:
+            from backend.services.stt_service import stt_service
+            stt_service.preload()
+            logger.info(
+                "service_initialized",
+                service="STT (Faster-Whisper)",
+                model=settings.STT_MODEL_SIZE,
+                device=settings.STT_DEVICE,
+                status="ok",
+            )
+        except Exception as e:
+            logger.warning("service_init_failed", service="STT (Faster-Whisper)", error=str(e))
+
         # ── Startup Complete ─────────────────────────────────────
         logger.info("=" * 60)
         logger.info("lumicoria_startup_complete", status="ready")
@@ -265,7 +282,7 @@ async def security_headers_middleware(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(self), geolocation=()"
     if settings.is_production:
         response.headers["Strict-Transport-Security"] = (
             "max-age=31536000; includeSubDomains; preload"
