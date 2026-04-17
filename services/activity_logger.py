@@ -20,8 +20,8 @@ logger = structlog.get_logger(__name__)
 
 async def log_activity(
     user_id: str,
-    organization_id: str,
-    activity_type: str,
+    organization_id: Optional[str] = None,
+    activity_type: str = "",
     details: Optional[Dict[str, Any]] = None,
     related_resource_type: Optional[str] = None,
     related_resource_id: Optional[str] = None,
@@ -57,6 +57,16 @@ async def log_activity(
         "info" | "warning" | "error".  Default "info".
     """
     try:
+        # Skip if no organization context — the ActivityLogEntry model
+        # requires a valid ObjectId for organization_id.
+        if not organization_id:
+            logger.debug(
+                "Skipping activity log — no organization_id",
+                activity_type=activity_type,
+                user_id=user_id,
+            )
+            return
+
         enriched_details = dict(details or {})
         if agent_name:
             enriched_details["agent_name"] = agent_name

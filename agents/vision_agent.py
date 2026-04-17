@@ -70,7 +70,7 @@ class VisionAgent(BaseAgent):
             model_params = {
                 "model": self.model_config.get("model", "sonar-large-online"),
                 "temperature": vision_data.get("temperature", 0.7),
-                "max_tokens": vision_data.get("max_tokens", 1024),
+                "max_tokens": vision_data.get("max_tokens", 4096),
                 "top_p": vision_data.get("top_p", 0.9)
             }
             
@@ -156,33 +156,26 @@ class VisionAgent(BaseAgent):
                 "any noteworthy elements. If you see text in the image, transcribe it accurately."
             )
             
-            # Prepare content with image
-            content = [
-                {
-                    "type": "text",
-                    "text": prompt
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{encoded_image}"
-                    }
-                }
-            ]
-            
-            # Format into messages for LLM
+            # Build messages using the LLMMessage format expected by all providers.
+            # Images go in the `images` list (base64 strings or URLs), not in `content`.
+            from backend.ai_models.base import LLMMessage, MessageRole
+
             messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": content}
+                LLMMessage(role=MessageRole.SYSTEM, content=system_prompt),
+                LLMMessage(
+                    role=MessageRole.USER,
+                    content=prompt,
+                    images=[f"data:image/jpeg;base64,{encoded_image}"],
+                ),
             ]
-            
+
             # Use default parameters
             config = LLMConfig(
                 temperature=vision_data.get("temperature", 0.7),
-                max_tokens=vision_data.get("max_tokens", 1024),
+                max_tokens=vision_data.get("max_tokens", 4096),
                 top_p=vision_data.get("top_p", 0.9),
             )
-            
+
             # Call LLM via provider-agnostic interface
             response = await self.llm_client.generate(messages, config=config)
             
@@ -255,34 +248,26 @@ class VisionAgent(BaseAgent):
                 "a comprehensive analysis. Focus on identifying objects, text, people, scene context, and "
                 "any noteworthy elements. If you see text in the image, transcribe it accurately."
             )
-            
-            # Prepare content with image
-            content = [
-                {
-                    "type": "text",
-                    "text": query
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{encoded_image}"
-                    }
-                }
-            ]
-            
-            # Format messages for LLM
+
+            # Build messages using the LLMMessage format expected by all providers.
+            from backend.ai_models.base import LLMMessage, MessageRole
+
             messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": content}
+                LLMMessage(role=MessageRole.SYSTEM, content=system_prompt),
+                LLMMessage(
+                    role=MessageRole.USER,
+                    content=query,
+                    images=[f"data:image/jpeg;base64,{encoded_image}"],
+                ),
             ]
-            
+
             # Use parameters from context or defaults
             config = LLMConfig(
                 temperature=context.get("temperature", 0.7),
-                max_tokens=context.get("max_tokens", 1024),
+                max_tokens=context.get("max_tokens", 4096),
                 top_p=context.get("top_p", 0.9),
             )
-            
+
             # Call LLM via provider-agnostic interface
             response = await self.llm_client.generate(messages, config=config)
             
@@ -372,17 +357,31 @@ class VisionAgent(BaseAgent):
                         if obj and obj not in structured_data["detected_objects"]:
                             structured_data["detected_objects"].append(obj)
             
-            # Extract text with regex
+            # Extract text — match quoted strings near text-related words,
+            # plus common LLM patterns like "reads:", "says:", "labeled", etc.
             text_patterns = [
-                r"(?:text|writing|inscription)(?:\s+detected)?(?:\s+reads)?:?\s+[\"']([^\"']+)[\"']",
-                r"(?:text|writing|inscription)(?:\s+saying)?:?\s+[\"']([^\"']+)[\"']"
+                # Quoted text near keywords: text "Hello", reads "World"
+                r'(?:text|writing|inscription|label|title|heading|caption|reads?|says?|written|showing|displays?|reads)\s*[:—–-]?\s*["\u201c]([^"\u201d]+)["\u201d]',
+                # Single-quoted
+                r"(?:text|writing|reads?|says?|label|title|heading)\s*[:—–-]?\s*'([^']+)'",
+                # **Bold label:** pattern (common in markdown LLM output)
+                r'\*\*([^*]{2,80})\*\*',
+                # "Text:" or "Title:" followed by content on same line
+                r'(?:^|\n)\s*(?:Text|Title|Heading|Label|Caption|Name)\s*:\s*(.+?)(?:\n|$)',
             ]
-            
+
             for pattern in text_patterns:
                 matches = re.finditer(pattern, response_text, re.IGNORECASE)
                 for match in matches:
                     text = match.group(1).strip()
-                    if text and text not in structured_data["detected_text"]:
+                    # Filter out generic headings that aren't extracted text
+                    skip_words = {"main content", "key objects", "overall scene", "readable text",
+                                  "scene", "objects", "analysis", "description", "summary",
+                                  "detected objects", "detected text", "here's"}
+                    if (text
+                        and len(text) > 1
+                        and text.lower() not in skip_words
+                        and text not in structured_data["detected_text"]):
                         structured_data["detected_text"].append(text)
             
             # Extract scene type
