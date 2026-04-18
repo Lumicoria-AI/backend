@@ -31,18 +31,21 @@ logger = structlog.get_logger(__name__)
 
 # Perplexity-specific constants
 PERPLEXITY_MODELS = [
-    "sonar-small-chat",
-    "sonar-medium-chat",
-    "sonar-large-chat",
-    "sonar-large-online",
-    "sonar-medium-online",
-    "mistral-7b-instruct",
-    "mixtral-8x7b-instruct",
-    "llama-3-70b-flash",
-    "llama-3-8b-instruct",
+    "sonar",
+    "sonar-pro",
+    "sonar-reasoning-pro",
+    "sonar-deep-research",
 ]
 
-DEFAULT_PERPLEXITY_MODEL = "sonar-large-online"
+def _get_default_perplexity_model() -> str:
+    """Read the default Perplexity model from settings (set via PERPLEXITY_MODEL env var)."""
+    try:
+        from backend.core.config import settings
+        return getattr(settings, "PERPLEXITY_MODEL", "sonar-pro")
+    except Exception:
+        return "sonar-pro"
+
+DEFAULT_PERPLEXITY_MODEL = _get_default_perplexity_model()
 PERPLEXITY_EMBEDDING_MODEL = "sonar-embedding-001"
 
 
@@ -210,11 +213,10 @@ class PerplexityProvider(LLMClient):
             total_tokens=usage_data.get("total_tokens", 0),
         )
 
-        # Extract citations
+        # Extract citations (supports both new URL-list and legacy structured formats)
         citations = []
         try:
-            raw_citations = pplx_response.citations
-            for c in raw_citations:
+            for c in pplx_response.parsed_citations:
                 citations.append({
                     "text": getattr(c, "text", ""),
                     "url": getattr(c.metadata, "url", "") if hasattr(c, "metadata") else "",

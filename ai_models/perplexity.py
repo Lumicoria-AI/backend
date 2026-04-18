@@ -26,17 +26,12 @@ logger = structlog.get_logger(__name__)
 
 # Define Perplexity API Models
 class PerplexityModel(str, Enum):
-    SONAR_SMALL = "sonar-small-chat"
-    SONAR_MEDIUM = "sonar-medium-chat"
-    SONAR_LARGE = "sonar-large-chat"
-    SONAR_LARGE_ONLINE = "sonar-large-online"
-    MISTRAL_7B = "mistral-7b-instruct"
-    MIXTRAL_8X7B = "mixtral-8x7b-instruct"
-    LLAMA_3_70B = "llama-3-70b-flash"
-    LLAMA_3_8B = "llama-3-8b-instruct"
-    CLAUDE_3_OPUS = "claude-3-opus-20240229"
-    CLAUDE_3_SONNET = "claude-3-sonnet-20240229"
-    CLAUDE_3_HAIKU = "claude-3-haiku-20240307"
+    SONAR = "sonar"
+    SONAR_PRO = "sonar-pro"
+    SONAR_REASONING_PRO = "sonar-reasoning-pro"
+    SONAR_DEEP_RESEARCH = "sonar-deep-research"
+    # Legacy aliases (kept for backward compat, map to current models)
+    SONAR_LARGE_ONLINE = "sonar-pro"
 
 class MessageRole(str, Enum):
     SYSTEM = "system"
@@ -69,7 +64,11 @@ class PerplexityResponse(BaseModel):
     created: int
     choices: List[Dict[str, Any]]
     search_queries: Optional[List[Dict[str, str]]] = None
-    
+    # New Sonar API returns citations as top-level list of URLs
+    citations: Optional[List[Any]] = Field(default=None, alias="citations")
+
+    model_config = {"populate_by_name": True}
+
     @property
     def content(self) -> str:
         """Extract response content from the choices"""
@@ -77,25 +76,50 @@ class PerplexityResponse(BaseModel):
             return ""
         message = self.choices[0].get("message", {})
         return message.get("content", "")
-    
+
     @property
-    def citations(self) -> List[Citation]:
-        """Extract citations from the response"""
-        if not self.choices:
-            return []
-        
-        message = self.choices[0].get("message", {})
-        if not message:
-            return []
-            
-        citations = []
-        for citation in message.get("context", {}).get("citations", []):
-            try:
-                citations.append(Citation(**citation))
-            except Exception as e:
-                logger.warning(f"Failed to parse citation: {e}")
-                
-        return citations
+    def parsed_citations(self) -> List[Citation]:
+        """Extract citations from the response.
+
+        Handles both new format (top-level list of URL strings)
+        and legacy format (nested in message.context.citations).
+        """
+        result = []
+
+        # 1. New Sonar API: top-level `citations` field (list of URL strings)
+        if self.citations:
+            for i, item in enumerate(self.citations):
+                if isinstance(item, str):
+                    # Plain URL string
+                    result.append(Citation(
+                        start=0, end=0, text="",
+                        metadata=CitationMetadata(url=item, title=f"Source {i + 1}")
+                    ))
+                elif isinstance(item, dict):
+                    # Structured citation dict
+                    try:
+                        result.append(Citation(**item))
+                    except Exception:
+                        url = item.get("url", item.get("href", ""))
+                        result.append(Citation(
+                            start=0, end=0,
+                            text=item.get("text", ""),
+                            metadata=CitationMetadata(
+                                url=url,
+                                title=item.get("title", f"Source {i + 1}"),
+                            )
+                        ))
+
+        # 2. Legacy format: nested in choices[0].message.context.citations
+        if not result and self.choices:
+            message = self.choices[0].get("message", {})
+            for citation in message.get("context", {}).get("citations", []):
+                try:
+                    result.append(Citation(**citation))
+                except Exception as e:
+                    logger.warning(f"Failed to parse citation: {e}")
+
+        return result
         
     @property
     def search_queries_list(self) -> List[str]:

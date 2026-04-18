@@ -168,6 +168,13 @@ class Settings(BaseSettings):
             "Get from https://www.perplexity.ai/settings/api"
         ),
     )
+    PERPLEXITY_MODEL: str = Field(
+        default="sonar-pro",
+        description=(
+            "Default Perplexity chat model. Options: sonar, sonar-pro, "
+            "sonar-reasoning-pro, sonar-deep-research."
+        ),
+    )
     GEMINI_API_KEY: Optional[str] = Field(
         default=None,
         description=(

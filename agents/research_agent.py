@@ -18,20 +18,23 @@ class ResearchAgent(BaseAgent):
     evidence-based responses with academic rigor.
     """
     def __init__(self, config: Dict[str, Any]):
+        # Ensure Perplexity provider and model are set BEFORE BaseAgent.initialize_models() runs
+        config.setdefault("provider", "perplexity")
+        if "agent_model_config" not in config:
+            config["agent_model_config"] = config.get("model_config", {})
+        from backend.core.config import settings
+        config["agent_model_config"].setdefault("model", settings.PERPLEXITY_MODEL)
+
         super().__init__(config)
         # Default research capabilities if not specified in config
         self.research_capabilities = config.get("research_capabilities", [
-            "topic_research", "literature_review", "fact_checking", 
+            "topic_research", "literature_review", "fact_checking",
             "source_comparison", "question_answering", "citation_analysis"
         ])
-        
-        # Configure with default model if not specified
-        if "model" not in self.model_config:
-            self.model_config["model"] = "sonar-large-online"
-        
+
         # Set research depth
         self.research_depth = config.get("research_depth", "comprehensive")
-        
+
         # Set citation requirements
         self.require_citations = config.get("require_citations", True)
     
