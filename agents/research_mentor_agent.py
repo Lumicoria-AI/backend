@@ -3,6 +3,7 @@ from enum import Enum
 import logging
 from datetime import datetime
 import json
+import re
 
 from backend.agents.base_agent import BaseAgent
 from backend.db.mongodb.models.document import Document, DocumentStatus
@@ -25,6 +26,9 @@ class ResearchMentorAgent(BaseAgent):
     
     def __init__(self, config: Dict[str, Any]):
         """Initialize the Research Mentor Agent with specific capabilities."""
+        # Ensure agent_model_config exists for BaseAgent provider resolution
+        if "agent_model_config" not in config:
+            config["agent_model_config"] = config.get("model_config", {})
         super().__init__(config)
         
         # Set default capabilities
@@ -108,7 +112,7 @@ class ResearchMentorAgent(BaseAgent):
         # Set default model configuration
         self.model_config.update({
             "temperature": 0.3,  # Lower temperature for more focused and precise responses
-            "max_tokens": 4096,
+            "max_tokens": 8192,
             "top_p": 0.9,
             "frequency_penalty": 0.3,
             "presence_penalty": 0.3
@@ -273,7 +277,7 @@ Provide a detailed and well-structured response that:
                 "metadata": {
                     "mode": mode,
                     "timestamp": datetime.utcnow().isoformat(),
-                    "model": self.model_config.get("model", "sonar-large-online"),
+                    "model": self.get_model_name(),
                     "parameters": parameters
                 }
             }
@@ -281,6 +285,21 @@ Provide a detailed and well-structured response that:
         except Exception as e:
             logger.error(f"Error processing research mentoring request: {str(e)}")
             return {"error": str(e)}
+
+    async def _process_with_model(
+        self,
+        system_prompt: str,
+        user_content: str,
+        parameters: Dict[str, Any],
+    ) -> str:
+        """Call the LLM with a system prompt and user content, return raw text response."""
+        response_text = await self._call_model_async(
+            prompt=user_content,
+            system_prompt=system_prompt,
+            temperature=parameters.get("temperature", 0.3),
+            max_tokens=parameters.get("max_tokens", 8192),
+        )
+        return response_text
 
     async def _analyze_problem(
         self,
@@ -602,6 +621,7 @@ Provide a detailed and well-structured response that:
         
         Please provide comprehensive, well-reasoned, and evidence-based guidance.
         Focus on teaching critical thinking and research methodology, not just providing answers.
+        Use markdown formatting with headers, bullet points, and bold text for clarity.
         Always include relevant citations and explain your reasoning process.
         """
         
@@ -679,141 +699,475 @@ Provide a detailed and well-structured response that:
     # Helper methods for parsing and analysis
     def _parse_problem_analysis(self, response: str) -> Dict[str, Any]:
         """Parse the model's response into structured problem analysis."""
-        # Implementation would parse the response into a structured format
-        return {}
+        return {"content": response}
 
     def _parse_research_plan(self, response: str) -> Dict[str, Any]:
         """Parse the model's response into a structured research plan."""
-        # Implementation would parse the response into a structured format
-        return {}
+        return {"content": response}
 
     def _parse_literature_review(self, response: str) -> Dict[str, Any]:
         """Parse the model's response into structured literature review."""
-        # Implementation would parse the response into a structured format
-        return {}
+        return {"content": response}
 
     def _parse_hypothesis(self, response: str) -> Dict[str, Any]:
         """Parse the model's response into structured hypothesis."""
-        # Implementation would parse the response into a structured format
-        return {}
+        return {"content": response}
 
     def _parse_methodology(self, response: str) -> Dict[str, Any]:
         """Parse the model's response into structured methodology."""
-        # Implementation would parse the response into a structured format
-        return {}
+        return {"content": response}
 
     def _parse_evaluation(self, response: str) -> Dict[str, Any]:
         """Parse the model's response into structured evaluation."""
-        # Implementation would parse the response into a structured format
-        return {}
+        return {"content": response}
 
     def _parse_synthesis(self, response: str) -> Dict[str, Any]:
         """Parse the model's response into structured synthesis."""
-        # Implementation would parse the response into a structured format
-        return {}
+        return {"content": response}
 
-    # Analysis and calculation methods
+    # ── Text extraction helper ─────────────────────────────────────────
+
+    def _get_text(self, data: Dict[str, Any]) -> str:
+        """Extract the raw text content from a parsed response dict."""
+        return data.get("content", "") if isinstance(data, dict) else str(data)
+
+    # ── Problem Analysis helpers ─────────────────────────────────────
+
     def _calculate_complexity_level(self, analysis: Dict[str, Any]) -> str:
-        """Calculate the complexity level of a problem analysis."""
-        # Implementation would calculate complexity level
-        return ""
+        """Calculate complexity based on number of sections, headers, and word count."""
+        text = self._get_text(analysis)
+        word_count = len(text.split())
+        headers = len(re.findall(r"^#{1,6}\s", text, re.MULTILINE))
+        bullet_points = len(re.findall(r"^[\s]*[-*]\s", text, re.MULTILINE))
+        total_elements = headers + bullet_points
+
+        if word_count > 2000 or total_elements > 20:
+            return "high"
+        elif word_count > 800 or total_elements > 10:
+            return "medium"
+        return "low"
 
     def _count_components(self, analysis: Dict[str, Any]) -> int:
-        """Count the number of components in a problem analysis."""
-        # Implementation would count components
-        return 0
+        """Count components by counting top-level headers and numbered list items."""
+        text = self._get_text(analysis)
+        headers = re.findall(r"^#{1,3}\s.+", text, re.MULTILINE)
+        numbered = re.findall(r"^\s*\d+[\.\)]\s", text, re.MULTILINE)
+        return max(len(headers), len(numbered))
 
     def _count_citations(self, content: Dict[str, Any]) -> int:
-        """Count the number of citations in content."""
-        # Implementation would count citations
-        return 0
+        """Count citations — looks for [n], (Author, Year), URLs, and 'et al.' patterns."""
+        text = self._get_text(content)
+        bracket_refs = re.findall(r"\[\d+\]", text)
+        author_year = re.findall(r"\([A-Z][a-z]+(?:\s(?:et\sal\.?|&\s[A-Z][a-z]+))?,?\s*\d{4}\)", text)
+        urls = re.findall(r"https?://[^\s\)]+", text)
+        et_al = re.findall(r"\bet\s+al\.?\b", text, re.IGNORECASE)
+        return len(bracket_refs) + len(author_year) + len(urls) + len(et_al)
+
+    # ── Research Planning helpers ────────────────────────────────────
 
     def _calculate_duration(self, plan: Dict[str, Any]) -> str:
-        """Calculate estimated duration for a research plan."""
-        # Implementation would calculate duration
-        return ""
+        """Estimate duration from time-related keywords in the response."""
+        text = self._get_text(plan).lower()
+        duration_matches = re.findall(
+            r"(\d+)\s*(weeks?|months?|days?|years?|hours?|semesters?)",
+            text,
+        )
+        if not duration_matches:
+            word_count = len(text.split())
+            if word_count > 2000:
+                return "6-12 months (estimated from scope)"
+            elif word_count > 1000:
+                return "3-6 months (estimated from scope)"
+            return "1-3 months (estimated from scope)"
+
+        # Return the largest time reference found
+        max_val, max_unit = 0, ""
+        for val, unit in duration_matches:
+            num = int(val)
+            if "year" in unit:
+                num *= 365
+            elif "semester" in unit:
+                num *= 180
+            elif "month" in unit:
+                num *= 30
+            elif "week" in unit:
+                num *= 7
+            if num > max_val:
+                max_val = num
+                max_unit = f"{val} {unit}"
+        return max_unit
 
     def _identify_resources(self, plan: Dict[str, Any]) -> List[str]:
-        """Identify required resources for a research plan."""
-        # Implementation would identify resources
-        return []
+        """Identify resources mentioned in the plan text."""
+        text = self._get_text(plan).lower()
+        resource_keywords = {
+            "survey": "Survey tools",
+            "questionnaire": "Questionnaire platform",
+            "interview": "Interview setup",
+            "database": "Database access",
+            "software": "Software tools",
+            "statistical": "Statistical software",
+            "spss": "SPSS",
+            "python": "Python",
+            "r studio": "R Studio",
+            "laboratory": "Lab facilities",
+            "lab ": "Lab facilities",
+            "funding": "Research funding",
+            "grant": "Research grant",
+            "ethics approval": "Ethics approval",
+            "irb": "IRB approval",
+            "participants": "Research participants",
+            "sample": "Data sample",
+            "dataset": "Dataset",
+            "computing": "Computing resources",
+            "gpu": "GPU compute",
+            "cloud": "Cloud infrastructure",
+            "api": "API access",
+            "library": "Library access",
+            "peer review": "Peer reviewers",
+        }
+        found = []
+        for keyword, label in resource_keywords.items():
+            if keyword in text and label not in found:
+                found.append(label)
+        return found
 
     def _assess_risks(self, plan: Dict[str, Any]) -> str:
-        """Assess the risk level of a research plan."""
-        # Implementation would assess risks
-        return ""
+        """Assess risk level from risk-related language in the response."""
+        text = self._get_text(plan).lower()
+        high_risk = ["significant risk", "major risk", "critical", "high risk", "fail", "impossible",
+                      "ethical concern", "legal issue", "privacy violation"]
+        medium_risk = ["moderate risk", "some risk", "challenge", "limitation", "bias", "constraint",
+                       "difficult", "uncertain", "potential issue"]
+        low_risk = ["low risk", "minimal risk", "straightforward", "well-established", "proven"]
+
+        high_count = sum(1 for term in high_risk if term in text)
+        medium_count = sum(1 for term in medium_risk if term in text)
+        low_count = sum(1 for term in low_risk if term in text)
+
+        if high_count >= 2:
+            return "high"
+        elif high_count >= 1 or medium_count >= 3:
+            return "medium-high"
+        elif medium_count >= 1:
+            return "medium"
+        elif low_count >= 1:
+            return "low"
+        return "not assessed"
+
+    # ── Literature Review helpers ────────────────────────────────────
 
     def _count_sources(self, review: Dict[str, Any]) -> int:
-        """Count the number of sources in a literature review."""
-        # Implementation would count sources
-        return 0
+        """Count distinct sources referenced in the literature review."""
+        text = self._get_text(review)
+        bracket_refs = set(re.findall(r"\[(\d+)\]", text))
+        author_refs = re.findall(r"\([A-Z][a-z]+(?:\s(?:et\sal\.?|&\s[A-Z][a-z]+))?,?\s*\d{4}\)", text)
+        urls = re.findall(r"https?://[^\s\)]+", text)
+        return len(bracket_refs) + len(author_refs) + len(urls)
 
     def _calculate_coverage(self, review: Dict[str, Any]) -> float:
-        """Calculate the coverage score of a literature review."""
-        # Implementation would calculate coverage
-        return 0.0
+        """Score coverage 0-1 based on structural breadth of the review."""
+        text = self._get_text(review)
+        word_count = len(text.split())
+        headers = len(re.findall(r"^#{1,6}\s", text, re.MULTILINE))
+        sources = self._count_sources(review)
+        paragraphs = len([p for p in text.split("\n\n") if len(p.strip()) > 50])
+
+        score = 0.0
+        score += min(word_count / 3000, 0.3)    # Up to 0.3 for length
+        score += min(headers / 8, 0.25)          # Up to 0.25 for sections
+        score += min(sources / 10, 0.25)         # Up to 0.25 for sources
+        score += min(paragraphs / 10, 0.2)       # Up to 0.2 for depth
+        return round(min(score, 1.0), 2)
 
     def _assess_quality(self, review: Dict[str, Any]) -> float:
-        """Assess the quality score of a literature review."""
-        # Implementation would assess quality
-        return 0.0
+        """Score quality 0-1 based on analytical depth indicators."""
+        text = self._get_text(review).lower()
+        quality_indicators = [
+            "however", "in contrast", "on the other hand", "critically",
+            "limitation", "strength", "weakness", "gap in", "further research",
+            "meta-analysis", "systematic review", "peer-reviewed",
+            "evidence suggests", "findings indicate", "data shows",
+            "significant", "correlation", "causation", "methodology",
+        ]
+        found = sum(1 for ind in quality_indicators if ind in text)
+        sources = self._count_sources(review)
+        citations = self._count_citations(review)
+
+        score = 0.0
+        score += min(found / 10, 0.4)          # Up to 0.4 for analytical language
+        score += min(sources / 8, 0.3)          # Up to 0.3 for sources
+        score += min(citations / 6, 0.3)        # Up to 0.3 for citations
+        return round(min(score, 1.0), 2)
+
+    # ── Hypothesis Development helpers ───────────────────────────────
 
     def _assess_testability(self, hypothesis: Dict[str, Any]) -> float:
-        """Assess the testability of a hypothesis."""
-        # Implementation would assess testability
-        return 0.0
+        """Score testability 0-1 based on presence of measurable/testable language."""
+        text = self._get_text(hypothesis).lower()
+        testable_indicators = [
+            "measurable", "observable", "quantif", "variable", "dependent",
+            "independent", "control", "experiment", "test", "predict",
+            "falsifiable", "hypothesis", "null hypothesis", "alternative hypothesis",
+            "operationalize", "metric", "indicator", "sample size", "statistical",
+            "p-value", "significance level", "confidence interval",
+        ]
+        found = sum(1 for ind in testable_indicators if ind in text)
+        has_if_then = bool(re.search(r"\bif\b.+\bthen\b", text))
+        has_variables = bool(re.search(r"\b(independent|dependent|control)\s+variable", text))
+
+        score = min(found / 10, 0.5)
+        if has_if_then:
+            score += 0.25
+        if has_variables:
+            score += 0.25
+        return round(min(score, 1.0), 2)
 
     def _assess_novelty(self, hypothesis: Dict[str, Any]) -> float:
-        """Assess the novelty of a hypothesis."""
-        # Implementation would assess novelty
-        return 0.0
+        """Score novelty 0-1 based on indicators of originality."""
+        text = self._get_text(hypothesis).lower()
+        novelty_indicators = [
+            "novel", "new approach", "unexplored", "first", "original",
+            "innovative", "unique", "not been studied", "gap", "emerging",
+            "cutting-edge", "frontier", "paradigm shift", "reconceptualize",
+            "understudied", "overlooked", "no prior research", "pioneering",
+        ]
+        diminishing = [
+            "well-established", "well-known", "widely studied", "common",
+            "traditional", "conventional", "standard", "typical",
+        ]
+        novel_count = sum(1 for ind in novelty_indicators if ind in text)
+        diminish_count = sum(1 for ind in diminishing if ind in text)
+
+        score = min(novel_count / 6, 0.8)
+        score -= min(diminish_count / 4, 0.3)
+        return round(max(min(score, 1.0), 0.1), 2)
 
     def _assess_feasibility(self, hypothesis: Dict[str, Any]) -> float:
-        """Assess the feasibility of a hypothesis."""
-        # Implementation would assess feasibility
-        return 0.0
+        """Score feasibility 0-1 based on practical viability indicators."""
+        text = self._get_text(hypothesis).lower()
+        feasible_indicators = [
+            "feasible", "practical", "achievable", "realistic", "available",
+            "accessible", "within scope", "straightforward", "established method",
+            "existing data", "replicable", "cost-effective",
+        ]
+        infeasible_indicators = [
+            "infeasible", "impractical", "impossible", "too expensive",
+            "too complex", "beyond scope", "unavailable", "ethical barrier",
+            "prohibitive", "not possible", "insufficient",
+        ]
+        feasible_count = sum(1 for ind in feasible_indicators if ind in text)
+        infeasible_count = sum(1 for ind in infeasible_indicators if ind in text)
+
+        score = 0.5 + min(feasible_count / 6, 0.4) - min(infeasible_count / 4, 0.4)
+        return round(max(min(score, 1.0), 0.1), 2)
+
+    # ── Methodology Guidance helpers ─────────────────────────────────
 
     def _assess_validity(self, methodology: Dict[str, Any]) -> float:
-        """Assess the validity of a methodology."""
-        # Implementation would assess validity
-        return 0.0
+        """Score validity 0-1 based on methodological rigor indicators."""
+        text = self._get_text(methodology).lower()
+        validity_indicators = [
+            "internal validity", "external validity", "construct validity",
+            "content validity", "face validity", "criterion validity",
+            "triangulation", "member checking", "peer review",
+            "randomiz", "control group", "blinding", "double-blind",
+            "validated instrument", "reliability", "replicab",
+            "representative sample", "generalizab",
+        ]
+        threats = [
+            "threat to validity", "confound", "selection bias",
+            "measurement error", "attrition", "maturation effect",
+        ]
+        valid_count = sum(1 for ind in validity_indicators if ind in text)
+        threat_count = sum(1 for ind in threats if ind in text)
+
+        score = min(valid_count / 8, 0.7)
+        # Acknowledging threats is actually positive — shows awareness
+        score += min(threat_count / 4, 0.3)
+        return round(min(score, 1.0), 2)
 
     def _assess_reliability(self, methodology: Dict[str, Any]) -> float:
-        """Assess the reliability of a methodology."""
-        # Implementation would assess reliability
-        return 0.0
+        """Score reliability 0-1 based on consistency and reproducibility indicators."""
+        text = self._get_text(methodology).lower()
+        reliability_indicators = [
+            "reliability", "cronbach", "alpha", "test-retest",
+            "inter-rater", "intra-class", "consistency", "reproducib",
+            "replicab", "standardiz", "protocol", "systematic",
+            "pilot test", "pre-test", "calibrat",
+        ]
+        found = sum(1 for ind in reliability_indicators if ind in text)
+
+        has_protocol = bool(re.search(r"\b(step|protocol|procedure)\s*\d", text))
+        has_metrics = bool(re.search(r"\b(alpha|kappa|icc|r\s*=)\b", text))
+
+        score = min(found / 7, 0.5)
+        if has_protocol:
+            score += 0.25
+        if has_metrics:
+            score += 0.25
+        return round(min(score, 1.0), 2)
 
     def _assess_practicality(self, methodology: Dict[str, Any]) -> float:
-        """Assess the practicality of a methodology."""
-        # Implementation would assess practicality
-        return 0.0
+        """Score practicality 0-1 based on implementation feasibility."""
+        text = self._get_text(methodology).lower()
+        practical_indicators = [
+            "practical", "feasible", "cost-effective", "time-efficient",
+            "accessible", "available", "straightforward", "simple",
+            "existing tool", "established", "widely used", "open source",
+            "free", "low cost", "minimal equipment",
+        ]
+        impractical_indicators = [
+            "expensive", "time-consuming", "complex", "specialized equipment",
+            "difficult to implement", "requires expertise", "labor-intensive",
+            "resource-intensive", "hard to access",
+        ]
+        practical_count = sum(1 for ind in practical_indicators if ind in text)
+        impractical_count = sum(1 for ind in impractical_indicators if ind in text)
+
+        score = 0.5 + min(practical_count / 6, 0.4) - min(impractical_count / 4, 0.3)
+        return round(max(min(score, 1.0), 0.1), 2)
+
+    # ── Critical Evaluation helpers ──────────────────────────────────
 
     def _calculate_strength(self, evaluation: Dict[str, Any]) -> float:
-        """Calculate the strength score of an evaluation."""
-        # Implementation would calculate strength
-        return 0.0
+        """Score evidence strength 0-1 based on analytical depth."""
+        text = self._get_text(evaluation).lower()
+        strength_indicators = [
+            "strong evidence", "robust", "compelling", "well-supported",
+            "statistically significant", "large sample", "meta-analysis",
+            "systematic review", "randomized controlled", "longitudinal",
+            "replicat", "consistent findings", "converging evidence",
+        ]
+        weak_indicators = [
+            "weak evidence", "limited", "anecdotal", "small sample",
+            "correlation", "preliminary", "inconclusive", "insufficient",
+            "conflicting", "mixed results",
+        ]
+        strong_count = sum(1 for ind in strength_indicators if ind in text)
+        weak_count = sum(1 for ind in weak_indicators if ind in text)
+
+        score = 0.5 + min(strong_count / 6, 0.4) - min(weak_count / 6, 0.3)
+        return round(max(min(score, 1.0), 0.1), 2)
 
     def _count_limitations(self, evaluation: Dict[str, Any]) -> int:
-        """Count the number of limitations in an evaluation."""
-        # Implementation would count limitations
-        return 0
+        """Count limitations mentioned in the evaluation."""
+        text = self._get_text(evaluation)
+        limitation_patterns = re.findall(
+            r"(?:limitation|weakness|shortcoming|drawback|caveat|concern|issue|flaw|gap|problem)",
+            text,
+            re.IGNORECASE,
+        )
+        # Also count items in a limitations section
+        limitations_section = re.search(
+            r"(?:limitation|weakness|concern)s?\b.*?(?=\n#{1,3}\s|\Z)",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        bullet_items = 0
+        if limitations_section:
+            bullet_items = len(re.findall(r"^[\s]*[-*]\s", limitations_section.group(), re.MULTILINE))
+            numbered_items = len(re.findall(r"^\s*\d+[\.\)]\s", limitations_section.group(), re.MULTILINE))
+            bullet_items = max(bullet_items, numbered_items)
+
+        return max(len(set(limitation_patterns)), bullet_items)
 
     def _assess_bias(self, evaluation: Dict[str, Any]) -> Dict[str, Any]:
-        """Assess potential biases in an evaluation."""
-        # Implementation would assess bias
-        return {}
+        """Identify types of bias mentioned or detected in the evaluation."""
+        text = self._get_text(evaluation).lower()
+        bias_types = {
+            "selection_bias": ["selection bias", "sampling bias", "non-random", "convenience sample"],
+            "confirmation_bias": ["confirmation bias", "cherry-pick", "selective reporting"],
+            "publication_bias": ["publication bias", "file drawer", "negative results"],
+            "measurement_bias": ["measurement bias", "instrument bias", "observer bias", "hawthorne"],
+            "recall_bias": ["recall bias", "memory bias", "retrospective"],
+            "funding_bias": ["funding bias", "conflict of interest", "industry-funded", "sponsor"],
+            "cultural_bias": ["cultural bias", "western bias", "ethnocentric", "generalizability"],
+            "survivorship_bias": ["survivorship bias", "survivor bias"],
+            "anchoring_bias": ["anchoring bias", "anchoring effect"],
+            "attrition_bias": ["attrition bias", "dropout", "loss to follow-up"],
+        }
+        detected = {}
+        for bias_name, keywords in bias_types.items():
+            if any(kw in text for kw in keywords):
+                detected[bias_name] = True
+
+        total_biases = len(detected)
+        if total_biases == 0:
+            risk_level = "not assessed"
+        elif total_biases <= 2:
+            risk_level = "low"
+        elif total_biases <= 4:
+            risk_level = "moderate"
+        else:
+            risk_level = "high"
+
+        return {
+            "biases_identified": list(detected.keys()),
+            "bias_count": total_biases,
+            "risk_level": risk_level,
+        }
+
+    # ── Synthesis helpers ────────────────────────────────────────────
 
     def _assess_coherence(self, synthesis: Dict[str, Any]) -> float:
-        """Assess the coherence of a synthesis."""
-        # Implementation would assess coherence
-        return 0.0
+        """Score coherence 0-1 based on structural and logical flow indicators."""
+        text = self._get_text(synthesis)
+        word_count = len(text.split())
+        headers = len(re.findall(r"^#{1,6}\s", text, re.MULTILINE))
+        paragraphs = len([p for p in text.split("\n\n") if len(p.strip()) > 30])
+
+        # Transition/connective words indicate logical flow
+        connectives = [
+            "therefore", "consequently", "furthermore", "moreover",
+            "however", "in contrast", "similarly", "in addition",
+            "as a result", "in conclusion", "overall", "taken together",
+            "building on", "consistent with", "in summary",
+        ]
+        text_lower = text.lower()
+        connective_count = sum(1 for c in connectives if c in text_lower)
+
+        score = 0.0
+        score += min(headers / 6, 0.25)              # Structured sections
+        score += min(paragraphs / 8, 0.25)            # Developed paragraphs
+        score += min(connective_count / 8, 0.3)       # Logical flow
+        score += min(word_count / 2000, 0.2)          # Sufficient depth
+        return round(min(score, 1.0), 2)
 
     def _count_insights(self, synthesis: Dict[str, Any]) -> int:
-        """Count the number of insights in a synthesis."""
-        # Implementation would count insights
-        return 0
+        """Count distinct insights/findings/key points in the synthesis."""
+        text = self._get_text(synthesis)
+        insight_markers = re.findall(
+            r"(?:key\s+(?:finding|insight|point|takeaway|observation)|insight|finding|implication|conclusion)\s*(?:\d+|:)",
+            text,
+            re.IGNORECASE,
+        )
+        # Also count numbered items and bullet points in findings/insights sections
+        bullet_points = re.findall(r"^[\s]*[-*]\s.{20,}", text, re.MULTILINE)
+        numbered_points = re.findall(r"^\s*\d+[\.\)]\s.{20,}", text, re.MULTILINE)
+
+        return max(len(insight_markers), len(bullet_points), len(numbered_points))
 
     def _count_implications(self, synthesis: Dict[str, Any]) -> int:
-        """Count the number of implications in a synthesis."""
-        # Implementation would count implications
-        return 0 
+        """Count implications, recommendations, or future directions mentioned."""
+        text = self._get_text(synthesis).lower()
+        implication_patterns = re.findall(
+            r"(?:implication|recommendation|future\s+(?:research|direction|work|study)|"
+            r"suggest(?:ion|s\b)|practical\s+application|policy\s+implication|"
+            r"next\s+step|action\s+item|should\s+(?:be|consider)|"
+            r"further\s+(?:investigation|study|research|exploration))",
+            text,
+        )
+        # Count bullet points in implications/recommendations sections
+        impl_section = re.search(
+            r"(?:implication|recommendation|future|next\s+step)s?\b.*?(?=\n#{1,3}\s|\Z)",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        bullet_count = 0
+        if impl_section:
+            bullet_count = len(re.findall(r"^[\s]*[-*]\s", impl_section.group(), re.MULTILINE))
+            numbered = len(re.findall(r"^\s*\d+[\.\)]\s", impl_section.group(), re.MULTILINE))
+            bullet_count = max(bullet_count, numbered)
+
+        return max(len(set(implication_patterns)), bullet_count)
