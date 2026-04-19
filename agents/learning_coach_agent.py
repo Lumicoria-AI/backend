@@ -3,6 +3,7 @@ from enum import Enum
 import logging
 from datetime import datetime
 import json
+import re
 
 from .base_agent import BaseAgent
 # Removing circular import - agent_service already imports learning_coach_agent
@@ -23,6 +24,8 @@ class LearningCoachAgent(BaseAgent):
     
     def __init__(self, config: Dict[str, Any]):
         """Initialize the Learning Coach Agent with specific capabilities."""
+        if "agent_model_config" not in config:
+            config["agent_model_config"] = config.get("model_config", {})
         super().__init__(config)
         
         # Set default capabilities
@@ -98,7 +101,7 @@ class LearningCoachAgent(BaseAgent):
         # Set default model configuration
         self.model_config.update({
             "temperature": 0.7,  # Higher temperature for more creative and varied responses
-            "max_tokens": 4096,
+            "max_tokens": 8192,
             "top_p": 0.9,
             "frequency_penalty": 0.3,
             "presence_penalty": 0.3
@@ -137,7 +140,7 @@ class LearningCoachAgent(BaseAgent):
                 "metadata": {
                     "mode": mode,
                     "timestamp": datetime.utcnow().isoformat(),
-                    "model": self.model_config.get("model", "sonar-large-online"),
+                    "model": self.get_model_name(),
                     "parameters": parameters
                 }
             }
@@ -153,6 +156,21 @@ class LearningCoachAgent(BaseAgent):
             "data": {"concept": query},
             "context": context or {}
         })
+
+    async def _process_with_model(
+        self,
+        system_prompt: str,
+        user_content: str,
+        parameters: Dict[str, Any],
+    ) -> str:
+        """Call the LLM with a system prompt and user content, return raw text response."""
+        response_text = await self._call_model_async(
+            prompt=user_content,
+            system_prompt=system_prompt,
+            temperature=parameters.get("temperature", 0.7),
+            max_tokens=parameters.get("max_tokens", 8192),
+        )
+        return response_text
 
     async def _create_learning_path(
         self,
@@ -431,6 +449,7 @@ class LearningCoachAgent(BaseAgent):
         {self._format_parameters(parameters)}
         
         Please provide comprehensive, engaging, and personalized learning support.
+        Use markdown formatting with headers, bullet points, and bold text for clarity.
         Focus on creating an effective and enjoyable learning experience.
         """
         
@@ -496,114 +515,252 @@ class LearningCoachAgent(BaseAgent):
         """Format parameters for the system prompt."""
         return "\n".join([f"- {k}: {v}" for k, v in parameters.items()])
 
-    # Helper methods for parsing and analysis
+    # ── Text extraction helper ─────────────────────────────────────────
+
+    def _get_text(self, data) -> str:
+        """Extract the raw text content from a parsed response."""
+        if isinstance(data, dict):
+            return data.get("content", "")
+        if isinstance(data, list):
+            return str(data)
+        return str(data) if data else ""
+
+    # ── Parse methods ────────────────────────────────────────────────
+
     def _parse_learning_path(self, response: str) -> Dict[str, Any]:
-        """Parse the model's response into a structured learning path."""
-        # Implementation would parse the response into a structured format
-        return {}
+        return {"content": response}
 
     def _parse_quiz(self, response: str) -> Dict[str, Any]:
-        """Parse the model's response into a structured quiz."""
-        # Implementation would parse the response into a structured format
-        return {}
+        return {"content": response}
 
     def _parse_explanation(self, response: str) -> Dict[str, Any]:
-        """Parse the model's response into a structured explanation."""
-        # Implementation would parse the response into a structured format
-        return {}
+        return {"content": response}
 
     def _parse_progress(self, response: str) -> Dict[str, Any]:
-        """Parse the model's response into structured progress data."""
-        # Implementation would parse the response into a structured format
-        return {}
+        return {"content": response}
 
     def _parse_recommendations(self, response: str) -> List[Dict[str, Any]]:
-        """Parse the model's response into structured resource recommendations."""
-        # Implementation would parse the response into a structured format
-        return []
+        return [{"content": response}]
 
     def _parse_adaptations(self, response: str) -> Dict[str, Any]:
-        """Parse the model's response into structured learning adaptations."""
-        # Implementation would parse the response into a structured format
-        return {}
+        return {"content": response}
 
-    # Analysis and calculation methods
+    def _generate_progress_recommendations(self, progress: Dict[str, Any]) -> List[str]:
+        """Extract recommendation keywords from progress text."""
+        text = self._get_text(progress).lower()
+        recs = []
+        rec_keywords = {
+            "practice more": "Increase practice frequency",
+            "review": "Review previous material",
+            "focus on": "Focus on weak areas",
+            "spaced repetition": "Use spaced repetition",
+            "active recall": "Practice active recall",
+            "break": "Take regular breaks",
+            "quiz": "Self-test with quizzes",
+        }
+        for keyword, label in rec_keywords.items():
+            if keyword in text and label not in recs:
+                recs.append(label)
+        return recs if recs else ["Continue current learning pace"]
+
+    # ── Learning Path helpers ────────────────────────────────────────
+
     def _calculate_duration(self, learning_path: Dict[str, Any]) -> str:
-        """Calculate estimated duration for a learning path."""
-        # Implementation would calculate duration based on learning path
-        return ""
+        text = self._get_text(learning_path).lower()
+        duration_matches = re.findall(r"(\d+)\s*(weeks?|months?|days?|hours?)", text)
+        if duration_matches:
+            max_val, max_unit = 0, ""
+            for val, unit in duration_matches:
+                num = int(val)
+                days = num * (30 if "month" in unit else 7 if "week" in unit else 1 if "day" in unit else 0)
+                if days > max_val:
+                    max_val = days
+                    max_unit = f"{val} {unit}"
+            return max_unit
+        word_count = len(text.split())
+        if word_count > 2000:
+            return "4-8 weeks (estimated)"
+        return "2-4 weeks (estimated)"
 
     def _calculate_adaptation_level(self, content: Dict[str, Any]) -> float:
-        """Calculate the level of adaptation in learning content."""
-        # Implementation would calculate adaptation level
-        return 0.0
+        text = self._get_text(content).lower()
+        indicators = ["adapt", "personalize", "adjust", "tailor", "custom",
+                       "individual", "preference", "style", "pace", "level"]
+        found = sum(1 for ind in indicators if ind in text)
+        return round(min(found / 6, 1.0), 2)
+
+    # ── Quiz helpers ─────────────────────────────────────────────────
 
     def _calculate_difficulty_distribution(self, quiz: Dict[str, Any]) -> Dict[str, float]:
-        """Calculate the distribution of difficulty levels in a quiz."""
-        # Implementation would calculate difficulty distribution
-        return {"easy": 0.0, "medium": 0.0, "hard": 0.0}
+        text = self._get_text(quiz).lower()
+        easy = len(re.findall(r"\b(easy|basic|simple|beginner)\b", text))
+        medium = len(re.findall(r"\b(medium|moderate|intermediate)\b", text))
+        hard = len(re.findall(r"\b(hard|difficult|advanced|challenging)\b", text))
+        total = easy + medium + hard
+        if total == 0:
+            return {"easy": 0.33, "medium": 0.34, "hard": 0.33}
+        return {
+            "easy": round(easy / total, 2),
+            "medium": round(medium / total, 2),
+            "hard": round(hard / total, 2),
+        }
 
     def _calculate_quiz_duration(self, quiz: Dict[str, Any]) -> int:
-        """Calculate estimated completion time for a quiz."""
-        # Implementation would calculate quiz duration
-        return 0
+        text = self._get_text(quiz)
+        questions = len(re.findall(r"(?:question|Q)\s*\d+|^\s*\d+[\.\)]\s", text, re.MULTILINE))
+        return max(questions * 2, 5)  # ~2 min per question, minimum 5 min
 
     def _calculate_topic_coverage(self, quiz: Dict[str, Any], topic: str) -> float:
-        """Calculate how well a quiz covers a topic."""
-        # Implementation would calculate topic coverage
-        return 0.0
+        text = self._get_text(quiz).lower()
+        if not topic:
+            return 0.5
+        topic_words = topic.lower().split()
+        found = sum(1 for w in topic_words if w in text)
+        word_coverage = found / max(len(topic_words), 1)
+        questions = len(re.findall(r"(?:question|Q)\s*\d+|^\s*\d+[\.\)]\s", text, re.MULTILINE))
+        depth = min(questions / 10, 1.0)
+        return round((word_coverage * 0.4 + depth * 0.6), 2)
+
+    # ── Concept Explanation helpers ──────────────────────────────────
 
     def _calculate_complexity_level(self, explanation: Dict[str, Any]) -> str:
-        """Calculate the complexity level of an explanation."""
-        # Implementation would calculate complexity level
-        return ""
+        text = self._get_text(explanation)
+        word_count = len(text.split())
+        headers = len(re.findall(r"^#{1,6}\s", text, re.MULTILINE))
+        if word_count > 2000 or headers > 8:
+            return "advanced"
+        elif word_count > 800 or headers > 4:
+            return "intermediate"
+        return "beginner"
 
     def _calculate_prerequisite_coverage(self, explanation: Dict[str, Any], prerequisites: List[str]) -> float:
-        """Calculate how well an explanation covers prerequisites."""
-        # Implementation would calculate prerequisite coverage
-        return 0.0
+        if not prerequisites:
+            return 1.0
+        text = self._get_text(explanation).lower()
+        found = sum(1 for p in prerequisites if p.lower() in text)
+        return round(found / len(prerequisites), 2)
 
     def _generate_visual_aid_recommendations(self, explanation: Dict[str, Any]) -> List[str]:
-        """Generate recommendations for visual aids."""
-        # Implementation would generate visual aid recommendations
-        return []
+        text = self._get_text(explanation).lower()
+        aids = []
+        visual_keywords = {
+            "diagram": "Flowchart or diagram",
+            "graph": "Graph visualization",
+            "chart": "Chart or infographic",
+            "table": "Comparison table",
+            "flowchart": "Process flowchart",
+            "timeline": "Timeline visualization",
+            "map": "Concept map",
+            "hierarchy": "Hierarchy diagram",
+            "formula": "Formula reference sheet",
+            "code": "Code snippet examples",
+        }
+        for keyword, label in visual_keywords.items():
+            if keyword in text and label not in aids:
+                aids.append(label)
+        return aids if aids else ["Concept map", "Summary infographic"]
+
+    # ── Progress Tracking helpers ────────────────────────────────────
 
     def _calculate_completion_rate(self, progress: Dict[str, Any]) -> float:
-        """Calculate the completion rate of learning activities."""
-        # Implementation would calculate completion rate
-        return 0.0
+        text = self._get_text(progress).lower()
+        pct_matches = re.findall(r"(\d+)%", text)
+        if pct_matches:
+            values = [int(p) for p in pct_matches if 0 <= int(p) <= 100]
+            if values:
+                return round(sum(values) / len(values) / 100, 2)
+        completed = len(re.findall(r"\b(completed|done|finished|mastered)\b", text))
+        total_items = len(re.findall(r"^\s*[-*\d]", text, re.MULTILINE))
+        if total_items > 0:
+            return round(min(completed / max(total_items, 1), 1.0), 2)
+        return 0.5
 
     def _calculate_mastery_level(self, progress: Dict[str, Any]) -> str:
-        """Calculate the mastery level based on progress."""
-        # Implementation would calculate mastery level
-        return ""
+        text = self._get_text(progress).lower()
+        if any(w in text for w in ["expert", "mastery", "mastered", "proficient"]):
+            return "expert"
+        elif any(w in text for w in ["advanced", "strong", "solid"]):
+            return "advanced"
+        elif any(w in text for w in ["intermediate", "developing", "progressing"]):
+            return "intermediate"
+        return "beginner"
 
     def _identify_improvement_areas(self, progress: Dict[str, Any]) -> List[str]:
-        """Identify areas needing improvement."""
-        # Implementation would identify improvement areas
-        return []
+        text = self._get_text(progress)
+        areas = []
+        improve_section = re.search(
+            r"(?:improv|weak|gap|struggle|need|focus|work on).*?(?=\n#{1,3}\s|\Z)",
+            text, re.IGNORECASE | re.DOTALL
+        )
+        if improve_section:
+            bullets = re.findall(r"[-*]\s*(.{10,80})", improve_section.group())
+            areas = [b.strip() for b in bullets[:5]]
+        if not areas:
+            keywords = re.findall(r"(?:improve|focus on|work on|strengthen)\s+(.{5,50}?)(?:[,\.\n])", text, re.IGNORECASE)
+            areas = [k.strip() for k in keywords[:5]]
+        return areas
+
+    # ── Resource Recommendation helpers ──────────────────────────────
 
     def _calculate_format_distribution(self, recommendations: List[Dict[str, Any]]) -> Dict[str, float]:
-        """Calculate the distribution of resource formats."""
-        # Implementation would calculate format distribution
-        return {}
+        text = self._get_text(recommendations[0]) if recommendations else ""
+        text_lower = text.lower()
+        formats = {
+            "video": len(re.findall(r"\bvideo|youtube|course\b", text_lower)),
+            "article": len(re.findall(r"\barticle|blog|post|read\b", text_lower)),
+            "book": len(re.findall(r"\bbook|textbook\b", text_lower)),
+            "exercise": len(re.findall(r"\bexercise|practice|hands-on|lab\b", text_lower)),
+            "interactive": len(re.findall(r"\binteractive|simulation|tool\b", text_lower)),
+        }
+        total = sum(formats.values())
+        if total == 0:
+            return {"video": 0.2, "article": 0.2, "book": 0.2, "exercise": 0.2, "interactive": 0.2}
+        return {k: round(v / total, 2) for k, v in formats.items()}
 
     def _calculate_difficulty_match(self, recommendations: List[Dict[str, Any]], target_difficulty: str) -> float:
-        """Calculate how well recommendations match target difficulty."""
-        # Implementation would calculate difficulty match
-        return 0.0
+        text = self._get_text(recommendations[0]).lower() if recommendations else ""
+        if not target_difficulty:
+            return 0.5
+        target = target_difficulty.lower()
+        mentions = len(re.findall(rf"\b{re.escape(target)}\b", text))
+        return round(min(mentions / 3, 1.0), 2) if mentions else 0.3
 
     def _calculate_personalization_score(self, recommendations: List[Dict[str, Any]], user_data: Dict[str, Any]) -> float:
-        """Calculate how well recommendations are personalized."""
-        # Implementation would calculate personalization score
-        return 0.0
+        text = self._get_text(recommendations[0]).lower() if recommendations else ""
+        score = 0.3  # base
+        if user_data.get("learning_style") and user_data["learning_style"].lower() in text:
+            score += 0.25
+        if user_data.get("difficulty_level") and user_data["difficulty_level"].lower() in text:
+            score += 0.25
+        topics = user_data.get("topics", [])
+        if topics:
+            found = sum(1 for t in topics if t.lower() in text)
+            score += min(found / len(topics), 1.0) * 0.2
+        return round(min(score, 1.0), 2)
+
+    # ── Adaptive Learning helpers ────────────────────────────────────
 
     def _estimate_performance_impact(self, adaptations: Dict[str, Any]) -> float:
-        """Estimate the potential impact of learning adaptations."""
-        # Implementation would estimate performance impact
-        return 0.0
+        text = self._get_text(adaptations).lower()
+        positive = ["improve", "increase", "enhance", "boost", "accelerate",
+                     "strengthen", "optimize", "effective", "efficient"]
+        negative = ["decrease", "slower", "difficult", "struggle", "decline"]
+        pos_count = sum(1 for ind in positive if ind in text)
+        neg_count = sum(1 for ind in negative if ind in text)
+        impact = 0.5 + min(pos_count / 6, 0.4) - min(neg_count / 4, 0.3)
+        return round(max(min(impact, 1.0), 0.1), 2)
 
     def _calculate_learning_style_match(self, adaptations: Dict[str, Any], learning_style: str) -> float:
-        """Calculate how well adaptations match learning style."""
-        # Implementation would calculate learning style match
-        return 0.0 
+        text = self._get_text(adaptations).lower()
+        if not learning_style:
+            return 0.5
+        style = learning_style.lower()
+        style_keywords = {
+            "visual": ["visual", "diagram", "chart", "image", "video", "infographic", "illustration"],
+            "auditory": ["audio", "podcast", "lecture", "discussion", "verbal", "listen"],
+            "kinesthetic": ["hands-on", "practice", "exercise", "lab", "interactive", "build", "experiment"],
+            "reading": ["read", "text", "article", "book", "document", "written", "notes"],
+        }
+        keywords = style_keywords.get(style, [style])
+        found = sum(1 for kw in keywords if kw in text)
+        return round(min(found / 4, 1.0), 2)

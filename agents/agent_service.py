@@ -780,6 +780,33 @@ class AgentService:
             logger.error(f"Error processing research mentor request: {str(e)}")
             raise
 
+    async def process_learning_coach_request(
+        self,
+        mode: str,
+        data: Dict[str, Any],
+        context: Dict[str, Any],
+        parameters: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Process a request for the Learning Coach Agent."""
+        try:
+            agent = self.agents.get("learning_coach")
+            if not agent:
+                raise ValueError("Learning Coach Agent not available")
+
+            request = {
+                "mode": mode,
+                "data": data,
+                "context": context,
+                "parameters": parameters
+            }
+
+            result = await agent.process_async(request)
+            return result
+
+        except Exception as e:
+            logger.error(f"Error processing learning coach request: {str(e)}")
+            raise
+
     def configure(self, config: Dict[str, Any]) -> None:
         """Configure the agent service."""
         self.config = config

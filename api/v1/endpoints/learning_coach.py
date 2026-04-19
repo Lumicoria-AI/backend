@@ -2,6 +2,8 @@ from typing import Any, List, Optional, Dict
 from fastapi import APIRouter, Depends, HTTPException, status, Body, Query
 from pydantic import BaseModel, Field
 from datetime import datetime
+import uuid
+import structlog
 
 from backend.api.deps import get_current_active_user
 from backend.db.mongodb.repositories.agent_universe_repository import agent_universe_repository
@@ -10,6 +12,10 @@ from backend.models.user import User
 from backend.agents.agent_service import AgentService
 from backend.agents.learning_coach_agent import LearningCoachAgent, LearningMode
 from backend.services.activity_logger import log_activity
+from backend.core.dependencies import get_agent_service as _get_agent_service
+from backend.db.mongodb.mongodb import MongoDB
+
+logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 
@@ -69,18 +75,51 @@ class AdaptiveLearningRequest(LearningRequest):
     current_content: Dict[str, Any] = Field(..., description="Current learning content")
     goals: List[str] = Field(..., description="Learning goals")
 
+# ── MongoDB collection ─────────────────────────────────────────────
+COACH_COLLECTION = "learning_coach_sessions"
+
+
+async def _save_learning_session(
+    user_id: str,
+    mode: str,
+    input_data: Dict[str, Any],
+    result: Dict[str, Any],
+) -> str:
+    """Persist learning coach session to MongoDB. Returns the document _id."""
+    col = await MongoDB.get_collection(COACH_COLLECTION)
+    doc_id = str(uuid.uuid4())
+
+    # Extract raw content from results
+    results = result.get("results", {})
+    content_keys = [
+        "learning_path", "quiz", "explanation", "progress",
+        "recommendations", "adaptations", "analysis",
+    ]
+    raw_content = ""
+    for key in content_keys:
+        val = results.get(key)
+        if val:
+            raw_content = val.get("content", "") if isinstance(val, dict) else str(val)
+            break
+
+    doc = {
+        "_id": doc_id,
+        "user_id": user_id,
+        "mode": mode,
+        "input_data": input_data,
+        "results": results,
+        "raw_content": raw_content,
+        "metadata": result.get("metadata", {}),
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    await col.insert_one(doc)
+    return doc_id
+
+
 # Helper function to get agent service
 def get_agent_service() -> AgentService:
-    """Get or create an instance of AgentService."""
-    config = {
-        "model": "sonar-large-online",
-        "model_config": {
-            "model": "sonar-large-online",
-            "temperature": 0.7,
-            "max_tokens": 4096
-        }
-    }
-    return AgentService(config)
+    """Get the global agent service instance (uses pre-initialized agents)."""
+    return _get_agent_service()
 
 @router.post("/analyze", response_model=LearningResponse)
 async def process_learning_request(
@@ -101,9 +140,10 @@ async def process_learning_request(
     """
     try:
         # Check permissions
+        org_id = getattr(current_user, "organization_id", None)
         has_permission = await permission_repository.check_permission(
             user_id=current_user.id,
-            organization_id=current_user.organization_id,
+            organization_id=org_id,
             resource_type="AGENT",
             resource_id="learning_coach",
             permission_type="EXECUTE"
@@ -114,35 +154,32 @@ async def process_learning_request(
                 detail="Not enough permissions to use the learning coach agent"
             )
 
-        # Create learning coach agent
-        agent_config = {
-            "model": request.model or "sonar-large-online",
-            "model_config": {
-                "model": request.model or "sonar-large-online",
-                "temperature": 0.7,
-                "max_tokens": 4096
-            }
-        }
-        
-        learning_coach_agent = LearningCoachAgent(agent_config)
-        
-        # Process the request
-        result = await learning_coach_agent.process_async({
-            "data": request.data,
-            "mode": request.mode,
-            "context": request.context or {},
-            "parameters": request.parameters or {}
-        })
-        
+        # Process through the global agent service (uses pre-initialized agent)
+        result = await agent_service.process_learning_coach_request(
+            mode=request.mode,
+            data=request.data,
+            context=request.context or {},
+            parameters=request.parameters or {},
+        )
+
         if "error" in result:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=result["error"]
             )
 
+        # Save to MongoDB
+        doc_id = await _save_learning_session(
+            user_id=str(current_user.id),
+            mode=request.mode,
+            input_data=request.data,
+            result=result,
+        )
+        result["id"] = doc_id
+
         await log_activity(
             user_id=str(current_user.id),
-            organization_id=current_user.organization_id,
+            organization_id=getattr(current_user, "organization_id", None),
             activity_type="learning.session_started",
             details={"mode": request.mode},
             related_resource_type="AGENT",
@@ -150,7 +187,10 @@ async def process_learning_request(
         )
         return result
 
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error("process_learning_request_failed", error=str(e))
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error processing learning support request: {str(e)}"
@@ -452,35 +492,165 @@ async def get_learning_analytics(
     - Resource usage
     - Performance trends
     """
-    # This would typically fetch from a database
-    analytics = {
-        "time_range": time_range,
-        "total_learning_sessions": 500,
-        "learning_activities": {
-            "learning_paths": 100,
-            "quizzes": 200,
-            "concept_explanations": 150,
-            "resource_recommendations": 50
-        },
-        "progress_metrics": {
-            "completion_rate": 0.85,
-            "average_quiz_score": 0.78,
-            "concept_mastery": 0.72,
-            "time_spent": 1200  # minutes
-        },
-        "resource_usage": {
-            "videos": 150,
-            "articles": 200,
-            "exercises": 100,
-            "interactive": 50
-        },
-        "performance_trends": {
-            "improvement_rate": 0.15,
-            "engagement_score": 0.82,
-            "consistency_score": 0.75
-        },
-        "average_session_duration": 45,  # minutes
-        "success_rate": 0.92
-    }
-    
-    return analytics 
+    try:
+        col = await MongoDB.get_collection(COACH_COLLECTION)
+        user_id = str(current_user.id)
+
+        # Total sessions
+        total_pipeline = [
+            {"$match": {"user_id": user_id}},
+            {"$group": {"_id": None, "total": {"$sum": 1}}},
+        ]
+        total_results = await col.aggregate(total_pipeline).to_list(length=1)
+        total_sessions = total_results[0]["total"] if total_results else 0
+
+        # Mode breakdown
+        mode_pipeline = [
+            {"$match": {"user_id": user_id}},
+            {"$group": {"_id": "$mode", "count": {"$sum": 1}}},
+        ]
+        mode_results = await col.aggregate(mode_pipeline).to_list(length=20)
+        mode_counts = {r["_id"]: r["count"] for r in mode_results if r["_id"]}
+
+        analytics = {
+            "time_range": time_range,
+            "total_sessions": total_sessions,
+            "mode_counts": mode_counts,
+            "learning_activities": {
+                "learning_paths": mode_counts.get("learning_path", 0),
+                "quizzes": mode_counts.get("quiz_generation", 0),
+                "concept_explanations": mode_counts.get("concept_explanation", 0),
+                "progress_tracking": mode_counts.get("progress_tracking", 0),
+                "resource_recommendations": mode_counts.get("resource_recommendation", 0),
+                "adaptive_learning": mode_counts.get("adaptive_learning", 0),
+            },
+        }
+        return analytics
+
+    except Exception as e:
+        logger.error("learning_analytics_failed", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to fetch analytics: {str(e)}")
+
+
+# ── History / Detail / Stats / Delete ──────────────────────────────
+
+@router.get("/history")
+async def get_learning_history(
+    limit: int = Query(default=20, le=50),
+    skip: int = Query(default=0, ge=0),
+    mode: Optional[str] = Query(default=None),
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """Get the current user's learning coach history from MongoDB."""
+    try:
+        col = await MongoDB.get_collection(COACH_COLLECTION)
+        query: Dict[str, Any] = {"user_id": str(current_user.id)}
+        if mode:
+            query["mode"] = mode
+
+        cursor = col.find(query).sort("created_at", -1).skip(skip).limit(limit)
+        docs = await cursor.to_list(length=limit)
+
+        return [
+            {
+                "id": doc["_id"],
+                "mode": doc.get("mode", ""),
+                "input_summary": _extract_input_summary(doc.get("input_data", {}), doc.get("mode", "")),
+                "created_at": doc.get("created_at", ""),
+            }
+            for doc in docs
+        ]
+    except Exception as e:
+        logger.error("learning_history_fetch_failed", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to fetch history: {str(e)}")
+
+
+@router.get("/history/{session_id}")
+async def get_learning_detail(
+    session_id: str,
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """Get full details of a specific learning coach session."""
+    try:
+        col = await MongoDB.get_collection(COACH_COLLECTION)
+        doc = await col.find_one({"_id": session_id, "user_id": str(current_user.id)})
+        if not doc:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return doc
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("learning_detail_failed", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to fetch session: {str(e)}")
+
+
+@router.get("/stats")
+async def get_learning_stats(
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """Get aggregated stats for the current user's learning coach usage."""
+    try:
+        col = await MongoDB.get_collection(COACH_COLLECTION)
+        user_id = str(current_user.id)
+
+        pipeline = [
+            {"$match": {"user_id": user_id}},
+            {"$group": {"_id": None, "total_sessions": {"$sum": 1}}},
+        ]
+        results = await col.aggregate(pipeline).to_list(length=1)
+
+        type_pipeline = [
+            {"$match": {"user_id": user_id}},
+            {"$group": {"_id": "$mode", "count": {"$sum": 1}}},
+        ]
+        type_results = await col.aggregate(type_pipeline).to_list(length=20)
+        mode_counts = {r["_id"]: r["count"] for r in type_results if r["_id"]}
+
+        total = results[0].get("total_sessions", 0) if results else 0
+        return {
+            "total_sessions": total,
+            "mode_counts": mode_counts,
+        }
+    except Exception as e:
+        logger.error("learning_stats_failed", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to fetch stats: {str(e)}")
+
+
+@router.delete("/history/{session_id}")
+async def delete_learning_session(
+    session_id: str,
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """Delete a specific learning coach session from history."""
+    try:
+        col = await MongoDB.get_collection(COACH_COLLECTION)
+        result = await col.delete_one({"_id": session_id, "user_id": str(current_user.id)})
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return {"deleted": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("delete_learning_session_failed", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to delete session: {str(e)}")
+
+
+def _extract_input_summary(input_data: Dict[str, Any], mode: str) -> str:
+    """Extract a short summary from the input data for history display."""
+    if mode == "learning_path":
+        goals = input_data.get("goals", [])
+        return ", ".join(goals)[:150] if goals else ""
+    elif mode == "quiz_generation":
+        return input_data.get("topic", "")[:150]
+    elif mode == "concept_explanation":
+        return input_data.get("concept", "")[:150]
+    elif mode == "progress_tracking":
+        goals = input_data.get("goals", [])
+        return ", ".join(goals)[:150] if goals else ""
+    elif mode == "resource_recommendation":
+        topics = input_data.get("topics", [])
+        return ", ".join(topics)[:150] if topics else ""
+    elif mode == "adaptive_learning":
+        goals = input_data.get("goals", [])
+        return ", ".join(goals)[:150] if goals else ""
+    return str(input_data)[:150]
