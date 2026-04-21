@@ -38,6 +38,10 @@ weaviate-client>=4.16
 qdrant-client>=1.9
 chromadb>=1.4
 
+# ── Local Embeddings (FastEmbed + ONNX runtime, no GPU, no API) ────────
+# Used by backend/ai_models/providers/local_embedding_provider.py
+fastembed>=0.4
+
 # ── Monitoring & Logging ───────────────────────────────────────────────
 prometheus-client
 structlog

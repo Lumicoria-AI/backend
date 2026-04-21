@@ -149,7 +149,40 @@ class Settings(BaseSettings):
         default=None,
         description=(
             "Default embedding provider. If None, falls back to DEFAULT_LLM_PROVIDER. "
-            "Set to a specific provider if you want embeddings from a different source."
+            "Set to a specific provider if you want embeddings from a different source. "
+            "Use 'local' for self-hosted FastEmbed (no API quota)."
+        ),
+    )
+
+    # ── Local embedding provider (FastEmbed, BGE by default) ─────────────
+    LOCAL_EMBEDDING_MODEL: str = Field(
+        default="BAAI/bge-base-en-v1.5",
+        description=(
+            "HuggingFace model id used by the 'local' embedding provider. "
+            "Default (bge-base-en-v1.5) is 768-dim and matches VECTOR_STORE_DIMENSION."
+        ),
+    )
+    LOCAL_EMBEDDING_CACHE_DIR: str = Field(
+        default="./models/fastembed",
+        description="On-disk cache for downloaded ONNX models.",
+    )
+    LOCAL_EMBEDDING_BATCH_SIZE: int = Field(
+        default=64,
+        description="Texts per ONNX inference batch (tune for your CPU/RAM).",
+    )
+    LOCAL_EMBEDDING_PARALLEL: int = Field(
+        default=0,
+        description=(
+            "Multiprocessing parallelism for FastEmbed.  "
+            "0 = use all CPU cores (good for big reindex jobs); "
+            "set to 1 for single-process inside web workers to avoid fork overhead."
+        ),
+    )
+    LOCAL_EMBEDDING_WARMUP_ON_STARTUP: bool = Field(
+        default=True,
+        description=(
+            "If True and DEFAULT_EMBEDDING_PROVIDER='local', preload the ONNX "
+            "model during app startup so the first embed call is warm."
         ),
     )
     LLM_FALLBACK_PROVIDER: Optional[str] = Field(

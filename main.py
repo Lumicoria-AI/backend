@@ -207,6 +207,35 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("service_init_failed", service="STT (Faster-Whisper)", error=str(e))
 
+        # ── Local Embedding Warm-up ──────────────────────────────
+        # If the user has opted into self-hosted embeddings, preload the
+        # ONNX model now so the first chunk doesn't pay ~2-5 s cold start.
+        embedding_provider = (
+            getattr(settings, "DEFAULT_EMBEDDING_PROVIDER", None)
+            or getattr(settings, "DEFAULT_LLM_PROVIDER", None)
+        )
+        if (
+            embedding_provider == "local"
+            and getattr(settings, "LOCAL_EMBEDDING_WARMUP_ON_STARTUP", True)
+        ):
+            try:
+                from backend.ai_models import get_embedding_client
+                client = get_embedding_client(provider="local")
+                if hasattr(client, "warmup"):
+                    await client.warmup()
+                    logger.info(
+                        "service_initialized",
+                        service="Local Embeddings (FastEmbed)",
+                        model=settings.LOCAL_EMBEDDING_MODEL,
+                        status="ok",
+                    )
+            except Exception as e:
+                logger.warning(
+                    "service_init_failed",
+                    service="Local Embeddings (FastEmbed)",
+                    error=str(e),
+                )
+
         # ── Startup Complete ─────────────────────────────────────
         logger.info("=" * 60)
         logger.info("lumicoria_startup_complete", status="ready")
@@ -310,11 +339,15 @@ app.add_middleware(
     max_age=3600,
 )
 
-# Mount static files for user uploads with proper content types
-app.mount("/uploads", StaticFiles(
-    directory=str(Path(settings.UPLOAD_DIR)),
-    html=False,  # Do not serve HTML files for security
-), name="uploads")
+# Serve only the avatars subdirectory — everything else (RAG documents,
+# chat uploads, etc.) now lives in MinIO + R2 via storage_service, accessed
+# through time-limited presigned URLs.
+_avatars_dir = Path(settings.UPLOAD_DIR) / "avatars"
+_avatars_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads/avatars", StaticFiles(
+    directory=str(_avatars_dir),
+    html=False,
+), name="avatars")
 
 # ---------------------------------------------------------------------------
 # Request logging middleware

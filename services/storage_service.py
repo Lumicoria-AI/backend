@@ -162,6 +162,36 @@ class S3Client:
             endpoint = f"{scheme}://{endpoint}"
         return f"{endpoint}/{self.bucket}/{key}"
 
+    def set_cors_policy(self, allowed_origins: List[str]) -> None:
+        """Configure bucket CORS so browsers can fetch presigned URLs cross-origin.
+
+        Without this, pdf.js and other browser fetches against MinIO
+        presigned URLs fail with 'Failed to load PDF file' because the
+        CORS preflight returns no Access-Control-Allow-Origin.
+        """
+        client = self._get_client()
+        client.put_bucket_cors(
+            Bucket=self.bucket,
+            CORSConfiguration={
+                "CORSRules": [
+                    {
+                        "AllowedOrigins": allowed_origins or ["*"],
+                        "AllowedMethods": ["GET", "HEAD"],
+                        "AllowedHeaders": ["*"],
+                        "ExposeHeaders": [
+                            "Content-Range",
+                            "Accept-Ranges",
+                            "Content-Length",
+                            "Content-Type",
+                            "ETag",
+                        ],
+                        "MaxAgeSeconds": 3600,
+                    }
+                ]
+            },
+        )
+        logger.info("Set bucket CORS policy", bucket=self.bucket, origins=allowed_origins)
+
     def health_check(self) -> bool:
         try:
             self._get_client().head_bucket(Bucket=self.bucket)
@@ -229,6 +259,13 @@ class DualWriteStorageService:
             await asyncio.to_thread(self._primary.set_public_read_policy, "blog/")
         except Exception as e:
             logger.warning("Failed to set blog/ public-read policy", error=str(e))
+
+        # Set CORS policy so browsers can fetch presigned URLs (pdf.js, etc.)
+        try:
+            allowed = list(settings.BACKEND_CORS_ORIGINS) if settings.BACKEND_CORS_ORIGINS else ["*"]
+            await asyncio.to_thread(self._primary.set_cors_policy, allowed)
+        except Exception as e:
+            logger.warning("Failed to set MinIO CORS policy", error=str(e))
 
     # -- Upload --------------------------------------------------------------
 

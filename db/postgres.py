@@ -142,6 +142,26 @@ async def init_postgres() -> None:
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         logger.info("Postgres tables created/verified successfully")
+
+        # Lightweight in-place schema patches for columns added after a table
+        # was first created.  `create_all` never alters existing tables, so we
+        # apply idempotent `ADD COLUMN IF NOT EXISTS` statements here.
+        async with engine.begin() as conn:
+            await conn.execute(text(
+                "ALTER TABLE rag_documents "
+                "ADD COLUMN IF NOT EXISTS conversation_id VARCHAR(64)"
+            ))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_rag_documents_conversation_id "
+                "ON rag_documents (conversation_id)"
+            ))
+            # Widen primary key to fit prefixed IDs like "chat_{uuid}" (41 chars).
+            # ALTER COLUMN TYPE is a no-op if the column is already wide enough.
+            await conn.execute(text(
+                "ALTER TABLE rag_documents "
+                "ALTER COLUMN id TYPE VARCHAR(64)"
+            ))
+        logger.info("Postgres in-place schema patches applied")
     except Exception as e:
         logger.error("Failed to initialize Postgres", error=str(e))
         raise

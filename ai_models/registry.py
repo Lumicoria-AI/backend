@@ -213,4 +213,11 @@ def _ensure_providers_loaded():
     except ImportError as e:
         logger.debug("mistral_provider_import_skipped", error=str(e))
 
+    # Local (self-hosted) embedding provider — FastEmbed + BGE by default.
+    # Imports are cheap; the ONNX model is lazy-loaded on first call.
+    try:
+        from backend.ai_models.providers import local_embedding_provider  # noqa: F401
+    except ImportError as e:
+        logger.debug("local_embedding_provider_import_skipped", error=str(e))
+
     _providers_loaded = True

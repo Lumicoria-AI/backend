@@ -260,6 +260,56 @@ class BlogPostSQL(Base):
     deleted_at = Column(DateTime, nullable=True)
 
 
+# ── RAG Document Registry ──────────────────────────────────────────
+#
+# Durable source-of-truth for documents ingested via the RAG / chat pipeline.
+# Chunks + embeddings still live in Weaviate; the *file* itself lives in
+# MinIO (+ R2 backup).  This table keeps the mapping (document_id ↔ s3_key)
+# so the vector store can be rebuilt without losing file references.
+
+
+class RAGDocumentSQL(Base):
+    """A document ingested by the RAG pipeline.
+
+    One row per logical document (not per chunk).  Rows are created *before*
+    chunking starts so the frontend can poll / preview the file immediately
+    while embeddings are still processing in the background.
+    """
+    __tablename__ = "rag_documents"
+
+    # Room for prefixed IDs like "chat_{uuid}" (41 chars), not just bare UUIDs.
+    id = Column(String(64), primary_key=True, default=_uuid_str)  # == document_id in Weaviate
+    user_id = Column(String(64), nullable=False, index=True)
+    organization_id = Column(String(64), nullable=True, index=True)
+
+    # Storage
+    s3_key = Column(String(500), nullable=False)         # MinIO / R2 object key
+    filename = Column(String(255), nullable=False)       # {document_id}.{ext} stored in bucket
+    original_filename = Column(String(500), nullable=True)  # user-supplied name
+    title = Column(String(500), nullable=True)
+    mime_type = Column(String(100), nullable=True)
+
+    # Provenance
+    source = Column(String(50), nullable=False, default="upload")  # upload | web | manual_entry | drive | chat_history
+    source_url = Column(String(2000), nullable=True)     # original URL for web source
+    conversation_id = Column(String(64), nullable=True, index=True)  # stable key for chat_history upserts
+
+    # Stats
+    size_bytes = Column(Integer, nullable=False, default=0)
+    chunk_count = Column(Integer, nullable=False, default=0)
+
+    # Lifecycle
+    status = Column(String(50), nullable=False, default="processing")  # processing | ready | error
+    error_message = Column(Text, nullable=True)
+
+    tags = Column(ARRAY(String), nullable=False, default=list)
+    meta = Column("metadata", JSONB, nullable=False, default=dict)
+
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    deleted_at = Column(DateTime, nullable=True)
+
+
 class BlogCommentSQL(Base):
     """Comment on a blog post. Supports @mentions for users and agents."""
     __tablename__ = "blog_comments"

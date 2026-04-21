@@ -479,24 +479,30 @@ class DocumentProcessor:
                     
             # Step 2: Get embeddings for all chunks
             await self.initialize()  # Ensure client is initialized
-            
+
             # Prepare texts for embedding
             texts = [chunk.text for chunk in chunked_docs]
             all_metadata = [chunk.metadata for chunk in chunked_docs]
-            
-            # Generate embeddings in batches
-            batch_size = 20  # Keep batches small for API limits
-            all_embeddings = []
-            
-            for i in range(0, len(texts), batch_size):
-                batch_texts = texts[i:i+batch_size]
-                # Get embeddings from Perplexity
-                batch_embeddings = await self.llm_client.generate_embeddings(texts=batch_texts)
-                all_embeddings.extend(batch_embeddings)
-                
-                # Short delay to avoid rate limiting
-                if i + batch_size < len(texts):
-                    await asyncio.sleep(0.5)
+
+            # Batching strategy depends on the provider:
+            #  - "local" (FastEmbed/ONNX): no quota, no network — submit the
+            #    entire chunk list in a single call.  FastEmbed batches
+            #    internally via LOCAL_EMBEDDING_BATCH_SIZE and runs ONNX
+            #    inference in parallel over CPU cores.
+            #  - API-based providers (Gemini, OpenAI, …): throttle to 20 at
+            #    a time with a short back-off to stay under rate limits.
+            provider_name = getattr(self.llm_client, "provider_name", "")
+            if provider_name == "local":
+                all_embeddings = await self.llm_client.generate_embeddings(texts=texts)
+            else:
+                batch_size = 20
+                all_embeddings = []
+                for i in range(0, len(texts), batch_size):
+                    batch_texts = texts[i:i + batch_size]
+                    batch_embeddings = await self.llm_client.generate_embeddings(texts=batch_texts)
+                    all_embeddings.extend(batch_embeddings)
+                    if i + batch_size < len(texts):
+                        await asyncio.sleep(0.5)
             
             # Step 3: Store in vector database with metadata
             if not settings.db.VECTOR_STORE_ENABLED:

@@ -13,6 +13,8 @@ import json
 
 from ..db.vector_stores import get_vector_store
 from ..services.document_processor import document_processor
+from ..services import rag_document_registry as rag_registry
+from ..services.storage_service import storage_service
 from ..core.config import settings
 from ..ai_models import get_embedding_client, LLMClient
 
@@ -116,42 +118,159 @@ class ContextService:
         conversation_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Store chat history in the vector store for future context.
-        
+        Store a conversation as a RAG document so it's searchable alongside
+        uploaded files, URLs, and manual notes.
+
+        Flow (Option A — upsert by conversation_id):
+          1. Fetch the FULL conversation from MongoDB (not just current turn).
+          2. Render as a markdown transcript.
+          3. Upload transcript to MinIO (+ R2) at rag/{user_id}/chat_{id}.md.
+          4. Delete any existing Weaviate chunks for this document_id.
+          5. Upsert the Postgres registry row so the chat shows up on the
+             `/documents` listing with source="chat_history".
+          6. Re-chunk + re-embed the transcript into Weaviate.
+
         Args:
-            messages: List of chat messages
-            user_id: User ID who owns the chat
-            organization_id: Optional organization ID
-            conversation_id: Optional conversation ID
-            
-        Returns:
-            Processing result
+            messages: Most recent turn(s) — kept for backward-compat but
+                      ignored when conversation_id lets us fetch the full log.
+            user_id: Owner of the chat.
+            organization_id: Optional org.
+            conversation_id: Required for upsert; if missing we fall back to
+                             a one-shot text ingestion.
         """
-        # Build metadata
+        # No conversation_id → legacy one-shot path (no registry, no upsert)
+        if not conversation_id:
+            metadata = {
+                "user_id": user_id,
+                "source": "chat_history",
+                "created_at": datetime.utcnow().isoformat(),
+            }
+            if organization_id:
+                metadata["organization_id"] = organization_id
+            result = await document_processor.process_chat_history(
+                messages=messages, metadata=metadata
+            )
+            return {
+                "document_id": result.document_id,
+                "status": result.status,
+                "chunk_count": result.chunk_count,
+                "error": result.error,
+            }
+
+        # Lazy import to avoid circular dependency (memory → services → context)
+        from ..agents import memory as chat_memory
+
+        document_id = f"chat_{conversation_id}"
+
+        # 1. Fetch the full conversation from MongoDB
+        conversation = await chat_memory.get_full_conversation(conversation_id)
+        full_messages = (
+            conversation.get("messages", []) if conversation else messages
+        )
+
+        if not full_messages:
+            return {
+                "document_id": document_id,
+                "status": "skipped",
+                "chunk_count": 0,
+                "error": "no messages to index",
+            }
+
+        # 2. Build markdown transcript + derive title from first user msg
+        first_user_msg = next(
+            (m.get("content", "") for m in full_messages if m.get("role") == "user"),
+            "Conversation",
+        )
+        turn_count = sum(1 for m in full_messages if m.get("role") == "user")
+        short_title = (first_user_msg[:80] + "…") if len(first_user_msg) > 80 else first_user_msg
+        title = f"{short_title} ({turn_count} turn{'s' if turn_count != 1 else ''})"
+
+        transcript_lines = [f"# {title}", ""]
+        for msg in full_messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            heading = "User" if role == "user" else ("Assistant" if role == "assistant" else role.title())
+            transcript_lines.append(f"### {heading}")
+            transcript_lines.append("")
+            transcript_lines.append(content)
+            transcript_lines.append("")
+        transcript = "\n".join(transcript_lines)
+        transcript_bytes = transcript.encode("utf-8")
+
+        # 3. Upload transcript to MinIO (+ R2)
+        s3_key = f"rag/{user_id}/chat_{conversation_id}.md"
+        try:
+            await storage_service.upload_file(
+                file_content=transcript_bytes,
+                key=s3_key,
+                content_type="text/markdown; charset=utf-8",
+            )
+        except Exception as e:
+            logger.warning("chat_history transcript upload failed", error=str(e), conversation_id=conversation_id)
+
+        # 4. Delete stale Weaviate chunks so we don't accumulate duplicates
+        if settings.db.VECTOR_STORE_ENABLED:
+            try:
+                vector_store = get_vector_store()
+                await vector_store.delete_documents(
+                    filters={"user_id": user_id, "document_id": document_id}
+                )
+            except Exception as e:
+                logger.warning("chat_history old chunk delete failed", error=str(e), conversation_id=conversation_id)
+
+        # 5. Upsert Postgres registry row
+        try:
+            await rag_registry.upsert(
+                document_id=document_id,
+                user_id=user_id,
+                organization_id=organization_id,
+                s3_key=s3_key,
+                filename=f"chat_{conversation_id}.md",
+                original_filename=f"{short_title}.md",
+                title=title,
+                mime_type="text/markdown",
+                source="chat_history",
+                conversation_id=conversation_id,
+                size_bytes=len(transcript_bytes),
+                status="processing",
+            )
+        except Exception as e:
+            logger.warning("chat_history registry upsert failed", error=str(e), conversation_id=conversation_id)
+
+        # 6. Re-chunk + re-embed transcript into Weaviate
         metadata = {
             "user_id": user_id,
             "source": "chat_history",
-            "created_at": datetime.utcnow().isoformat()
+            "document_id": document_id,
+            "conversation_id": conversation_id,
+            "title": title,
+            "s3_key": s3_key,
+            "mime_type": "text/markdown",
+            "created_at": datetime.utcnow().isoformat(),
         }
-        
         if organization_id:
             metadata["organization_id"] = organization_id
-            
-        if conversation_id:
-            metadata["conversation_id"] = conversation_id
-            metadata["document_id"] = f"chat_{conversation_id}"
-            
-        # Process chat history
-        result = await document_processor.process_chat_history(
-            messages=messages,
-            metadata=metadata
+
+        result = await document_processor.process_text(
+            text=transcript, metadata=metadata
         )
-        
+
+        # Update registry with final chunk_count + status
+        try:
+            await rag_registry.update(
+                document_id,
+                chunk_count=result.chunk_count or 0,
+                status="ready" if result.status == "success" else "error",
+                error_message=result.error,
+            )
+        except Exception as e:
+            logger.warning("chat_history registry status update failed", error=str(e), conversation_id=conversation_id)
+
         return {
-            "document_id": result.document_id,
+            "document_id": document_id,
             "status": result.status,
             "chunk_count": result.chunk_count,
-            "error": result.error
+            "error": result.error,
         }
     
     async def add_document_from_url(
