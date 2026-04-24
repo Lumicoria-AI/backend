@@ -185,6 +185,88 @@ class Settings(BaseSettings):
             "model during app startup so the first embed call is warm."
         ),
     )
+    INGEST_PROCESS_POOL_WORKERS: int = Field(
+        default=4,
+        description=(
+            "Worker count for the PDF extraction ProcessPoolExecutor. Each "
+            "worker parses one page range in parallel. Set to 1 to disable."
+        ),
+    )
+    INGEST_PDF_PAGES_PER_WORKER: int = Field(
+        default=25,
+        description=(
+            "Pages per ProcessPoolExecutor task when extracting PDFs. "
+            "Smaller = more parallelism, more pickling overhead."
+        ),
+    )
+    INGEST_PARSER_DEFAULT: str = Field(
+        default="fast",
+        description=(
+            "Default parser preference for rich documents: 'fast' uses "
+            "PyMuPDF for digital PDFs and falls back to Docling only for "
+            "scanned pages; 'docling' forces Docling for every rich format."
+        ),
+    )
+    INGEST_CHUNK_TOKENS_PROSE: int = Field(
+        default=512,
+        description="Target tokens per chunk for prose (PDF/DOCX/HTML body).",
+    )
+    INGEST_CHUNK_TOKENS_CHAT: int = Field(
+        default=1500,
+        description="Target tokens per chunk for chat history transcripts.",
+    )
+    INGEST_CHUNK_TOKENS_CODE: int = Field(
+        default=1000,
+        description="Max tokens per code chunk before splitting on structure.",
+    )
+    INGEST_CHUNK_OVERLAP_TOKENS: int = Field(
+        default=50,
+        description="Token overlap between adjacent prose chunks.",
+    )
+    INGEST_OCR_MIN_CHARS_PER_PAGE: int = Field(
+        default=50,
+        description=(
+            "PyMuPDF pages returning fewer than this many characters are "
+            "treated as scanned and routed to the OCR-capable fallback."
+        ),
+    )
+    INGEST_CHUNK_DEDUP_ENABLED: bool = Field(
+        default=True,
+        description="Drop chunks whose content_sha256 has already been seen in this run.",
+    )
+    INGEST_DOC_DEDUP_ENABLED: bool = Field(
+        default=True,
+        description=(
+            "If True, a new upload whose content sha256 matches an existing "
+            "ready document for this user aliases to that document instead "
+            "of re-running the pipeline."
+        ),
+    )
+    # ── Celery ─────────────────────────────────────────────────────────
+    CELERY_ENABLED: bool = Field(
+        default=False,
+        description=(
+            "When True, ingest workers run on a Celery worker process pool "
+            "(requires `celery[redis]` + a running worker). Falls back to "
+            "FastAPI BackgroundTasks when False — useful for dev."
+        ),
+    )
+    CELERY_BROKER_URL: Optional[str] = Field(
+        default=None,
+        description="Celery broker URL. Defaults to redis://{host}:{port}/{db} when unset.",
+    )
+    CELERY_RESULT_BACKEND: Optional[str] = Field(
+        default=None,
+        description="Celery result backend URL. Defaults to the broker URL when unset.",
+    )
+    CELERY_TASK_ALWAYS_EAGER: bool = Field(
+        default=False,
+        description="Run Celery tasks inline (dev/test). Production: False.",
+    )
+    CELERY_WORKER_CONCURRENCY: int = Field(
+        default=4,
+        description="Prefork workers per Celery process.",
+    )
     LLM_FALLBACK_PROVIDER: Optional[str] = Field(
         default=None,
         description=(

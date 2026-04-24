@@ -38,6 +38,8 @@ def _to_dict(row: RAGDocumentSQL) -> Dict[str, Any]:
         "status": row.status,
         "error_message": row.error_message,
         "tags": list(row.tags or []),
+        "content_sha256": getattr(row, "content_sha256", None),
+        "aliased_document_id": getattr(row, "aliased_document_id", None),
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
@@ -60,6 +62,9 @@ async def create(
     tags: Optional[List[str]] = None,
     status: str = "processing",
     meta: Optional[Dict[str, Any]] = None,
+    content_sha256: Optional[str] = None,
+    aliased_document_id: Optional[str] = None,
+    chunk_count: int = 0,
 ) -> str:
     """Insert a new RAG document row and return the document_id."""
     SessionLocal = get_async_sessionmaker()
@@ -77,13 +82,46 @@ async def create(
             source_url=source_url,
             conversation_id=conversation_id,
             size_bytes=size_bytes,
+            chunk_count=chunk_count,
             tags=tags or [],
             status=status,
             meta=meta or {},
+            content_sha256=content_sha256,
+            aliased_document_id=aliased_document_id,
         )
         session.add(row)
         await session.commit()
     return document_id
+
+
+async def find_by_content_sha256(
+    user_id: str,
+    content_sha256: str,
+) -> Optional[Dict[str, Any]]:
+    """Find the canonical (non-aliased, non-deleted, ready) document for a
+    given content hash under this user.  Returns None if no prior copy exists.
+
+    Aliased rows are skipped so we always alias back to the original.
+    """
+    if not content_sha256:
+        return None
+    SessionLocal = get_async_sessionmaker()
+    async with SessionLocal() as session:
+        stmt = (
+            select(RAGDocumentSQL)
+            .where(
+                RAGDocumentSQL.user_id == user_id,
+                RAGDocumentSQL.content_sha256 == content_sha256,
+                RAGDocumentSQL.aliased_document_id.is_(None),
+                RAGDocumentSQL.deleted_at.is_(None),
+                RAGDocumentSQL.status == "ready",
+            )
+            .order_by(RAGDocumentSQL.created_at.asc())
+            .limit(1)
+        )
+        result = await session.execute(stmt)
+        row = result.scalar_one_or_none()
+        return _to_dict(row) if row else None
 
 
 async def get(document_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:

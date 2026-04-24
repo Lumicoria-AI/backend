@@ -298,6 +298,13 @@ class RAGDocumentSQL(Base):
     size_bytes = Column(Integer, nullable=False, default=0)
     chunk_count = Column(Integer, nullable=False, default=0)
 
+    # Dedup.  `content_sha256` is the hex SHA256 of the raw payload (file
+    # bytes, URL bytes, or text bytes).  When a user re-uploads identical
+    # content we insert a fresh row whose `aliased_document_id` points at
+    # the original and skip re-processing.
+    content_sha256 = Column(String(64), nullable=True, index=True)
+    aliased_document_id = Column(String(64), nullable=True, index=True)
+
     # Lifecycle
     status = Column(String(50), nullable=False, default="processing")  # processing | ready | error
     error_message = Column(Text, nullable=True)

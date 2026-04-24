@@ -10,7 +10,7 @@ Capabilities:
 - True async streaming via server-sent events
 - Embeddings (mistral-embed)
 - Native system-message support (no rewriting needed)
-- JSON mode, function/tool calling (via LLMConfig.extra)
+- JSON mode, function/tool calling (via LLMConfig.extr a)
 - Health check via lightweight model listing
 
 Mistral-Specific Design Decisions:

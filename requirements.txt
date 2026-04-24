@@ -78,6 +78,22 @@ faster-whisper>=1.0.0
 
 # ── Document Processing ──────────────────────────────────────────────
 PyMuPDF>=1.24
+# Structure-aware parsing (IBM Docling) — PDF/DOCX/PPTX/XLSX/HTML into typed
+# elements (heading, table, list, figure).  Heavy download (~500 MB of
+# ONNX models on first use).  Imports are gated — ingest degrades to the
+# PyMuPDF / trafilatura fast path when docling is missing.
+docling>=2.0
+# Fast markdown export for digital-text PDFs (preserves headings/tables).
+pymupdf4llm>=0.0.17
+# URL main-content extraction — replaces regex tag-strip for web ingest.
+trafilatura>=1.12
+# Token-accurate chunk sizing (cl100k_base).
+tiktoken>=0.7
+
+# ── Task Queue ──────────────────────────────────────────────────────
+# Celery for offloading RAG ingestion off the API process. Redis broker
+# is shared with the existing app Redis client.
+celery[redis]>=5.4
 
 # ── LangChain ──────────────────────────────────────────────────────────
 langchain

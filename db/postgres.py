@@ -161,6 +161,23 @@ async def init_postgres() -> None:
                 "ALTER TABLE rag_documents "
                 "ALTER COLUMN id TYPE VARCHAR(64)"
             ))
+            # Dedup columns + indexes.
+            await conn.execute(text(
+                "ALTER TABLE rag_documents "
+                "ADD COLUMN IF NOT EXISTS content_sha256 VARCHAR(64)"
+            ))
+            await conn.execute(text(
+                "ALTER TABLE rag_documents "
+                "ADD COLUMN IF NOT EXISTS aliased_document_id VARCHAR(64)"
+            ))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_rag_documents_content_sha256 "
+                "ON rag_documents (user_id, content_sha256)"
+            ))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_rag_documents_aliased_document_id "
+                "ON rag_documents (aliased_document_id)"
+            ))
         logger.info("Postgres in-place schema patches applied")
     except Exception as e:
         logger.error("Failed to initialize Postgres", error=str(e))

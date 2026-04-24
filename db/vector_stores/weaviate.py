@@ -21,6 +21,32 @@ from ...core.config import settings
 logger = structlog.get_logger(__name__)
 
 
+try:
+    from tenacity import (
+        retry,
+        stop_after_attempt,
+        wait_exponential,
+        retry_if_exception_type,
+        before_sleep_log,
+    )
+    import logging as _stdlib_logging
+
+    # Retry on transient Weaviate failures (5xx, timeouts).  We try up to 3
+    # times with exponential backoff: 1s → 4s → 9s.  Schema/data errors
+    # (4xx) are not worth retrying — they'll still fail deterministically.
+    _insert_many_with_retry = retry(
+        reraise=True,
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(Exception),
+        before_sleep=before_sleep_log(_stdlib_logging.getLogger(__name__), _stdlib_logging.WARNING),
+    )(lambda collection, data_objects: collection.data.insert_many(data_objects))
+except ImportError:
+    # tenacity missing — fall back to a straight pass-through.
+    def _insert_many_with_retry(collection, data_objects):  # type: ignore
+        return collection.data.insert_many(data_objects)
+
+
 class WeaviateDocumentStore:
     """
     Vector store implementation using Weaviate v4 for document storage and retrieval.
@@ -134,7 +160,9 @@ class WeaviateDocumentStore:
 
         collection = self.client.collections.get(self.collection_name)
         results_ids = []
-        batch_size = 50
+        # 200 balances network round-trips against Weaviate's per-request limits;
+        # insert_many handles the multiplexing.
+        batch_size = 200
 
         for i in range(0, len(texts), batch_size):
             batch_texts = texts[i:i + batch_size]
@@ -172,8 +200,8 @@ class WeaviateDocumentStore:
                 ))
                 results_ids.append(doc_id)
 
-            # Batch insert
-            collection.data.insert_many(data_objects)
+            # Batch insert with retry on transient Weaviate hiccups.
+            _insert_many_with_retry(collection, data_objects)
 
             logger.info(
                 "Added documents to Weaviate batch",

@@ -12,6 +12,7 @@ Now powered by:
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, File, UploadFile, Form, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from typing import List, Dict, Any, Optional, AsyncGenerator
+import hashlib
 import json
 import uuid
 import re
@@ -648,6 +649,18 @@ async def _chunk_uploaded_file(
         if organization_id:
             metadata["organization_id"] = organization_id
 
+        # Best-effort preview artifact (DOCX/PPTX/XLSX).
+        try:
+            from ....services.ingest.preview import render_preview, preview_artifact_key
+            rendered = render_preview(str(tmp_path), content_type)
+            if rendered is not None:
+                artifact_bytes, artifact_ct = rendered
+                artifact_key = preview_artifact_key(s3_key, content_type)
+                if artifact_key:
+                    await storage_service.upload_file(artifact_bytes, artifact_key, artifact_ct)
+        except Exception as e:
+            logger.warning("preview_artifact_failed", document_id=document_id, error=str(e))
+
         result = await document_processor.process_file(str(tmp_path), metadata)
 
         if result.status == "error":
@@ -709,7 +722,12 @@ async def _process_url_document(
         if organization_id:
             metadata["organization_id"] = organization_id
 
-        result = await document_processor.process_text(content, metadata)
+        # Strip HTML tags before chunking — otherwise <script>/<style>/markup
+        # end up embedded verbatim in the vector store and tank retrieval quality.
+        stripped = re.sub(r"<[^>]+>", " ", content)
+        stripped = re.sub(r"\s+", " ", stripped).strip()
+
+        result = await document_processor.process_text(stripped, metadata)
 
         if result.status == "error":
             await rag_registry.update(document_id, status="error", error_message=result.error)
@@ -793,6 +811,54 @@ async def upload_document(
     file_bytes = await file.read()
     content_type = file.content_type or "application/octet-stream"
 
+    # SHA256 dedup: if this user already ingested the same bytes, alias
+    # rather than re-uploading to MinIO and re-chunking.
+    content_sha256 = hashlib.sha256(file_bytes).hexdigest()
+    dedup_enabled = getattr(settings, "INGEST_DOC_DEDUP_ENABLED", True)
+    existing = None
+    if dedup_enabled:
+        try:
+            existing = await rag_registry.find_by_content_sha256(user_id, content_sha256)
+        except Exception as e:
+            logger.warning("dedup_lookup_failed", error=str(e), user_id=user_id)
+
+    if existing:
+        try:
+            await rag_registry.create(
+                document_id=document_id,
+                user_id=user_id,
+                organization_id=organization_id,
+                s3_key=existing["s3_key"],
+                filename=existing.get("filename") or stored_filename,
+                original_filename=original_filename,
+                title=title or original_filename,
+                mime_type=content_type,
+                source="upload",
+                size_bytes=len(file_bytes),
+                tags=parsed_tags,
+                status="ready",
+                chunk_count=existing.get("chunk_count") or 0,
+                content_sha256=content_sha256,
+                aliased_document_id=existing["document_id"],
+            )
+        except Exception as e:
+            logger.error("dedup_alias_create_failed", error=str(e), document_id=document_id)
+            raise HTTPException(status_code=500, detail=f"Registry write failed: {e}")
+        try:
+            from ....services.ingest.metrics import record_dedup_hit
+            record_dedup_hit("upload")
+        except Exception:
+            pass
+        return {
+            "message": "Document already ingested — aliased existing copy",
+            "status": "ready",
+            "document_id": document_id,
+            "aliased_document_id": existing["document_id"],
+            "filename": original_filename,
+            "s3_key": existing["s3_key"],
+            "deduplicated": True,
+        }
+
     # Upload to MinIO/R2 synchronously so preview is available immediately
     try:
         await storage_service.upload_file(file_bytes, s3_key, content_type)
@@ -815,6 +881,7 @@ async def upload_document(
             size_bytes=len(file_bytes),
             tags=parsed_tags,
             status="processing",
+            content_sha256=content_sha256,
         )
     except Exception as e:
         # Best-effort rollback of the MinIO object to avoid orphans
@@ -825,20 +892,34 @@ async def upload_document(
         logger.error("rag_registry_create_failed", error=str(e), document_id=document_id)
         raise HTTPException(status_code=500, detail=f"Registry write failed: {e}")
 
-    # Chunk + embed in background
-    background_tasks.add_task(
-        _chunk_uploaded_file,
-        file_bytes=file_bytes,
-        document_id=document_id,
-        user_id=user_id,
-        organization_id=organization_id,
-        s3_key=s3_key,
-        stored_filename=stored_filename,
-        original_filename=original_filename,
-        title=title or original_filename,
-        content_type=content_type,
-        tags=parsed_tags,
-    )
+    # Chunk + embed — Celery when a worker is running, BackgroundTasks otherwise
+    if getattr(settings, "CELERY_ENABLED", False):
+        from ....tasks.document_tasks import ingest_file as _ingest_file_task
+        _ingest_file_task.delay(
+            document_id=document_id,
+            user_id=user_id,
+            s3_key=s3_key,
+            stored_filename=stored_filename,
+            original_filename=original_filename,
+            content_type=content_type,
+            organization_id=organization_id,
+            title=title or original_filename,
+            tags=parsed_tags,
+        )
+    else:
+        background_tasks.add_task(
+            _chunk_uploaded_file,
+            file_bytes=file_bytes,
+            document_id=document_id,
+            user_id=user_id,
+            organization_id=organization_id,
+            s3_key=s3_key,
+            stored_filename=stored_filename,
+            original_filename=original_filename,
+            title=title or original_filename,
+            content_type=content_type,
+            tags=parsed_tags,
+        )
 
     await log_activity(
         user_id=user_id,
@@ -875,6 +956,56 @@ async def add_document_url(
     stored_filename = f"{document_id}.html"
     s3_key = f"rag/{user_id}/{stored_filename}"
 
+    # URL dedup key: hash the normalized URL.  Two users ingesting the same
+    # URL each get their own canonical copy; a single user re-adding the
+    # same URL aliases.
+    url_key = document.url.strip()
+    content_sha256 = hashlib.sha256(url_key.encode("utf-8")).hexdigest()
+    dedup_enabled = getattr(settings, "INGEST_DOC_DEDUP_ENABLED", True)
+    existing = None
+    if dedup_enabled:
+        try:
+            existing = await rag_registry.find_by_content_sha256(user_id, content_sha256)
+        except Exception as e:
+            logger.warning("dedup_lookup_failed", error=str(e), user_id=user_id)
+
+    if existing:
+        try:
+            await rag_registry.create(
+                document_id=document_id,
+                user_id=user_id,
+                organization_id=organization_id,
+                s3_key=existing["s3_key"],
+                filename=existing.get("filename") or stored_filename,
+                original_filename=None,
+                title=document.title or document.url,
+                mime_type="text/html",
+                source="web",
+                source_url=document.url,
+                size_bytes=existing.get("size_bytes") or 0,
+                tags=document.tags or [],
+                status="ready",
+                chunk_count=existing.get("chunk_count") or 0,
+                content_sha256=content_sha256,
+                aliased_document_id=existing["document_id"],
+            )
+        except Exception as e:
+            logger.error("dedup_alias_create_failed", error=str(e), document_id=document_id)
+            raise HTTPException(status_code=500, detail=f"Registry write failed: {e}")
+        try:
+            from ....services.ingest.metrics import record_dedup_hit
+            record_dedup_hit("web")
+        except Exception:
+            pass
+        return {
+            "message": "URL already ingested — aliased existing copy",
+            "status": "ready",
+            "document_id": document_id,
+            "aliased_document_id": existing["document_id"],
+            "url": document.url,
+            "deduplicated": True,
+        }
+
     # Create a placeholder Postgres row so the doc shows up in the UI immediately
     try:
         await rag_registry.create(
@@ -891,22 +1022,36 @@ async def add_document_url(
             size_bytes=0,
             tags=document.tags or [],
             status="processing",
+            content_sha256=content_sha256,
         )
     except Exception as e:
         logger.error("rag_registry_create_failed", error=str(e), document_id=document_id)
         raise HTTPException(status_code=500, detail=f"Registry write failed: {e}")
 
-    background_tasks.add_task(
-        _process_url_document,
-        document_id=document_id,
-        url=document.url,
-        user_id=user_id,
-        organization_id=organization_id,
-        s3_key=s3_key,
-        stored_filename=stored_filename,
-        title=document.title,
-        tags=document.tags or [],
-    )
+    if getattr(settings, "CELERY_ENABLED", False):
+        from ....tasks.document_tasks import ingest_url as _ingest_url_task
+        _ingest_url_task.delay(
+            document_id=document_id,
+            user_id=user_id,
+            url=document.url,
+            s3_key=s3_key,
+            stored_filename=stored_filename,
+            organization_id=organization_id,
+            title=document.title,
+            tags=document.tags or [],
+        )
+    else:
+        background_tasks.add_task(
+            _process_url_document,
+            document_id=document_id,
+            url=document.url,
+            user_id=user_id,
+            organization_id=organization_id,
+            s3_key=s3_key,
+            stored_filename=stored_filename,
+            title=document.title,
+            tags=document.tags or [],
+        )
 
     return {
         "message": "URL processing started",
@@ -930,6 +1075,49 @@ async def add_document_text(
     s3_key = f"rag/{user_id}/{stored_filename}"
 
     text_bytes = document.text.encode("utf-8")
+    content_sha256 = hashlib.sha256(text_bytes).hexdigest()
+    dedup_enabled = getattr(settings, "INGEST_DOC_DEDUP_ENABLED", True)
+    existing = None
+    if dedup_enabled:
+        try:
+            existing = await rag_registry.find_by_content_sha256(user_id, content_sha256)
+        except Exception as e:
+            logger.warning("dedup_lookup_failed", error=str(e), user_id=user_id)
+
+    if existing:
+        try:
+            await rag_registry.create(
+                document_id=document_id,
+                user_id=user_id,
+                organization_id=organization_id,
+                s3_key=existing["s3_key"],
+                filename=existing.get("filename") or stored_filename,
+                original_filename=None,
+                title=document.title or f"Note {document_id[:8]}",
+                mime_type="text/markdown",
+                source=document.source or "manual_entry",
+                size_bytes=len(text_bytes),
+                tags=document.tags or [],
+                status="ready",
+                chunk_count=existing.get("chunk_count") or 0,
+                content_sha256=content_sha256,
+                aliased_document_id=existing["document_id"],
+            )
+        except Exception as e:
+            logger.error("dedup_alias_create_failed", error=str(e), document_id=document_id)
+            raise HTTPException(status_code=500, detail=f"Registry write failed: {e}")
+        try:
+            from ....services.ingest.metrics import record_dedup_hit
+            record_dedup_hit(document.source or "manual_entry")
+        except Exception:
+            pass
+        return {
+            "message": "Note already ingested — aliased existing copy",
+            "status": "ready",
+            "document_id": document_id,
+            "aliased_document_id": existing["document_id"],
+            "deduplicated": True,
+        }
 
     try:
         await storage_service.upload_file(text_bytes, s3_key, "text/markdown; charset=utf-8")
@@ -951,6 +1139,7 @@ async def add_document_text(
             size_bytes=len(text_bytes),
             tags=document.tags or [],
             status="processing",
+            content_sha256=content_sha256,
         )
     except Exception as e:
         try:
@@ -960,18 +1149,32 @@ async def add_document_text(
         logger.error("rag_registry_create_failed", error=str(e), document_id=document_id)
         raise HTTPException(status_code=500, detail=f"Registry write failed: {e}")
 
-    background_tasks.add_task(
-        _chunk_text_document,
-        document_id=document_id,
-        user_id=user_id,
-        organization_id=organization_id,
-        s3_key=s3_key,
-        stored_filename=stored_filename,
-        text=document.text,
-        title=document.title,
-        source=document.source or "manual_entry",
-        tags=document.tags or [],
-    )
+    if getattr(settings, "CELERY_ENABLED", False):
+        from ....tasks.document_tasks import ingest_text as _ingest_text_task
+        _ingest_text_task.delay(
+            document_id=document_id,
+            user_id=user_id,
+            text=document.text,
+            s3_key=s3_key,
+            stored_filename=stored_filename,
+            source=document.source or "manual_entry",
+            organization_id=organization_id,
+            title=document.title,
+            tags=document.tags or [],
+        )
+    else:
+        background_tasks.add_task(
+            _chunk_text_document,
+            document_id=document_id,
+            user_id=user_id,
+            organization_id=organization_id,
+            s3_key=s3_key,
+            stored_filename=stored_filename,
+            text=document.text,
+            title=document.title,
+            source=document.source or "manual_entry",
+            tags=document.tags or [],
+        )
 
     return {
         "message": "Text processing started",
@@ -1044,6 +1247,201 @@ async def list_documents(
                 total=result.get("total", 0))
 
     return result
+
+
+@router.get("/documents/{document_id}/progress")
+async def stream_document_progress(
+    document_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Server-sent events stream for ingest progress.
+
+    Emits JSON events keyed by the Celery / background worker pipeline:
+      - {'stage':'parsing', 'processed':N, 'total':M}
+      - {'stage':'chunking', 'chunks':N}
+      - {'stage':'embedding', 'processed':N, 'total':M}
+      - {'stage':'storing', 'processed':N, 'total':M}
+      - {'stage':'ready', 'chunk_count':N}                          terminal
+      - {'stage':'error', 'error_code':'...', 'message':'...'}      terminal
+      - {'stage':'cancelled'}                                       terminal
+      - {'stage':'heartbeat'}                                       keep-alive
+    """
+    from ....services.ingest.progress import subscribe as _subscribe
+
+    user_id = current_user["id"]
+    doc = await rag_registry.get(document_id, user_id=user_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    async def event_stream() -> AsyncGenerator[str, None]:
+        try:
+            async for event in _subscribe(document_id):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as e:
+            logger.error("progress_stream_error", error=str(e), document_id=document_id)
+            yield f"data: {json.dumps({'stage':'error','message':str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+_CODE_EXTS = {
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".java", ".go", ".rs", ".rb", ".php",
+    ".c", ".h", ".cpp", ".hpp", ".cc", ".cs", ".swift", ".kt", ".scala",
+    ".sh", ".bash", ".zsh", ".sql", ".yaml", ".yml", ".json", ".toml", ".xml",
+}
+
+
+_OFFICE_HTML_MIMES = {
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
+_XLSX_MIMES = {
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-excel",
+}
+
+
+def _pick_preview_type(mime: str, filename: str) -> str:
+    mime = (mime or "").lower()
+    ext = os.path.splitext(filename or "")[1].lower()
+    if mime == "application/pdf":
+        return "pdf"
+    if mime.startswith("image/"):
+        return "image"
+    if mime in _XLSX_MIMES:
+        return "xlsx"
+    if mime in _OFFICE_HTML_MIMES:
+        return "html"
+    if mime == "text/html" or mime == "application/xhtml+xml":
+        return "html"
+    if mime in {"text/markdown", "text/x-markdown"} or ext in {".md", ".markdown"}:
+        return "markdown"
+    if ext in _CODE_EXTS or mime.startswith("text/x-"):
+        return "code"
+    if mime == "text/plain":
+        return "text"
+    return "download"
+
+
+@router.post("/documents/{document_id}/cancel")
+async def cancel_document_ingest(
+    document_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Mark an in-progress ingest as cancelled.  Celery tasks check status
+    between stages and exit early when they see this."""
+    user_id = current_user["id"]
+
+    doc = await rag_registry.get(document_id, user_id=user_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if doc["status"] in {"ready", "error", "cancelled"}:
+        return {"status": doc["status"], "message": "Already terminal", "document_id": document_id}
+
+    await rag_registry.update(document_id, status="cancelled",
+                               error_message="cancelled_by_user")
+    try:
+        from ....services.ingest.progress import stage as _stage
+        _stage(document_id, "cancelled", message="cancelled_by_user")
+    except Exception:
+        pass
+    return {"status": "cancelled", "document_id": document_id}
+
+
+@router.get("/documents/{document_id}/preview")
+async def get_document_preview(
+    document_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Return a discriminated union describing how the frontend should render
+    this document. Shapes:
+        {type: "pdf"|"image"|"html"|"xlsx", url, ...}
+        {type: "markdown"|"text"|"code", data, language?, ...}
+        {type: "download", url, ...}   (fallback)
+    """
+    user_id = current_user["id"]
+
+    doc = await rag_registry.get(document_id, user_id=user_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Dedup aliases resolve to the canonical copy's storage.
+    source_key = doc["s3_key"]
+    canonical_id = doc.get("aliased_document_id") or document_id
+
+    mime = doc.get("mime_type") or "application/octet-stream"
+    filename = doc.get("original_filename") or doc.get("filename") or ""
+    ptype = _pick_preview_type(mime, filename)
+
+    base: Dict[str, Any] = {
+        "document_id": document_id,
+        "canonical_document_id": canonical_id,
+        "type": ptype,
+        "mime_type": mime,
+        "title": doc.get("title"),
+        "filename": filename,
+        "source_url": doc.get("source_url"),
+    }
+
+    # Inline-data types: fetch and decode the stored bytes once.
+    if ptype in {"markdown", "text", "code"}:
+        try:
+            raw = await storage_service.download_file(source_key)
+            data = raw.decode("utf-8", errors="replace")
+        except Exception as e:
+            logger.warning("preview_fetch_failed", error=str(e), document_id=document_id)
+            data = ""
+        base["data"] = data
+        if ptype == "code":
+            ext = os.path.splitext(filename)[1].lower().lstrip(".")
+            base["language"] = ext or "text"
+        return base
+
+    # Office formats have a pre-rendered preview artifact stored next to
+    # the original (see backend/services/ingest/preview.py).  Prefer that.
+    artifact_key: Optional[str] = None
+    if mime in _OFFICE_HTML_MIMES:
+        artifact_key = f"{source_key}.preview.html"
+    elif mime in _XLSX_MIMES:
+        artifact_key = f"{source_key}.preview.json"
+
+    if artifact_key:
+        try:
+            if await storage_service.file_exists(artifact_key):
+                if ptype == "xlsx":
+                    # Inline the JSON so the frontend doesn't need a second
+                    # cross-origin fetch.
+                    try:
+                        raw = await storage_service.download_file(artifact_key)
+                        base["data"] = json.loads(raw.decode("utf-8"))
+                    except Exception as e:
+                        logger.warning("xlsx_artifact_fetch_failed", error=str(e))
+                        base["url"] = await storage_service.get_presigned_url(artifact_key)
+                    return base
+                base["url"] = await storage_service.get_presigned_url(artifact_key)
+                return base
+        except Exception as e:
+            logger.warning("preview_artifact_lookup_failed", error=str(e),
+                           document_id=document_id)
+            # Fall through to the original-file presigned URL below.
+
+    # URL-rendered types, fallback for unsupported formats.
+    try:
+        url = await storage_service.get_presigned_url(source_key)
+    except Exception as e:
+        logger.error("preview_url_failed", error=str(e), document_id=document_id)
+        raise HTTPException(status_code=500, detail=f"Preview URL failed: {e}")
+    base["url"] = url
+    return base
 
 
 @router.get("/documents/{document_id}/presigned-url")

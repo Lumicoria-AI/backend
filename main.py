@@ -536,10 +536,15 @@ async def health_check():
         },
     )
 
-# Metrics endpoint
+# Metrics endpoint — must serve raw Prometheus text format, NOT JSON.
+# FastAPI auto-wraps bytes as JSON by default, which corrupts the scrape.
 @app.get("/metrics")
 async def metrics():
-    return prometheus_client.generate_latest()
+    from fastapi import Response
+    return Response(
+        content=prometheus_client.generate_latest(),
+        media_type=prometheus_client.CONTENT_TYPE_LATEST,
+    )
 
 # Include API router
 app.include_router(api_router, prefix=settings.API_V1_STR)
