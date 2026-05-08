@@ -87,10 +87,14 @@ async def process_customer_service_request(
     - Suggesting customer satisfaction strategies
     """
     try:
-        # Check permissions
+        # `UserInDB` doesn't always carry organization_id — use getattr so
+        # personal accounts don't blow up.
+        org_id = getattr(current_user, "organization_id", None)
+
+        # Check permissions (org_id=None passes through as permitted).
         has_permission = await permission_repository.check_permission(
             user_id=current_user.id,
-            organization_id=current_user.organization_id,
+            organization_id=org_id,
             resource_type="AGENT",
             resource_id="customer_service",
             permission_type="EXECUTE"
@@ -101,18 +105,32 @@ async def process_customer_service_request(
                 detail="Not enough permissions to use the customer service agent"
             )
 
-        # Create customer service agent
+        # Build the agent config.  Default to whatever provider/model the
+        # platform is configured with so we don't hardcode Perplexity here.
+        from backend.core.config import settings
+        provider = (settings.DEFAULT_LLM_PROVIDER or "gemini").lower()
+        default_model = {
+            "gemini": getattr(settings, "GEMINI_MODEL", None) or "gemini-2.5-flash",
+            "openai": "gpt-4o-mini",
+            "anthropic": "claude-haiku-4-5-20251001",
+            "mistral": "mistral-small-latest",
+            "perplexity": "sonar",
+        }.get(provider, "sonar")
+        chosen_model = request.model or default_model
+
         agent_config = {
-            "model": request.model or "sonar-large-online",
-            "model_config": {
-                "model": request.model or "sonar-large-online",
+            "provider": provider,
+            "model": chosen_model,
+            # BaseAgent reads from `agent_model_config`, NOT `model_config`.
+            "agent_model_config": {
+                "model": chosen_model,
                 "temperature": 0.7,
-                "max_tokens": 2048
-            }
+                "max_tokens": 2048,
+            },
         }
-        
+
         customer_service_agent = CustomerServiceAgent(agent_config)
-        
+
         # Process the request
         result = await customer_service_agent.process_async({
             "content": request.content,
@@ -122,7 +140,7 @@ async def process_customer_service_request(
 
         await log_activity(
             user_id=str(current_user.id),
-            organization_id=current_user.organization_id,
+            organization_id=org_id,
             activity_type="customer_service.ticket_handled",
             details={"request_type": request.request_type, "content_preview": request.content[:100]},
             related_resource_type="AGENT",
@@ -318,70 +336,144 @@ async def generate_satisfaction_strategy(
 
 @router.get("/templates", response_model=List[Dict[str, Any]])
 async def list_response_templates(
-    category: Optional[str] = Query(None, description="Filter templates by category"),
+    category: Optional[str] = Query(None, description="Filter templates by category", max_length=64),
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
+    """List response templates for the caller's organization.
+
+    Tenant-scoped, persisted in `response_templates`.  On the first call
+    for an org the five canonical templates are seeded automatically
+    (idempotent — subsequent reads do not re-seed).
     """
-    List available response templates.
-    
-    This endpoint returns a list of pre-defined and custom templates
-    that can be used for customer service responses.
-    """
-    # This would typically fetch from a database
-    templates = [
-        {
-            "id": "template_1",
-            "category": "general_inquiry",
-            "name": "General Inquiry Response",
-            "description": "Template for handling general customer inquiries",
-            "variables": ["customer_name", "product_name", "issue_details"],
-            "created_at": datetime.utcnow().isoformat()
-        },
-        # Add more templates...
-    ]
-    
-    if category:
-        templates = [t for t in templates if t["category"] == category]
-    
-    return templates
+    from backend.services.customer_service import templates as templates_svc
+
+    user_id = str(current_user.id)
+    org_id = getattr(current_user, "organization_id", None) or user_id
+    return await templates_svc.list_templates(org_id, category=category)
+
 
 @router.get("/analytics", response_model=Dict[str, Any])
 async def get_customer_service_analytics(
     time_range: str = Query("7d", pattern="^(1d|7d|30d|90d|1y)$"),
     current_user: User = Depends(get_current_active_user)
 ) -> Any:
+    """Real customer-service analytics aggregated over `support_tickets`,
+    `ticket_replies`, and `response_templates`.  Same response shape as
+    the legacy mock so existing frontends don't move; values are now
+    real per-tenant numbers.
     """
-    Get customer service analytics for the specified time range.
-    
-    This endpoint provides analytics about:
-    - Response times
-    - Customer satisfaction
-    - Common issues
-    - Template usage
-    - Feedback trends
+    from backend.services.customer_service import analytics as analytics_svc
+
+    user_id = str(current_user.id)
+    org_id = getattr(current_user, "organization_id", None) or user_id
+    return await analytics_svc.get_analytics(org_id, time_range=time_range)
+
+
+# ─── FAQ → Knowledge Base ────────────────────────────────────────────────
+
+
+class FaqToKnowledgeBaseRequest(BaseModel):
+    """Persist a generated FAQ into the RAG ingest pipeline so future
+    AI Drafts cite it.  Optionally also save it as a help-center
+    article surfaced on the public portal."""
+    topic: str = Field(..., min_length=1, max_length=200)
+    content: str = Field(..., min_length=10, max_length=50_000)
+    target_audience: Optional[str] = Field(None, max_length=200)
+    tags: Optional[List[str]] = None
+    # When true, ALSO create a published help-center article from the same content.
+    publish_as_article: bool = False
+    article_category: Optional[str] = Field(None, max_length=64)
+
+
+@router.post("/faq/save-to-knowledge-base", status_code=201)
+async def save_faq_to_knowledge_base(
+    request: FaqToKnowledgeBaseRequest,
+    current_user: User = Depends(get_current_active_user),
+):
+    """Push a generated FAQ into the org's RAG knowledge base.
+
+    The content lands as a `manual_entry` document that the existing
+    AI Draft retrieval path picks up automatically.  Optionally
+    creates a help-center article from the same content so end users
+    can self-serve.
     """
-    # This would typically fetch from a database
-    analytics = {
-        "time_range": time_range,
-        "total_requests": 1000,
-        "average_response_time": 0.5,  # seconds
-        "satisfaction_rate": 0.95,
-        "common_issues": [
-            {"issue": "Technical Support", "count": 300},
-            {"issue": "Billing", "count": 200},
-            {"issue": "Feature Requests", "count": 150}
-        ],
-        "template_usage": {
-            "general_inquiry": 400,
-            "technical_support": 300,
-            "billing_issue": 200,
-            "feature_request": 100
+    user_id = str(current_user.id)
+    org_id = getattr(current_user, "organization_id", None) or user_id
+
+    # 1. Push into RAG via the existing document_processor.
+    try:
+        from backend.services.document_processor import document_processor
+        result = await document_processor.process_text(
+            request.content,
+            metadata={
+                "user_id": user_id,
+                "organization_id": org_id,
+                "source": "manual_entry",
+                "title": f"FAQ — {request.topic}",
+                "tags": ["faq"] + list(request.tags or []),
+                "topic": request.topic,
+                "target_audience": request.target_audience,
+                "mime_type": "text/markdown",
+                "channel": "customer_service.faq",
+            },
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to ingest FAQ into knowledge base: {e}",
+        )
+
+    rag_document_id = getattr(result, "document_id", None) or (
+        result.get("document_id") if isinstance(result, dict) else None
+    )
+
+    article_dict: Optional[Dict[str, Any]] = None
+    if request.publish_as_article:
+        try:
+            from backend.services.customer_service import articles as articles_svc
+            article_dict = await articles_svc.create_article(
+                organization_id=org_id,
+                title=f"{request.topic}",
+                body=request.content,
+                summary=(request.target_audience and f"For: {request.target_audience}") or None,
+                category=request.article_category or "faq",
+                tags=["faq"] + list(request.tags or []),
+                published=True,
+                featured=False,
+                created_by_user_id=user_id,
+            )
+            if rag_document_id and article_dict:
+                await articles_svc.link_rag_document(
+                    org_id, article_dict["id"], rag_document_id,
+                )
+                article_dict["rag_document_id"] = rag_document_id
+        except Exception as e:
+            # Article creation is best-effort — the RAG ingest already succeeded.
+            await log_activity(
+                user_id=user_id,
+                organization_id=org_id,
+                activity_type="customer_service.faq_article_create_failed",
+                details={"topic": request.topic, "error": str(e)},
+                agent_name="Customer Service Agent",
+            )
+
+    await log_activity(
+        user_id=user_id,
+        organization_id=org_id,
+        activity_type="customer_service.faq_saved_to_kb",
+        details={
+            "topic": request.topic,
+            "rag_document_id": rag_document_id,
+            "article_id": (article_dict or {}).get("id"),
         },
-        "feedback_trends": {
-            "positive": 0.75,
-            "neutral": 0.15,
-            "negative": 0.10
-        }
+        related_resource_type="DOCUMENT",
+        related_resource_id=rag_document_id or "",
+        agent_name="Customer Service Agent",
+    )
+
+    return {
+        "rag_document_id": rag_document_id,
+        "rag_status": getattr(result, "status", None) or (result.get("status") if isinstance(result, dict) else None),
+        "article": article_dict,
+        "topic": request.topic,
     }
-    
-    return analytics 

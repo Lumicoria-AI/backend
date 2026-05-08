@@ -121,13 +121,43 @@ def _extract_pdf_page_range(
 
 
 _pool: Optional[ProcessPoolExecutor] = None
+_thread_pool = None  # ThreadPoolExecutor fallback for daemon contexts
 
 
-def _get_pool() -> Optional[ProcessPoolExecutor]:
-    global _pool
+def _is_daemon_process() -> bool:
+    """True when running inside a Celery prefork worker (or any other
+    daemonic process).  Daemon processes can't spawn subprocesses, so the
+    ProcessPoolExecutor must be swapped for a ThreadPoolExecutor.
+    GIL-release inside PyMuPDF's C layer means threads still deliver
+    useful parallelism for extract-heavy work."""
+    try:
+        import multiprocessing
+        return bool(multiprocessing.current_process().daemon)
+    except Exception:
+        return False
+
+
+def _get_pool():
+    """Return the parallel executor suitable for the current context,
+    or None to force in-thread execution.
+
+    - Host / API process (non-daemon)  → ProcessPoolExecutor (true parallel).
+    - Celery prefork worker (daemon)   → ThreadPoolExecutor (avoids the
+      'daemonic processes are not allowed to have children' error).
+    """
+    global _pool, _thread_pool
     workers = max(1, int(getattr(settings, "INGEST_PROCESS_POOL_WORKERS", 4)))
     if workers <= 1:
         return None
+
+    if _is_daemon_process():
+        if _thread_pool is None:
+            from concurrent.futures import ThreadPoolExecutor
+            _thread_pool = ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="pdf-extract"
+            )
+        return _thread_pool
+
     if _pool is None:
         _pool = ProcessPoolExecutor(max_workers=workers)
     return _pool

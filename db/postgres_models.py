@@ -32,6 +32,12 @@ def _uuid_str() -> str:
     return str(uuid.uuid4())
 
 
+def _short_ticket_id() -> str:
+    """Public ticket id — `TK-` + 8 hex chars (~4 billion namespace per
+    org, more than enough for any tenant; uniqueness enforced by PK)."""
+    return f"TK-{uuid.uuid4().hex[:8]}"
+
+
 class TaskSQL(Base):
     __tablename__ = "tasks"
 
@@ -335,3 +341,177 @@ class BlogCommentSQL(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
     deleted_at = Column(DateTime, nullable=True)
+
+
+# ── Customer Service: tickets, replies, templates, branding ─────────
+#
+# Multi-tenant. Every row scoped by `organization_id`.  Public IDs for
+# tickets are short (TK-xxxxxxxx) so they can be shared in URLs and
+# emails without leaking row counts.
+
+
+class SupportTicketSQL(Base):
+    """A support inquiry from an end-user of a tenant.
+
+    Created by:
+      - the public portal (channel=portal)
+      - the embeddable widget (channel=widget)  [future]
+      - inbound email   (channel=email)         [future]
+      - operator manual entry (channel=manual)
+      - external API   (channel=api)            [future]
+    """
+    __tablename__ = "support_tickets"
+
+    # Public-facing id, shareable in URLs.  IS the primary key — no
+    # separate internal/public split, less plumbing, harder to confuse.
+    id = Column(String(64), primary_key=True, default=_short_ticket_id)
+
+    organization_id = Column(String(64), nullable=False, index=True)
+
+    customer_email = Column(String(320), nullable=False, index=True)
+    customer_name = Column(String(200), nullable=True)
+
+    subject = Column(String(500), nullable=False)
+    body = Column(Text, nullable=False)
+
+    priority = Column(String(16), nullable=False, default="Medium")        # High|Medium|Low
+    status = Column(String(32), nullable=False, default="Open")            # Open|In Progress|Resolved|Closed|Cancelled
+    category = Column(String(64), nullable=True, index=True)
+    channel = Column(String(32), nullable=False, default="portal")         # portal|widget|email|api|manual
+
+    sentiment_score = Column(Integer, nullable=True)                       # -100..100 (×100 of -1..1)
+    assigned_user_id = Column(String(64), nullable=True, index=True)
+    submitter_user_id = Column(String(64), nullable=True)                  # if authenticated submission
+
+    meta = Column("metadata", JSONB, nullable=False, default=dict)         # IP, user-agent, referrer, etc.
+
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    resolved_at = Column(DateTime, nullable=True)
+    deleted_at = Column(DateTime, nullable=True, index=True)
+
+
+class TicketReplySQL(Base):
+    """One message in a ticket conversation.
+
+    `author_type` in {operator, customer, agent_ai}.  Operator and
+    agent_ai replies are visible on the public status check; customer
+    replies show in the operator inbox.
+    """
+    __tablename__ = "ticket_replies"
+
+    id = Column(String(64), primary_key=True, default=_uuid_str)
+    ticket_id = Column(String(64), ForeignKey("support_tickets.id"), nullable=False, index=True)
+    organization_id = Column(String(64), nullable=False, index=True)
+
+    author_type = Column(String(16), nullable=False)                       # operator|customer|agent_ai
+    author_user_id = Column(String(64), nullable=True)
+    author_display_name = Column(String(200), nullable=True)
+
+    body = Column(Text, nullable=False)
+    template_id = Column(String(64), nullable=True, index=True)            # response_templates.id when used
+
+    # AI-generated drafts that the operator sent: stash citations + model
+    # info here so the status page can render "Powered by AI" badges.
+    ai_draft_meta = Column(JSONB, nullable=True)
+
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    deleted_at = Column(DateTime, nullable=True)
+
+
+class ResponseTemplateSQL(Base):
+    """Reusable reply template, tenant-scoped.
+
+    Five `is_default=True` rows are seeded per org on first read of
+    /customer-service/templates.  Operators can also create their own.
+    """
+    __tablename__ = "response_templates"
+
+    id = Column(String(64), primary_key=True, default=_uuid_str)
+    organization_id = Column(String(64), nullable=False, index=True)
+
+    name = Column(String(200), nullable=False)
+    category = Column(String(64), nullable=False, index=True)
+    tone = Column(String(32), nullable=True)                               # professional_friendly|formal|empathetic|...
+
+    body = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)                              # quick-reply hover hint
+    variables = Column(JSONB, nullable=False, default=list)                # ["customer_name", "ticket_id", ...]
+
+    usage_count = Column(Integer, nullable=False, default=0)
+    is_default = Column(Boolean, nullable=False, default=False)
+
+    created_by_user_id = Column(String(64), nullable=True)
+    created_by_agent = Column(Boolean, nullable=False, default=False)
+
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    deleted_at = Column(DateTime, nullable=True)
+
+
+class OrgBrandingSQL(Base):
+    """Per-tenant branding for the public support portal + widget.
+
+    `slug` is the URL segment in `/portal/{slug}` and is enforced unique
+    across all orgs.  Lower-cased ASCII; validated at the API layer.
+    """
+    __tablename__ = "org_branding"
+
+    organization_id = Column(String(64), primary_key=True)
+    slug = Column(String(64), nullable=False, unique=True, index=True)
+
+    display_name = Column(String(200), nullable=False)
+    logo_url = Column(String(1000), nullable=True)
+    primary_color = Column(String(16), nullable=False, default="#4f46e5")
+    accent_color = Column(String(16), nullable=False, default="#6366f1")
+    hero_copy = Column(Text, nullable=True)
+
+    support_email = Column(String(320), nullable=True)
+    sla_response_minutes = Column(Integer, nullable=False, default=60)
+    captcha_enabled = Column(Boolean, nullable=False, default=False)
+
+    public_categories = Column(JSONB, nullable=False, default=list)        # ["technical_support", "billing", ...]
+
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class SupportArticleSQL(Base):
+    """Tenant help-center article surfaced on the public portal at
+    `/portal/{slug}/help`.
+
+    Operators draft + publish here.  Anonymous visitors only see rows
+    where `published=True AND deleted_at IS NULL`.  Slug is unique per
+    org (so `agripro/help/getting-started` and
+    `queska/help/getting-started` can coexist).
+    """
+    __tablename__ = "support_articles"
+
+    id = Column(String(64), primary_key=True, default=_uuid_str)
+    organization_id = Column(String(64), nullable=False, index=True)
+
+    slug = Column(String(120), nullable=False)                             # unique within an org
+    title = Column(String(300), nullable=False)
+    summary = Column(String(500), nullable=True)                           # short blurb used on the list page
+    body = Column(Text, nullable=False)                                    # markdown / sanitized HTML
+
+    category = Column(String(64), nullable=True, index=True)
+    tags = Column(JSONB, nullable=False, default=list)                     # ["getting_started", "billing"]
+
+    published = Column(Boolean, nullable=False, default=False)
+    featured = Column(Boolean, nullable=False, default=False)              # pin on the help home
+
+    view_count = Column(Integer, nullable=False, default=0)
+    helpful_count = Column(Integer, nullable=False, default=0)
+    not_helpful_count = Column(Integer, nullable=False, default=0)
+
+    # Optional: id of the RAG document this article was also pushed to,
+    # so we can keep them in sync when the article body changes.
+    rag_document_id = Column(String(64), nullable=True, index=True)
+
+    created_by_user_id = Column(String(64), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    published_at = Column(DateTime, nullable=True)
+    deleted_at = Column(DateTime, nullable=True, index=True)
+

@@ -589,17 +589,24 @@ _email_service: Optional[EmailService] = None
 
 
 async def get_email_service() -> EmailService:
-    """Get or create the email service singleton."""
+    """Get or create the email service singleton.
+
+    Resend is the primary provider — SendGrid stays available as a
+    fallback only when its API key is configured.  Resend's deliverability,
+    plain-API surface, and lack of the dict/CustomArg footgun in the
+    Python SDK make it the better default for transactional mail.
+    """
     global _email_service
-    
+
     if _email_service is None:
         _email_service = EmailService(
             sendgrid_api_key=getattr(settings, 'SENDGRID_API_KEY', None),
             resend_api_key=getattr(settings, 'RESEND_API_KEY', None),
+            primary_provider=EmailProviderType.RESEND,
             from_email=getattr(settings, 'EMAIL_FROM_ADDRESS', 'noreply@lumicoria.ai'),
             from_name=getattr(settings, 'EMAIL_FROM_NAME', 'Lumicoria.ai'),
             sandbox_mode=getattr(settings, 'EMAIL_SANDBOX_MODE', False),
         )
         await _email_service.initialize()
-    
+
     return _email_service

@@ -54,6 +54,14 @@ aiohttp>=3.9
 aiofiles
 bleach[css]>=6.0
 
+# ── Office preview artifacts (DOCX/PPTX/XLSX) ─────────────────────────
+# Consumed by backend/services/ingest/preview.py; all three optional at
+# runtime — missing libs fall back to a plain "download" preview type.
+mammoth>=1.8
+python-pptx>=1.0
+openpyxl>=3.1
+pillow>=10.0
+
 # ── Stripe Billing ────────────────────────────────────────────────────
 stripe>=10.0.0
 

@@ -573,6 +573,12 @@ class Settings(BaseSettings):
     # Frontend URL for OAuth redirect URI construction
     FRONTEND_URL: str = "http://localhost:3000"
 
+    # Public-facing base URL used in customer-facing emails / share links
+    # (support portal, ticket status URLs, magic links, etc.).
+    # Set this to your production domain — falls back to FRONTEND_URL
+    # when unset so dev environments don't need to configure both.
+    PUBLIC_BASE_URL: Optional[str] = None
+
     # ── Cloud Providers (optional) ─────────────────────────────────────
     AZURE_OPENAI_API_KEY: Optional[str] = None
     AZURE_OPENAI_ENDPOINT: Optional[str] = None

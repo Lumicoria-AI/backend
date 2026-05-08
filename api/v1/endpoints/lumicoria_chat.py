@@ -25,7 +25,7 @@ import os
 import shutil
 from pathlib import Path
 
-from ....core.auth import get_current_user
+from ....core.auth import get_current_user, get_current_user_sse
 from ....core.config import settings
 from ....services.context_service import context_service
 from ....services.storage_service import storage_service
@@ -1252,7 +1252,7 @@ async def list_documents(
 @router.get("/documents/{document_id}/progress")
 async def stream_document_progress(
     document_id: str,
-    current_user: Dict[str, Any] = Depends(get_current_user),
+    current_user: Dict[str, Any] = Depends(get_current_user_sse),
 ):
     """Server-sent events stream for ingest progress.
 
@@ -1330,6 +1330,94 @@ def _pick_preview_type(mime: str, filename: str) -> str:
     if mime == "text/plain":
         return "text"
     return "download"
+
+
+@router.post("/documents/{document_id}/regenerate-preview")
+async def regenerate_document_preview(
+    document_id: str,
+    current_user: Dict[str, Any] = Depends(get_current_user),
+):
+    """Re-render the office-format preview artifact for an existing doc.
+
+    Useful when the artifact was missing (e.g. mammoth/pptx/openpyxl not
+    installed at ingest time) or corrupt.  Downloads the original from
+    MinIO, runs render_preview(), uploads `{s3_key}.preview.html|json`.
+    """
+    import tempfile
+    from ....services.ingest.preview import (
+        preview_artifact_key, preview_kind, render_preview,
+    )
+
+    user_id = current_user["id"]
+    doc = await rag_registry.get(document_id, user_id=user_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    source_key = doc["s3_key"]
+    mime = doc.get("mime_type") or ""
+
+    kind = preview_kind(mime)
+    if kind is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No preview-artifact rendering for mime type {mime!r}",
+        )
+
+    # Pull the original into a tempfile so the (synchronous) preview
+    # libraries can read it from disk.
+    try:
+        content = await storage_service.download_file(source_key)
+    except Exception as e:
+        logger.error("regenerate_preview_download_failed",
+                     document_id=document_id, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Download failed: {e}")
+
+    suffix = os.path.splitext(doc.get("original_filename") or doc.get("filename") or "")[1]
+    tmp_dir = Path(tempfile.gettempdir()) / "rag_preview"
+    tmp_dir.mkdir(exist_ok=True, parents=True)
+    tmp_path = tmp_dir / f"{document_id}{suffix}"
+
+    try:
+        tmp_path.write_bytes(content)
+        rendered = render_preview(str(tmp_path), mime)
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    if rendered is None:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Preview rendering returned no output — the required library "
+                f"(mammoth / python-pptx / openpyxl) for {kind} may be missing."
+            ),
+        )
+
+    artifact_bytes, artifact_ct = rendered
+    artifact_key = preview_artifact_key(source_key, mime)
+    if not artifact_key:
+        raise HTTPException(status_code=500, detail="Could not compute artifact key")
+
+    try:
+        await storage_service.upload_file(artifact_bytes, artifact_key, artifact_ct)
+    except Exception as e:
+        logger.error("regenerate_preview_upload_failed",
+                     document_id=document_id, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Upload failed: {e}")
+
+    logger.info("preview_artifact_regenerated",
+                document_id=document_id, kind=kind,
+                artifact_key=artifact_key, bytes=len(artifact_bytes))
+
+    return {
+        "document_id": document_id,
+        "artifact_key": artifact_key,
+        "kind": kind,
+        "bytes": len(artifact_bytes),
+        "status": "ready",
+    }
 
 
 @router.post("/documents/{document_id}/cancel")
@@ -1432,7 +1520,21 @@ async def get_document_preview(
         except Exception as e:
             logger.warning("preview_artifact_lookup_failed", error=str(e),
                            document_id=document_id)
-            # Fall through to the original-file presigned URL below.
+            # Fall through to the download fallback below.
+
+        # Office format without a rendered artifact (e.g. mammoth /
+        # python-pptx / openpyxl not installed, or rendering failed).
+        # Don't point the iframe at the raw .docx/.pptx/.xlsx — the
+        # browser can't render office binaries and it only produces a
+        # confusing blank iframe.  Serve a download link instead.
+        try:
+            url = await storage_service.get_presigned_url(source_key)
+        except Exception as e:
+            logger.error("preview_url_failed", error=str(e), document_id=document_id)
+            raise HTTPException(status_code=500, detail=f"Preview URL failed: {e}")
+        base["type"] = "download"
+        base["url"] = url
+        return base
 
     # URL-rendered types, fallback for unsupported formats.
     try:

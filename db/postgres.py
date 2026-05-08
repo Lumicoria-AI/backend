@@ -178,6 +178,46 @@ async def init_postgres() -> None:
                 "CREATE INDEX IF NOT EXISTS ix_rag_documents_aliased_document_id "
                 "ON rag_documents (aliased_document_id)"
             ))
+
+            # ── Customer service: composite indexes on the new tables ─
+            # `Base.metadata.create_all` made the tables; these indexes
+            # accelerate the most common operator queries.
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_support_tickets_org_status "
+                "ON support_tickets (organization_id, status) "
+                "WHERE deleted_at IS NULL"
+            ))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_support_tickets_org_created "
+                "ON support_tickets (organization_id, created_at DESC) "
+                "WHERE deleted_at IS NULL"
+            ))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_ticket_replies_ticket_created "
+                "ON ticket_replies (ticket_id, created_at)"
+            ))
+            await conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_response_templates_org_name "
+                "ON response_templates (organization_id, name) "
+                "WHERE deleted_at IS NULL"
+            ))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_response_templates_org_category "
+                "ON response_templates (organization_id, category) "
+                "WHERE deleted_at IS NULL"
+            ))
+
+            # ── Support help-center articles ─────────────────────────
+            await conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_support_articles_org_slug "
+                "ON support_articles (organization_id, slug) "
+                "WHERE deleted_at IS NULL"
+            ))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_support_articles_published "
+                "ON support_articles (organization_id, published, featured DESC, updated_at DESC) "
+                "WHERE deleted_at IS NULL"
+            ))
         logger.info("Postgres in-place schema patches applied")
     except Exception as e:
         logger.error("Failed to initialize Postgres", error=str(e))

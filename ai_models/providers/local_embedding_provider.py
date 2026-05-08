@@ -241,6 +241,19 @@ class LocalEmbeddingProvider(LLMClient):
         batch_size = self._batch_size
         parallel = self._parallel
 
+        # FastEmbed spawns its own subprocess pool when `parallel` is set —
+        # but daemon processes (Celery prefork workers) can't have children.
+        # Detect that context and force single-process embedding.  ONNX
+        # Runtime still uses multi-threaded intra-op parallelism internally,
+        # so throughput stays reasonable.
+        if parallel is not None and parallel != None:  # noqa: E711
+            try:
+                import multiprocessing
+                if multiprocessing.current_process().daemon:
+                    parallel = None
+            except Exception:
+                pass
+
         def _embed_sync() -> List[List[float]]:
             mdl = _load_model(model_name, self._cache_dir)
             # FastEmbed returns a generator of numpy arrays (float32).

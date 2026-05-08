@@ -17,6 +17,11 @@ from backend.api.v1.endpoints import (
     meeting,
     wellbeing,
     customer_service,
+    customer_service_tickets,
+    customer_service_templates,
+    customer_service_branding,
+    customer_service_articles,
+    customer_service_public,
     translation,
     data_analysis,
     social_media,
@@ -248,6 +253,41 @@ api_router.include_router(
         422: {"description": "Validation Error"},
         500: {"description": "Internal Server Error"}
     }
+)
+
+# Customer Service: Tickets (operator-facing, auth required)
+api_router.include_router(
+    customer_service_tickets.router,
+    prefix="/customer-service/tickets",
+    tags=["customer service - tickets"],
+)
+
+# Customer Service: Templates (operator-facing, auth required)
+api_router.include_router(
+    customer_service_templates.router,
+    prefix="/customer-service/templates",
+    tags=["customer service - templates"],
+)
+
+# Customer Service: Branding admin (auth required)
+api_router.include_router(
+    customer_service_branding.router,
+    prefix="/customer-service/branding",
+    tags=["customer service - branding"],
+)
+
+# Customer Service: Help-center article admin (auth required)
+api_router.include_router(
+    customer_service_articles.router,
+    prefix="/customer-service/articles",
+    tags=["customer service - articles"],
+)
+
+# Customer Service: Public portal endpoints (no auth, rate-limited)
+api_router.include_router(
+    customer_service_public.router,
+    prefix="/public",
+    tags=["customer service - public"],
 )
 
 # Translation endpoints
