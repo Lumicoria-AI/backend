@@ -19,6 +19,7 @@ itsdangerous
 jinja2
 networkx
 pandas
+scipy>=1.11
 
 # ── Database ───────────────────────────────────────────────────────────
 motor

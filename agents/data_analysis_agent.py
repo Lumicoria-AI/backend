@@ -9,6 +9,16 @@ import pandas as pd
 import numpy as np
 from io import StringIO
 
+# scipy is optional at runtime — the agent gracefully degrades the
+# statistical mode rather than crashing the whole process if scipy is
+# missing.  Add `scipy>=1.11` to requirements.txt to enable it.
+try:
+    from scipy import stats  # type: ignore
+    HAS_SCIPY = True
+except ImportError:
+    stats = None  # type: ignore
+    HAS_SCIPY = False
+
 # Configure logger
 logger = structlog.get_logger(__name__)
 
@@ -280,14 +290,25 @@ class DataAnalysisAgent(BaseAgent):
             
             # Perform statistical tests based on parameters
             if parameters.get("hypothesis_testing"):
-                for col in numeric_cols:
-                    # Example: One-sample t-test against mean
-                    test_stat, p_value = stats.ttest_1samp(df[col].dropna(), df[col].mean())
-                    results[f"{col}_t_test"] = {
-                        "test_statistic": test_stat,
-                        "p_value": p_value,
-                        "significant": p_value < (1 - self.confidence_level)
-                    }
+                if not HAS_SCIPY:
+                    results["_warning"] = (
+                        "scipy is not installed; hypothesis testing skipped. "
+                        "Install scipy to enable t-tests, ANOVA, etc."
+                    )
+                else:
+                    for col in numeric_cols:
+                        series = df[col].dropna()
+                        if len(series) < 2:
+                            continue
+                        # One-sample t-test against the column mean is a
+                        # tautology (statistic = 0), so test against zero
+                        # for a meaningful "is the mean non zero" check.
+                        test_stat, p_value = stats.ttest_1samp(series, 0.0)
+                        results[f"{col}_t_test_vs_zero"] = {
+                            "test_statistic": float(test_stat),
+                            "p_value": float(p_value),
+                            "significant": float(p_value) < (1 - self.confidence_level),
+                        }
             
             # Generate statistical insights
             insights_prompt = f"""

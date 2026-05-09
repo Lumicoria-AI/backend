@@ -515,3 +515,61 @@ class SupportArticleSQL(Base):
     published_at = Column(DateTime, nullable=True)
     deleted_at = Column(DateTime, nullable=True, index=True)
 
+
+# ── Data Analysis: persisted analysis runs ──────────────────────────
+#
+# One row per run.  Created at upload time with status=pending, then
+# transitions to processing → ready (or error) as the pipeline runs.
+# The original file lives in MinIO at `s3_key`; results land in the
+# JSONB columns so a run can be reloaded into the UI without re running
+# the heavy compute.
+
+
+class DataAnalysisRunSQL(Base):
+    """A persisted run of the Data Analysis Agent on an uploaded file.
+
+    Multi tenant: every row carries `organization_id` and queries filter
+    on it before any other clause.  Soft delete via `deleted_at`.
+    """
+    __tablename__ = "data_analysis_runs"
+
+    id = Column(String(64), primary_key=True, default=_uuid_str)
+    organization_id = Column(String(64), nullable=False, index=True)
+    user_id = Column(String(64), nullable=False, index=True)
+
+    mode = Column(String(32), nullable=False, default="exploratory")        # exploratory|statistical|visualization|anomaly|trend|report
+    status = Column(String(32), nullable=False, default="pending")          # pending|processing|ready|error
+
+    # Source file (lives in MinIO).
+    s3_key = Column(String(500), nullable=False)
+    filename = Column(String(255), nullable=False)
+    original_filename = Column(String(500), nullable=True)
+    content_type = Column(String(100), nullable=True)
+    size_bytes = Column(Integer, nullable=False, default=0)
+
+    # Parse stats.
+    row_count = Column(Integer, nullable=True)
+    column_count = Column(Integer, nullable=True)
+    columns = Column(JSONB, nullable=False, default=list)                   # [{name, dtype}, ...]
+    preview_rows = Column(JSONB, nullable=False, default=list)              # first N rows
+
+    # Analysis results (JSONB lets each mode populate the fields it cares
+    # about without rigid column constraints).
+    summary_stats = Column(JSONB, nullable=True)
+    visualizations = Column(JSONB, nullable=False, default=list)
+    anomalies = Column(JSONB, nullable=True)
+    trends = Column(JSONB, nullable=True)
+    statistical_results = Column(JSONB, nullable=True)                      # hypothesis tests, regressions
+    insights = Column(JSONB, nullable=False, default=list)                  # [{text, type, ...}]
+    ai_summary = Column(Text, nullable=True)
+
+    # NL Q&A history accumulates across calls to /runs/{id}/ask.
+    question_history = Column(JSONB, nullable=False, default=list)          # [{question, answer, model_used, asked_at}]
+
+    processing_time_ms = Column(Integer, nullable=True)
+    error_message = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    deleted_at = Column(DateTime, nullable=True, index=True)
+

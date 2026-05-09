@@ -218,6 +218,27 @@ async def init_postgres() -> None:
                 "ON support_articles (organization_id, published, featured DESC, updated_at DESC) "
                 "WHERE deleted_at IS NULL"
             ))
+
+            # ── Data analysis runs ───────────────────────────────────
+            await conn.execute(text(
+                "ALTER TABLE data_analysis_runs "
+                "ADD COLUMN IF NOT EXISTS statistical_results JSONB"
+            ))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_data_analysis_runs_org_status "
+                "ON data_analysis_runs (organization_id, status) "
+                "WHERE deleted_at IS NULL"
+            ))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_data_analysis_runs_org_created "
+                "ON data_analysis_runs (organization_id, created_at DESC) "
+                "WHERE deleted_at IS NULL"
+            ))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_data_analysis_runs_user_created "
+                "ON data_analysis_runs (user_id, created_at DESC) "
+                "WHERE deleted_at IS NULL"
+            ))
         logger.info("Postgres in-place schema patches applied")
     except Exception as e:
         logger.error("Failed to initialize Postgres", error=str(e))
