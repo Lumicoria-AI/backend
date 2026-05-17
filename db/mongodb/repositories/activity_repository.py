@@ -1,4 +1,4 @@
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from pymongo import ASCENDING, DESCENDING
 from bson import ObjectId
 from datetime import datetime
@@ -9,6 +9,31 @@ from backend.models.mongodb_models import (
 import structlog
 
 logger = structlog.get_logger()
+
+
+_OBJECT_ID_HEX = frozenset("0123456789abcdefABCDEF")
+
+
+def _maybe_object_id(value: Optional[Any]) -> Optional[Any]:
+    """Coerce to ObjectId only when the value is a real 24-char hex
+    string.  Otherwise return the raw value so non-ObjectId resource
+    ids (e.g. 'TK-abc12345', UUIDs, slugs) survive without raising.
+
+    MongoDB accepts mixed types in a single field, so storing some
+    related_resource_id values as ObjectId and others as plain strings
+    is supported and queries on the field still work.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, ObjectId):
+        return value
+    s = str(value)
+    if len(s) == 24 and all(c in _OBJECT_ID_HEX for c in s):
+        try:
+            return ObjectId(s)
+        except Exception:
+            return s
+    return s
 
 class ActivityRepository(BaseRepository[ActivityLogEntry]):
     def __init__(self):
@@ -55,13 +80,13 @@ class ActivityRepository(BaseRepository[ActivityLogEntry]):
         Create a new activity log entry.
         """
         entry_data = {
-            "organization_id": ObjectId(organization_id) if organization_id else None,
-            "user_id": ObjectId(user_id) if user_id else None,
+            "organization_id": _maybe_object_id(organization_id),
+            "user_id": _maybe_object_id(user_id),
             "activity_type": activity_type,
             "details": details,
             "timestamp": datetime.utcnow(),
             "related_resource_type": related_resource_type,
-            "related_resource_id": ObjectId(related_resource_id) if related_resource_id else None,
+            "related_resource_id": _maybe_object_id(related_resource_id),
         }
 
         try:
@@ -87,9 +112,9 @@ class ActivityRepository(BaseRepository[ActivityLogEntry]):
         """
         Get a list of recent activity log entries for an organization or user.
         """
-        filters = {"organization_id": ObjectId(organization_id)}
+        filters = {"organization_id": _maybe_object_id(organization_id)}
         if user_id:
-            filters["user_id"] = ObjectId(user_id)
+            filters["user_id"] = _maybe_object_id(user_id)
         if activity_type:
             filters["activity_type"] = activity_type
 
@@ -112,9 +137,9 @@ class ActivityRepository(BaseRepository[ActivityLogEntry]):
         Get activity log entries related to a specific resource.
         """
         filters = {
-            "organization_id": ObjectId(organization_id),
+            "organization_id": _maybe_object_id(organization_id),
             "related_resource_type": related_resource_type,
-            "related_resource_id": ObjectId(related_resource_id)
+            "related_resource_id": _maybe_object_id(related_resource_id),
         }
 
         return await self.find_many(
