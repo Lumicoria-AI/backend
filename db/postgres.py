@@ -239,6 +239,45 @@ async def init_postgres() -> None:
                 "ON data_analysis_runs (user_id, created_at DESC) "
                 "WHERE deleted_at IS NULL"
             ))
+
+            # ── Knowledge Graph indexes ───────────────────────────
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_kg_nodes_org_type "
+                "ON kg_nodes (organization_id, type) "
+                "WHERE deleted_at IS NULL"
+            ))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_kg_nodes_org_label "
+                "ON kg_nodes (organization_id, label) "
+                "WHERE deleted_at IS NULL"
+            ))
+            # Deduplicate (label, type) per org so the LLM cannot spam
+            # the graph with duplicate nodes.  Case-insensitive on label.
+            await conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_kg_nodes_org_label_type "
+                "ON kg_nodes (organization_id, lower(label), type) "
+                "WHERE deleted_at IS NULL"
+            ))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_kg_edges_org_source "
+                "ON kg_edges (organization_id, source_id) "
+                "WHERE deleted_at IS NULL"
+            ))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_kg_edges_org_target "
+                "ON kg_edges (organization_id, target_id) "
+                "WHERE deleted_at IS NULL"
+            ))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_kg_edges_org_type "
+                "ON kg_edges (organization_id, type) "
+                "WHERE deleted_at IS NULL"
+            ))
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_kg_extractions_org_created "
+                "ON kg_extractions (organization_id, created_at DESC) "
+                "WHERE deleted_at IS NULL"
+            ))
         logger.info("Postgres in-place schema patches applied")
     except Exception as e:
         logger.error("Failed to initialize Postgres", error=str(e))

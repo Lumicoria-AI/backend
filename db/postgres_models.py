@@ -19,6 +19,7 @@ from sqlalchemy import (
     DateTime,
     Integer,
     Boolean,
+    Float,
     ForeignKey,
     Enum as SAEnum,
 )
@@ -571,5 +572,76 @@ class DataAnalysisRunSQL(Base):
 
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    deleted_at = Column(DateTime, nullable=True, index=True)
+
+
+# ── Knowledge Graph: nodes, edges, extraction audit ────────────────
+#
+# Multi tenant. Every row scoped by `organization_id`. The graph itself
+# lives across `kg_nodes` and `kg_edges`; `kg_extractions` is a separate
+# audit log so the operator UI can show recent activity without scanning
+# every node and edge.
+
+
+class KGNodeSQL(Base):
+    """A node in a tenant's knowledge graph."""
+    __tablename__ = "kg_nodes"
+
+    id = Column(String(64), primary_key=True, default=_uuid_str)
+    organization_id = Column(String(64), nullable=False, index=True)
+    type = Column(String(32), nullable=False)
+    label = Column(String(500), nullable=False)
+    properties = Column(JSONB, nullable=False, default=dict)
+    confidence = Column(Float, nullable=False, default=1.0)
+    source_extraction_id = Column(String(64), nullable=True, index=True)
+
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    deleted_at = Column(DateTime, nullable=True, index=True)
+
+
+class KGEdgeSQL(Base):
+    """A directed relation between two nodes."""
+    __tablename__ = "kg_edges"
+
+    id = Column(String(64), primary_key=True, default=_uuid_str)
+    organization_id = Column(String(64), nullable=False, index=True)
+    source_id = Column(String(64), nullable=False, index=True)
+    target_id = Column(String(64), nullable=False, index=True)
+    type = Column(String(32), nullable=False)
+    properties = Column(JSONB, nullable=False, default=dict)
+    confidence = Column(Float, nullable=False, default=1.0)
+    source_extraction_id = Column(String(64), nullable=True, index=True)
+
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    deleted_at = Column(DateTime, nullable=True, index=True)
+
+
+class KGExtractionSQL(Base):
+    """Audit + Recent Extractions feed. One row per Extract / Discover /
+    Fill Gaps call."""
+    __tablename__ = "kg_extractions"
+
+    id = Column(String(64), primary_key=True, default=_uuid_str)
+    organization_id = Column(String(64), nullable=False, index=True)
+    user_id = Column(String(64), nullable=False, index=True)
+
+    action = Column(String(32), nullable=False)        # extract|discover|fill_gaps
+    status = Column(String(32), nullable=False, default="ready")  # ready|error
+    title = Column(String(500), nullable=True)
+    source_kind = Column(String(32), nullable=True)    # inline|rag_document
+    source_ref = Column(String(500), nullable=True)
+    content_preview = Column(String(500), nullable=True)
+
+    node_ids = Column(JSONB, nullable=False, default=list)
+    edge_ids = Column(JSONB, nullable=False, default=list)
+    node_count = Column(Integer, nullable=False, default=0)
+    edge_count = Column(Integer, nullable=False, default=0)
+
+    processing_time_ms = Column(Integer, nullable=True)
+    error_message = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
     deleted_at = Column(DateTime, nullable=True, index=True)
 

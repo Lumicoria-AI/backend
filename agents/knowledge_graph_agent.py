@@ -1,8 +1,10 @@
+
 from typing import Dict, Any, List, Optional, Set
 from enum import Enum
 import logging
+import re
 from datetime import datetime
-import json
+import json                                  
 import networkx as nx
 from dataclasses import dataclass
 from uuid import uuid4
@@ -63,9 +65,19 @@ class KnowledgeGraphAgent(BaseAgent):
     """Agent specialized in building and maintaining personal knowledge graphs."""
     
     def __init__(self, config: Dict[str, Any]):
-        """Initialize the Knowledge Graph Agent with specific capabilities."""
+        """Initialize the Knowledge Graph Agent.
+
+        IMPORTANT: this agent no longer owns a global, shared graph.  The
+        previous design loaded a single pickle file and let every
+        organization on the platform read from / write to the same
+        DiGraph, which was a hard data-isolation leak.  Now the per-org
+        graph is injected before every call via `attach_graph`, the
+        service layer wrapping the agent persists changes back through
+        `backend.services.knowledge_graph.repository`, and the agent
+        itself never touches SQLAlchemy.
+        """
         super().__init__(config)
-        
+
         # Set default capabilities
         self.capabilities = {
             "graph_building": True,
@@ -75,21 +87,53 @@ class KnowledgeGraphAgent(BaseAgent):
             "query_answering": True,
             "visualization": True
         }
-        
-        # Initialize graph
+
+        # Start with an empty in-memory graph.  The service layer calls
+        # `attach_graph(org_graph)` before each request to swap in the
+        # caller's tenant-scoped graph.
         self.graph = nx.DiGraph()
-        
-        # Configure model for knowledge graph tasks
+
+        # Configure model for knowledge graph tasks.  16k token ceiling
+        # because Gemini 2.5 spends part of its budget on internal
+        # reasoning before any text reaches the wire — 4k was too tight
+        # and produced truncated JSON.
         self.model_config.update({
-            "temperature": 0.2,  # Lower temperature for more precise extraction
-            "max_tokens": 4096,
+            "temperature": 0.2,
+            "max_tokens": 16384,
             "top_p": 0.9,
             "frequency_penalty": 0.3,
             "presence_penalty": 0.3
         })
-        
-        # Load existing graph if available
-        self._load_graph()
+
+    def attach_graph(self, graph: "nx.DiGraph") -> None:
+        """Replace the agent's in-memory graph with the caller's
+        tenant-scoped one.  Called by the service layer at the start of
+        every request and reset to an empty DiGraph at the end."""
+        self.graph = graph if graph is not None else nx.DiGraph()
+
+    async def _process_with_model(
+        self,
+        system_prompt: str,
+        user_payload: str,
+        parameters: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Adapter onto BaseAgent._call_model_async with KG-tuned defaults.
+
+        Knowledge extraction wants near-deterministic JSON output, so the
+        temperature defaults stay low.  Gemini 2.5 consumes part of its
+        `max_output_tokens` budget on internal reasoning before emitting
+        any user-visible text, so we give it a generous ceiling — small
+        budgets truncate the JSON mid-string and break parsing.
+        """
+        parameters = parameters or {}
+        temperature = parameters.get("temperature", self.model_config.get("temperature", 0.2))
+        max_tokens = parameters.get("max_tokens", self.model_config.get("max_tokens", 16384))
+        return await self._call_model_async(
+            prompt=user_payload,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
 
     async def process_async(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Process a knowledge graph request asynchronously."""
@@ -113,10 +157,11 @@ class KnowledgeGraphAgent(BaseAgent):
             else:
                 raise ValueError(f"Unsupported action: {action}")
             
-            # Save graph after modifications
-            if action in ["extract", "discover_relations", "fill_gaps"]:
-                self._save_graph()
-            
+            # Persistence is owned by the service-layer wrapper, not the
+            # agent.  The wrapper inspects the result, persists added
+            # nodes / edges to Postgres via the repository module, and
+            # then resets the agent's in-memory graph.
+
             return {
                 "results": result,
                 "metadata": {
@@ -333,23 +378,37 @@ class KnowledgeGraphAgent(BaseAgent):
         parameters: Dict[str, Any]
     ) -> str:
         """Create system prompt for knowledge extraction."""
-        return f"""You are a specialized knowledge extraction AI. Your task is to identify key concepts, entities, and relationships from the input content.
-        
-        Context:
-        - Domain: {context.get('domain', 'general')}
-        - Extraction Focus: {context.get('focus', 'all')}
-        - Confidence Threshold: {parameters.get('confidence_threshold', 0.7)}
-        
-        Extract:
-        1. Key concepts and entities
-        2. Relationships between entities
-        3. Properties and attributes
-        4. Temporal information
-        5. Source citations
-        
-        Format the output as structured JSON with nodes and relationships.
-        Include confidence scores and supporting evidence.
-        """
+        node_types = ", ".join(t.value for t in GraphNodeType)
+        relation_types = ", ".join(t.value for t in GraphRelationType)
+        return f"""You are a knowledge extraction engine.  Read the user's content and identify the entities and the connections between them.
+
+Domain: {context.get('domain', 'general')}
+Focus: {context.get('focus', 'all')}
+Confidence threshold: {parameters.get('confidence_threshold', 0.7)}
+
+Allowed node types: {node_types}
+Allowed relation types: {relation_types}
+
+OUTPUT FORMAT — STRICT
+Reply with ONE JSON object and NOTHING else.  No prose, no markdown, no code fences, no commentary.  The shape MUST be:
+
+{{
+  "nodes": [
+    {{"label": "<short name>", "type": "<one of the allowed node types>", "properties": {{}}, "confidence": 0.0}}
+  ],
+  "relations": [
+    {{"source": "<label of source node>", "target": "<label of target node>", "type": "<one of the allowed relation types>", "properties": {{}}, "confidence": 0.0}}
+  ]
+}}
+
+Rules:
+- Use only the allowed type values, lowercase, exactly as listed above.
+- Reference relation endpoints by the same `label` you used in `nodes`.
+- Confidence is a number between 0 and 1.
+- BE CONCISE: emit at most 25 nodes and 40 relations total.  Pick the most important entities and drop trivia.  Leave `properties` as {{}} unless a property is genuinely informative.
+- If you cannot find any entities, return {{"nodes": [], "relations": []}}.
+- Do NOT wrap the JSON in ```json``` fences.
+"""
 
     def _create_discovery_prompt(
         self,
@@ -357,22 +416,31 @@ class KnowledgeGraphAgent(BaseAgent):
         parameters: Dict[str, Any]
     ) -> str:
         """Create system prompt for relation discovery."""
-        return f"""You are a specialized relationship discovery AI. Your task is to identify meaningful connections between entities in the knowledge graph.
-        
-        Context:
-        - Domain: {context.get('domain', 'general')}
-        - Discovery Focus: {context.get('focus', 'all')}
-        - Minimum Confidence: {parameters.get('min_confidence', 0.6)}
-        
-        Discover:
-        1. Direct relationships
-        2. Indirect connections
-        3. Hierarchical structures
-        4. Temporal relationships
-        5. Causal links
-        
-        Provide evidence and confidence scores for each discovered relationship.
-        """
+        relation_types = ", ".join(t.value for t in GraphRelationType)
+        return f"""You are a relationship discovery engine.  Given a list of existing nodes, identify meaningful connections between them.
+
+Domain: {context.get('domain', 'general')}
+Focus: {context.get('focus', 'all')}
+Minimum confidence: {parameters.get('min_confidence', 0.6)}
+
+Allowed relation types: {relation_types}
+
+OUTPUT FORMAT — STRICT
+Reply with ONE JSON object and NOTHING else.  No prose, no markdown, no fences.  The shape MUST be:
+
+{{
+  "relations": [
+    {{"source": "<label of source node>", "target": "<label of target node>", "type": "<one of the allowed relation types>", "properties": {{}}, "confidence": 0.0}}
+  ]
+}}
+
+Rules:
+- Use only the allowed relation types, lowercase, exactly as listed above.
+- Reference nodes by the labels that appeared in the user's input.
+- Confidence is a number between 0 and 1.
+- BE CONCISE: emit at most 40 relations total.  Pick the strongest, most meaningful connections.  Leave `properties` as {{}} unless genuinely informative.
+- If you cannot find any connections, return {{"relations": []}}.
+"""
 
     def _create_gap_filling_prompt(
         self,
@@ -380,118 +448,285 @@ class KnowledgeGraphAgent(BaseAgent):
         parameters: Dict[str, Any]
     ) -> str:
         """Create system prompt for gap filling."""
-        return f"""You are a specialized knowledge gap filling AI. Your task is to identify and fill gaps in the knowledge graph using reliable sources.
-        
-        Context:
-        - Domain: {context.get('domain', 'general')}
-        - Gap Types: {context.get('gap_types', 'all')}
-        - Source Quality: {parameters.get('source_quality', 'high')}
-        
-        For each gap:
-        1. Identify missing information
-        2. Research reliable sources
-        3. Extract relevant knowledge
-        4. Validate against existing graph
-        5. Provide citations and confidence scores
-        
-        Ensure all new information is well-supported and consistent with existing knowledge.
+        node_types = ", ".join(t.value for t in GraphNodeType)
+        relation_types = ", ".join(t.value for t in GraphRelationType)
+        return f"""You are a knowledge gap-filling engine.  Given a description of a gap in the user's knowledge graph and the surrounding context, propose new nodes and relations that would plausibly fill the gap.
+
+Domain: {context.get('domain', 'general')}
+Gap types: {context.get('gap_types', 'all')}
+
+Allowed node types: {node_types}
+Allowed relation types: {relation_types}
+
+OUTPUT FORMAT — STRICT
+Reply with ONE JSON object and NOTHING else.  No prose, no markdown, no fences.  The shape MUST be:
+
+{{
+  "gap_type": "<short label for the gap>",
+  "sources": ["<optional citation strings>"],
+  "confidence": 0.0,
+  "nodes": [
+    {{"label": "<short name>", "type": "<one of the allowed node types>", "properties": {{}}, "confidence": 0.0}}
+  ],
+  "relations": [
+    {{"source": "<label>", "target": "<label>", "type": "<one of the allowed relation types>", "properties": {{}}, "confidence": 0.0}}
+  ]
+}}
+
+Rules:
+- Use only the allowed type values, lowercase, exactly as listed.
+- Reference relation endpoints by the same label used in `nodes`.
+- Be conservative: only propose nodes/relations that you are reasonably confident about.
+- If you cannot fill the gap, return {{"gap_type": "<label>", "sources": [], "confidence": 0.0, "nodes": [], "relations": []}}.
+"""
+
+    @staticmethod
+    def _strip_fences(text: str) -> str:
+        """Strip ```json ... ``` fences if present; tolerate truncated
+        responses that lack the closing fence."""
+        m = re.search(
+            r"```(?:json)?\s*(\{.*\}|\[.*\])\s*```",
+            text,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if m:
+            return m.group(1).strip()
+        return re.sub(r"^```(?:json)?\s*", "", text).strip()
+
+    @staticmethod
+    def _salvage_truncated_json(text: str) -> Dict[str, Any]:
+        """Recover a usable prefix of a JSON object truncated mid-output.
+
+        Walks the string, tracks brace / bracket / string state, and
+        remembers the last position at which a top-level array element
+        (`nodes` / `relations` / `edges`) was fully closed.  Slices up
+        to that point and appends the trailing `]}` to make valid JSON.
+        Returns {} if no usable prefix exists.
         """
+        if not text or not text.lstrip().startswith("{"):
+            return {}
+        start = text.find("{")
+
+        depth_stack: List[str] = []
+        in_string = False
+        escape = False
+        reading_key = False
+        key_buffer: List[str] = []
+        current_key: Optional[str] = None
+        in_top_array = False
+        last_top_safe_cut = -1
+
+        i = start
+        while i < len(text):
+            ch = text[i]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                    if reading_key:
+                        current_key = "".join(key_buffer)
+                        key_buffer = []
+                        reading_key = False
+                elif reading_key:
+                    key_buffer.append(ch)
+                i += 1
+                continue
+
+            if ch == '"':
+                in_string = True
+                # A string is a key when the previous non-space char is
+                # `{` or `,` and we're directly inside an object.
+                if depth_stack and depth_stack[-1] == "{":
+                    j = i - 1
+                    while j >= 0 and text[j] in " \t\r\n":
+                        j -= 1
+                    if j >= 0 and text[j] in "{,":
+                        reading_key = True
+                        key_buffer = []
+            elif ch == "{":
+                depth_stack.append("{")
+            elif ch == "[":
+                depth_stack.append("[")
+                if len(depth_stack) == 2 and current_key in ("nodes", "relations", "edges"):
+                    in_top_array = True
+            elif ch == "}":
+                if depth_stack and depth_stack[-1] == "{":
+                    depth_stack.pop()
+                    if in_top_array and len(depth_stack) == 2:
+                        last_top_safe_cut = i
+            elif ch == "]":
+                if depth_stack and depth_stack[-1] == "[":
+                    depth_stack.pop()
+                    if len(depth_stack) == 1:
+                        in_top_array = False
+            i += 1
+
+        if not depth_stack or last_top_safe_cut <= start:
+            return {}
+
+        prefix = text[start : last_top_safe_cut + 1]
+        repaired = prefix + "]}"
+        try:
+            return json.loads(repaired)
+        except Exception:
+            return {}
+
+    @classmethod
+    def _extract_json(cls, response: Any) -> Dict[str, Any]:
+        """Best-effort JSON extraction from an LLM response.
+
+        Pipeline: try `json.loads` -> strip ```json``` fences -> first
+        balanced `{...}` block -> structural salvage for token-truncated
+        responses.  Returns {} if nothing usable is found.
+        """
+        if not response:
+            return {}
+        text = response.strip() if isinstance(response, str) else str(response)
+
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+
+        unfenced = cls._strip_fences(text)
+        try:
+            return json.loads(unfenced)
+        except Exception:
+            pass
+
+        s = unfenced.find("{")
+        e = unfenced.rfind("}")
+        if s != -1 and e > s:
+            try:
+                return json.loads(unfenced[s : e + 1])
+            except Exception:
+                pass
+
+        salvaged = cls._salvage_truncated_json(unfenced)
+        if salvaged:
+            logger.info(
+                "kg_llm_json_salvaged nodes=%s relations=%s",
+                len(salvaged.get("nodes") or []),
+                len(salvaged.get("relations") or []),
+            )
+            return salvaged
+
+        logger.warning(
+            "kg_llm_non_json len=%s head=%r tail=%r",
+            len(text),
+            text[:300],
+            text[-300:],
+        )
+        return {}
+
+    @staticmethod
+    def _coerce_node_type(value: Any) -> Optional[GraphNodeType]:
+        if not value:
+            return None
+        try:
+            return GraphNodeType(str(value).strip().lower())
+        except Exception:
+            return None
+
+    @staticmethod
+    def _coerce_relation_type(value: Any) -> Optional[GraphRelationType]:
+        if not value:
+            return None
+        try:
+            return GraphRelationType(str(value).strip().lower().replace(" ", "_"))
+        except Exception:
+            return None
 
     def _parse_extraction(self, response: str) -> Dict[str, Any]:
-        """Parse the model's response into structured knowledge."""
-        try:
-            data = json.loads(response)
-            return {
-                "nodes": [
-                    GraphNode(
-                        id=str(uuid4()),
-                        type=GraphNodeType(node["type"]),
-                        label=node["label"],
-                        properties=node["properties"],
-                        created_at=datetime.utcnow(),
-                        updated_at=datetime.utcnow(),
-                        confidence=node.get("confidence", 1.0)
-                    )
-                    for node in data.get("nodes", [])
-                ],
-                "relations": [
-                    GraphRelation(
-                        id=str(uuid4()),
-                        source_id=rel["source"],
-                        target_id=rel["target"],
-                        type=GraphRelationType(rel["type"]),
-                        properties=rel["properties"],
-                        created_at=datetime.utcnow(),
-                        updated_at=datetime.utcnow(),
-                        confidence=rel.get("confidence", 1.0)
-                    )
-                    for rel in data.get("relations", [])
-                ]
-            }
-        except Exception as e:
-            logger.error(f"Error parsing extraction: {str(e)}")
-            raise
+        """Parse the model's response into structured knowledge.  Skips
+        malformed entries instead of failing the whole extraction."""
+        data = self._extract_json(response)
+        nodes: List[GraphNode] = []
+        for raw in data.get("nodes", []) or []:
+            if not isinstance(raw, dict):
+                continue
+            ntype = self._coerce_node_type(raw.get("type"))
+            label = (raw.get("label") or "").strip()
+            if not ntype or not label:
+                continue
+            nodes.append(
+                GraphNode(
+                    id=str(uuid4()),
+                    type=ntype,
+                    label=label,
+                    properties=raw.get("properties") or {},
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                    confidence=float(raw.get("confidence", 1.0) or 1.0),
+                )
+            )
+
+        relations: List[GraphRelation] = []
+        for raw in (data.get("relations") or data.get("edges") or []):
+            if not isinstance(raw, dict):
+                continue
+            rtype = self._coerce_relation_type(raw.get("type"))
+            source = raw.get("source") or raw.get("source_id")
+            target = raw.get("target") or raw.get("target_id")
+            if not rtype or not source or not target:
+                continue
+            relations.append(
+                GraphRelation(
+                    id=str(uuid4()),
+                    source_id=str(source),
+                    target_id=str(target),
+                    type=rtype,
+                    properties=raw.get("properties") or {},
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                    confidence=float(raw.get("confidence", 1.0) or 1.0),
+                )
+            )
+
+        return {"nodes": nodes, "relations": relations}
 
     def _parse_discovery(self, response: str) -> List[GraphRelation]:
         """Parse the model's response into discovered relationships."""
-        try:
-            data = json.loads(response)
-            return [
+        data = self._extract_json(response)
+        out: List[GraphRelation] = []
+        for raw in (data.get("relations") or data.get("edges") or []):
+            if not isinstance(raw, dict):
+                continue
+            rtype = self._coerce_relation_type(raw.get("type"))
+            source = raw.get("source") or raw.get("source_id")
+            target = raw.get("target") or raw.get("target_id")
+            if not rtype or not source or not target:
+                continue
+            out.append(
                 GraphRelation(
                     id=str(uuid4()),
-                    source_id=rel["source"],
-                    target_id=rel["target"],
-                    type=GraphRelationType(rel["type"]),
-                    properties=rel["properties"],
+                    source_id=str(source),
+                    target_id=str(target),
+                    type=rtype,
+                    properties=raw.get("properties") or {},
                     created_at=datetime.utcnow(),
                     updated_at=datetime.utcnow(),
-                    confidence=rel.get("confidence", 1.0)
+                    confidence=float(raw.get("confidence", 1.0) or 1.0),
                 )
-                for rel in data.get("relations", [])
-            ]
-        except Exception as e:
-            logger.error(f"Error parsing discovery: {str(e)}")
-            raise
+            )
+        return out
 
     def _parse_gap_filling(self, response: str) -> Dict[str, Any]:
         """Parse the model's response into filled gap knowledge."""
-        try:
-            data = json.loads(response)
-            return {
-                "nodes": [
-                    GraphNode(
-                        id=str(uuid4()),
-                        type=GraphNodeType(node["type"]),
-                        label=node["label"],
-                        properties=node["properties"],
-                        created_at=datetime.utcnow(),
-                        updated_at=datetime.utcnow(),
-                        confidence=node.get("confidence", 1.0)
-                    )
-                    for node in data.get("nodes", [])
-                ],
-                "relations": [
-                    GraphRelation(
-                        id=str(uuid4()),
-                        source_id=rel["source"],
-                        target_id=rel["target"],
-                        type=GraphRelationType(rel["type"]),
-                        properties=rel["properties"],
-                        created_at=datetime.utcnow(),
-                        updated_at=datetime.utcnow(),
-                        confidence=rel.get("confidence", 1.0)
-                    )
-                    for rel in data.get("relations", [])
-                ],
-                "metadata": {
-                    "gap_type": data.get("gap_type"),
-                    "sources": data.get("sources", []),
-                    "confidence": data.get("confidence", 1.0)
-                }
-            }
-        except Exception as e:
-            logger.error(f"Error parsing gap filling: {str(e)}")
-            raise
+        data = self._extract_json(response)
+        parsed = self._parse_extraction(response)
+        return {
+            "nodes": parsed["nodes"],
+            "relations": parsed["relations"],
+            "metadata": {
+                "gap_type": data.get("gap_type"),
+                "sources": data.get("sources") or [],
+                "confidence": float(data.get("confidence", 1.0) or 1.0),
+            },
+        }
 
     def _add_to_graph(
         self,
@@ -667,119 +902,127 @@ class KnowledgeGraphAgent(BaseAgent):
         
         return relevant
 
-    def _find_paths(self, query: Dict[str, Any]) -> List[List[str]]:
-        """Find paths between nodes in the graph."""
+    def _node_to_brief(self, node_id: str) -> Optional[Dict[str, Any]]:
+        """Return a {id, label, type} brief for a graph node, or None
+        if the node is missing.  Used by query helpers so the frontend
+        receives renderable objects instead of bare ids."""
+        if node_id not in self.graph:
+            return None
+        data = self.graph.nodes[node_id]
+        return {
+            "id": node_id,
+            "label": data.get("label") or node_id,
+            "type": data.get("type") or "concept",
+        }
+
+    def _find_paths(self, query: Dict[str, Any]) -> Dict[str, Any]:
+        """Find shortest paths between two nodes.  Returns paths as
+        lists of {id, label, type} objects so the UI can render labels
+        directly.
+        """
         source = query.get("source")
         target = query.get("target")
-        max_length = query.get("max_length", 3)
-        
-        if not (source and target and
-                source in self.graph and
-                target in self.graph):
-            return []
-        
-        paths = []
-        for path in nx.all_simple_paths(
-            self.graph,
-            source=source,
-            target=target,
-            cutoff=max_length
-        ):
-            paths.append(path)
-        
-        return paths
+        max_length = int(query.get("max_length", 4) or 4)
+        max_paths = int(query.get("max_paths", 5) or 5)
 
-    def _find_neighbors(
-        self,
-        query: Dict[str, Any]
-    ) -> Dict[str, List[str]]:
-        """Find neighboring nodes in the graph."""
+        if not (source and target and source in self.graph and target in self.graph):
+            return {"paths": []}
+
+        paths: List[List[Dict[str, Any]]] = []
+        try:
+            # Undirected search so we don't miss paths because the
+            # LLM happened to orient one edge the "wrong" way.
+            undirected = self.graph.to_undirected(as_view=True)
+            for raw_path in nx.shortest_simple_paths(
+                undirected, source=source, target=target
+            ):
+                if len(raw_path) - 1 > max_length:
+                    break
+                resolved = [self._node_to_brief(n) for n in raw_path]
+                resolved = [n for n in resolved if n]
+                if resolved:
+                    paths.append(resolved)
+                if len(paths) >= max_paths:
+                    break
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            pass
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Path search failed: {e}")
+
+        return {"paths": paths}
+
+    def _find_neighbors(self, query: Dict[str, Any]) -> Dict[str, Any]:
+        """Return the direct neighbors of a node as a flat list of
+        {id, label, type, edge_type, direction} objects so the
+        frontend can render the row without an extra fetch.
+        """
         node_id = query.get("node_id")
-        depth = query.get("depth", 1)
-        
         if not (node_id and node_id in self.graph):
-            return {}
-        
-        neighbors = {
-            "incoming": [],
-            "outgoing": []
-        }
-        
-        # Get incoming neighbors
+            return {"neighbors": []}
+
+        out: List[Dict[str, Any]] = []
+        seen: Set[str] = set()
+
         for pred in self.graph.predecessors(node_id):
-            if depth == 1:
-                neighbors["incoming"].append(pred)
-            else:
-                for path in nx.all_simple_paths(
-                    self.graph,
-                    source=pred,
-                    target=node_id,
-                    cutoff=depth
-                ):
-                    neighbors["incoming"].extend(path[:-1])
-        
-        # Get outgoing neighbors
+            brief = self._node_to_brief(pred)
+            if not brief or brief["id"] in seen:
+                continue
+            seen.add(brief["id"])
+            try:
+                edge_attrs = self.graph.edges[pred, node_id]
+            except Exception:
+                edge_attrs = {}
+            brief["edge_type"] = edge_attrs.get("type") or "related_to"
+            brief["direction"] = "incoming"
+            out.append(brief)
+
         for succ in self.graph.successors(node_id):
-            if depth == 1:
-                neighbors["outgoing"].append(succ)
-            else:
-                for path in nx.all_simple_paths(
-                    self.graph,
-                    source=node_id,
-                    target=succ,
-                    cutoff=depth
-                ):
-                    neighbors["outgoing"].extend(path[1:])
-        
-        return neighbors
+            brief = self._node_to_brief(succ)
+            if not brief or brief["id"] in seen:
+                continue
+            seen.add(brief["id"])
+            try:
+                edge_attrs = self.graph.edges[node_id, succ]
+            except Exception:
+                edge_attrs = {}
+            brief["edge_type"] = edge_attrs.get("type") or "related_to"
+            brief["direction"] = "outgoing"
+            out.append(brief)
+
+        return {"neighbors": out, "center": self._node_to_brief(node_id)}
 
     def _search_graph(
         self,
         query: Dict[str, Any]
-    ) -> List[Dict[str, Any]]:
-        """Search the graph for nodes and relationships."""
-        search_term = query.get("term", "").lower()
+    ) -> Dict[str, Any]:
+        """Search the graph for nodes whose label contains `term`.
+        Returns a flat list of {id, label, type, confidence} matches
+        so the frontend autocomplete can render them directly.  Caps
+        results so an LLM-prompted search never balloons the response.
+        """
+        search_term = (query.get("term") or "").strip().lower()
         node_type = query.get("node_type")
-        min_confidence = query.get("min_confidence", 0.0)
-        
-        results = []
+        min_confidence = float(query.get("min_confidence", 0.0) or 0.0)
+        limit = int(query.get("limit", 25) or 25)
+
+        matches: List[Dict[str, Any]] = []
         for node_id, node_data in self.graph.nodes(data=True):
-            # Check search term
-            if search_term not in node_data["label"].lower():
+            label = (node_data.get("label") or "").lower()
+            if search_term and search_term not in label:
                 continue
-            
-            # Check node type
-            if node_type and node_data["type"] != node_type:
+            if node_type and node_data.get("type") != node_type:
                 continue
-            
-            # Check confidence
-            if node_data["confidence"] < min_confidence:
+            if float(node_data.get("confidence", 1.0) or 1.0) < min_confidence:
                 continue
-            
-            # Get node relationships
-            relationships = {
-                "incoming": [
-                    {
-                        "node": pred,
-                        "edge": self.graph.edges[pred, node_id]
-                    }
-                    for pred in self.graph.predecessors(node_id)
-                ],
-                "outgoing": [
-                    {
-                        "node": succ,
-                        "edge": self.graph.edges[node_id, succ]
-                    }
-                    for succ in self.graph.successors(node_id)
-                ]
-            }
-            
-            results.append({
-                "node": node_data,
-                "relationships": relationships
+            matches.append({
+                "id": node_id,
+                "label": node_data.get("label") or node_id,
+                "type": node_data.get("type") or "concept",
+                "confidence": float(node_data.get("confidence", 1.0) or 1.0),
             })
-        
-        return results
+            if len(matches) >= limit:
+                break
+        return {"matches": matches, "total": len(matches)}
 
     def _extract_subgraph(
         self,
@@ -852,35 +1095,44 @@ class KnowledgeGraphAgent(BaseAgent):
         subgraph: nx.DiGraph,
         parameters: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Create data for graph visualization."""
-        layout = nx.spring_layout(subgraph)
-        
-        return {
-            "nodes": [
-                {
-                    "id": node,
-                    "label": subgraph.nodes[node]["label"],
-                    "type": subgraph.nodes[node]["type"],
-                    "properties": subgraph.nodes[node]["properties"],
-                    "position": {
-                        "x": float(layout[node][0]),
-                        "y": float(layout[node][1])
-                    },
-                    "confidence": subgraph.nodes[node]["confidence"]
-                }
-                for node in subgraph.nodes
-            ],
-            "edges": [
-                {
-                    "source": u,
-                    "target": v,
-                    "type": subgraph.edges[u, v]["type"],
-                    "properties": subgraph.edges[u, v]["properties"],
-                    "confidence": subgraph.edges[u, v]["confidence"]
-                }
-                for u, v in subgraph.edges
-            ]
-        }
+        """Create data for graph visualization.  Coords are emitted as
+        flat `x` / `y` fields on the node so the frontend SVG renderer
+        can read them directly without an extra `position` indirection."""
+        if subgraph.number_of_nodes() == 0:
+            return {"nodes": [], "edges": []}
+        try:
+            layout = nx.spring_layout(subgraph, seed=42)
+        except Exception:
+            # Spring layout can rarely fail on disconnected single-node
+            # subgraphs; fall back to a circular placement.
+            layout = nx.circular_layout(subgraph)
+
+        nodes_payload = []
+        for node in subgraph.nodes:
+            attrs = subgraph.nodes[node]
+            pos = layout.get(node, (0.0, 0.0))
+            nodes_payload.append({
+                "id": node,
+                "label": attrs.get("label") or str(node),
+                "type": attrs.get("type") or "concept",
+                "properties": attrs.get("properties") or {},
+                "x": float(pos[0]),
+                "y": float(pos[1]),
+                "confidence": float(attrs.get("confidence", 1.0) or 1.0),
+            })
+
+        edges_payload = []
+        for u, v in subgraph.edges:
+            attrs = subgraph.edges[u, v]
+            edges_payload.append({
+                "source": u,
+                "target": v,
+                "type": attrs.get("type") or "related_to",
+                "properties": attrs.get("properties") or {},
+                "confidence": float(attrs.get("confidence", 1.0) or 1.0),
+            })
+
+        return {"nodes": nodes_payload, "edges": edges_payload}
 
     def _get_graph_stats(self) -> Dict[str, Any]:
         """Get statistics about the knowledge graph."""
@@ -907,25 +1159,12 @@ class KnowledgeGraphAgent(BaseAgent):
             "is_dag": nx.is_directed_acyclic_graph(self.graph)
         }
 
-    def _load_graph(self) -> None:
-        """Load the knowledge graph from storage."""
-        try:
-            graph_path = self.config.get("graph_storage_path")
-            if graph_path and os.path.exists(graph_path):
-                self.graph = nx.read_gpickle(graph_path)
-                logger.info(f"Loaded knowledge graph from {graph_path}")
-        except Exception as e:
-            logger.error(f"Error loading knowledge graph: {str(e)}")
-
-    def _save_graph(self) -> None:
-        """Save the knowledge graph to storage."""
-        try:
-            graph_path = self.config.get("graph_storage_path")
-            if graph_path:
-                nx.write_gpickle(self.graph, graph_path)
-                logger.info(f"Saved knowledge graph to {graph_path}")
-        except Exception as e:
-            logger.error(f"Error saving knowledge graph: {str(e)}")
+    # NOTE: the previous `_load_graph` / `_save_graph` implementations
+    # used `nx.read_gpickle` / `nx.write_gpickle`, both removed in
+    # NetworkX 3.0, and shared a single global graph across all tenants.
+    # Persistence is now per-organization in Postgres via
+    # `backend.services.knowledge_graph.repository`, which the service
+    # wrapper invokes around every `process_async` call.
 
     def _node_to_dict(self, node: GraphNode) -> Dict[str, Any]:
         """Convert a GraphNode to a dictionary."""
