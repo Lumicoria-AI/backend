@@ -121,32 +121,33 @@ def _new_agent(provider: Optional[str], model_override: Optional[str]):
 async def _load_text_from_rag(
     rag_document_id: str, user_id: str, org_id: str
 ) -> str:
-    """Resolve a RAG document id to its plain text.  Tenant-scoped via
-    the org_id check so a leaked id cannot pull a foreign document."""
+    """Resolve a RAG document id to its full extracted plain text.
+
+    Delegates to `services.document_text_loader.load_extracted_text`,
+    which runs the same MIME-aware parser registry the ingestion
+    pipeline uses (PyMuPDF / Docling / PlainTextParser / etc.) — so a
+    PDF arrives at the LLM as readable prose instead of `%PDF-1.3...`
+    binary mojibake.
+    """
     try:
-        from ..rag_document_registry import get as registry_get
-        from ..storage_service import storage_service
+        from ..document_text_loader import (
+            DocumentNotFoundError,
+            DocumentTextLoadError,
+            load_extracted_text,
+        )
     except Exception as e:  # noqa: BLE001
         raise RuntimeError(f"Document storage unavailable: {e}")
 
-    doc = await registry_get(rag_document_id, user_id=user_id)
-    if not doc:
-        raise FileNotFoundError("Document not found")
-
-    doc_org = doc.get("organization_id")
-    if doc_org and doc_org != org_id and doc.get("user_id") != org_id:
-        raise FileNotFoundError("Document not found")
-
     try:
-        raw = await storage_service.download_file(doc["s3_key"])
-    except Exception as e:  # noqa: BLE001
-        raise RuntimeError(f"Could not fetch document: {e}")
-
-    try:
-        text = raw.decode("utf-8", errors="replace")
-    except Exception:
-        text = str(raw)
-    return clean_text(text, max_len=MAX_DOCUMENT_CHARS)
+        return await load_extracted_text(
+            document_id=rag_document_id,
+            user_id=user_id,
+            organization_id=org_id,
+        )
+    except DocumentNotFoundError as e:
+        raise FileNotFoundError(str(e))
+    except DocumentTextLoadError as e:
+        raise RuntimeError(str(e))
 
 
 # ── Public entry point ─────────────────────────────────────────────

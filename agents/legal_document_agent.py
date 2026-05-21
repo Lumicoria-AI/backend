@@ -826,22 +826,64 @@ Rules:
     # ── Confidence + derived metrics ──────────────────────────
 
     def _calculate_confidence(self, response: str) -> float:
-        """Average the per-item `confidence` fields when present; fall
-        back to 0.85 if the LLM didn't emit any."""
+        """Confidence in the run.
+
+        Strategy, in order of preference:
+          1. Average the per-item `confidence` fields when the prompt's
+             schema asks for them (clause extraction, risk analysis).
+          2. Use a top-level `confidence` if the LLM emitted one.
+          3. Otherwise, infer from "did we get a substantive result?".
+             Plain Language, Compliance Check, and Version Comparison
+             schemas don't carry per-item confidence — but if they
+             returned content, that's still a confident run.  Return
+             0.85 as a reasonable default rather than misleading 0%.
+        """
         data = self._extract_json(response)
+        if not data:
+            return 0.0
+
+        # (1) Per-item confidence averaging.
         all_items: List[Any] = []
         for key in ("clauses", "key_clauses", "risks", "issues", "changes"):
             all_items.extend(self._as_list(data.get(key) or (data.get("extracted_data") or {}).get(key)))
-        scores = []
+        scores: List[float] = []
         for item in all_items:
             if isinstance(item, dict) and "confidence" in item:
                 try:
                     scores.append(float(item["confidence"]))
                 except Exception:
                     pass
-        if not scores:
-            return 0.85 if all_items else 0.0
-        return round(sum(scores) / len(scores), 3)
+        if scores:
+            return round(sum(scores) / len(scores), 3)
+
+        # (2) Top-level confidence if the model added one.
+        top = data.get("confidence")
+        if isinstance(top, (int, float)):
+            try:
+                v = float(top)
+                if v > 1.0:
+                    v = v / 100.0  # tolerate "85" as well as "0.85"
+                return round(max(0.0, min(1.0, v)), 3)
+            except Exception:
+                pass
+
+        # (3) Did the response carry substantive content for THIS mode?
+        # Look for any non-empty array or non-empty narrative field
+        # across every key we know about across modes.
+        substantive_keys = (
+            "clauses", "key_clauses", "obligations", "deadlines", "dates",
+            "risks", "issues", "changes",
+            "summary", "key_points", "obligations_in_plain_english",
+            "watch_outs", "glossary",
+            "recommendations", "compliant_areas",
+        )
+        for key in substantive_keys:
+            val = data.get(key)
+            if isinstance(val, list) and len(val) > 0:
+                return 0.85
+            if isinstance(val, str) and val.strip():
+                return 0.85
+        return 0.0
 
     def _calculate_risk_level(self, risks: List[Dict[str, Any]]) -> str:
         if not risks:

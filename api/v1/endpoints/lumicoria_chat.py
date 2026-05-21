@@ -934,6 +934,76 @@ async def upload_document(
         agent_name="Document Agent",
     )
 
+    # Best-effort mirror into the Mongo `documents` collection so the
+    # uploaded file shows up on the global /documents page alongside
+    # the RAG pipeline.  Failures here never break the upload — the
+    # primary record lives in Postgres `rag_documents`.
+    #
+    # We bypass `create_document()` deliberately: that helper forces
+    # ObjectId on `created_by` and `organization_id`, which fails when
+    # the auth layer hands us a UUID or Firebase UID.  Instead we
+    # insert directly and convert each id only when it is already a
+    # valid 24-char hex ObjectId.  The list endpoint
+    # (`get_documents_by_user`) already tries `ObjectId(user_id)` and
+    # falls back to a plain string filter, so storing whichever shape
+    # the auth layer gave us is always queryable.
+    try:
+        from bson import ObjectId
+        from bson.errors import InvalidId
+        from ....db.mongodb.mongodb import MongoDB
+        from ....models.document import DocumentStatus, DocumentType
+
+        def _as_id_or_str(val):
+            if not isinstance(val, str):
+                return val
+            try:
+                return ObjectId(val)
+            except (InvalidId, TypeError, ValueError):
+                return val
+
+        ext = file_ext.lower() if file_ext else ""
+        ext_to_type = {
+            ".pdf": DocumentType.PDF,
+            ".docx": DocumentType.DOCX,
+            ".doc": DocumentType.DOCX,
+            ".txt": DocumentType.TXT,
+            ".md": DocumentType.TXT,
+            ".png": DocumentType.IMAGE,
+            ".jpg": DocumentType.IMAGE,
+            ".jpeg": DocumentType.IMAGE,
+            ".xlsx": DocumentType.SPREADSHEET,
+            ".csv": DocumentType.SPREADSHEET,
+            ".pptx": DocumentType.PRESENTATION,
+        }
+        doc_type = ext_to_type.get(ext, DocumentType.OTHER)
+
+        now = datetime.utcnow()
+        mongo_doc = {
+            "name": title or original_filename,
+            "document_type": doc_type.value,
+            "organization_id": _as_id_or_str(organization_id or user_id),
+            "created_by": _as_id_or_str(user_id),
+            "file_url": s3_key,
+            "file_size": len(file_bytes),
+            "mime_type": content_type,
+            "status": DocumentStatus.UPLOADED.value,
+            "metadata": {
+                "rag_document_id": document_id,
+                "source": "upload",
+                "original_filename": original_filename,
+            },
+            "created_at": now,
+            "updated_at": now,
+        }
+        collection = await MongoDB.get_collection("documents")
+        await collection.insert_one(mongo_doc)
+    except Exception as mirror_err:  # noqa: BLE001
+        logger.warning(
+            "mongo_documents_mirror_failed",
+            error=str(mirror_err),
+            document_id=document_id,
+        )
+
     return {
         "message": "Document uploaded and processing started",
         "status": "processing",
