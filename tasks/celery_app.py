@@ -34,11 +34,21 @@ def _build_result_backend() -> str:
     return settings.CELERY_RESULT_BACKEND or _build_broker_url()
 
 
+def _weekly_monday_9am():
+    """Monday 09:00 UTC, using celery.schedules.crontab.  Defined as a
+    helper so the import only fires when beat actually loads."""
+    from celery.schedules import crontab
+    return crontab(hour=9, minute=0, day_of_week="monday")
+
+
 celery_app = Celery(
     "lumicoria",
     broker=_build_broker_url(),
     backend=_build_result_backend(),
-    include=["backend.tasks.document_tasks"],
+    include=[
+        "backend.tasks.document_tasks",
+        "backend.tasks.wellbeing_tasks",
+    ],
 )
 
 
@@ -69,3 +79,27 @@ celery_app.conf.update(
 
 # Let future modules drop into backend/tasks/ without a config edit.
 celery_app.autodiscover_tasks(["backend.tasks"])
+
+
+# ── Periodic schedule (Celery beat) ────────────────────────────────
+#
+# Run with `celery -A backend.tasks.celery_app beat --loglevel=info`
+# alongside a worker.  In dev with `CELERY_TASK_ALWAYS_EAGER=true`
+# the API process can drive these on its own via `crontab` ticks.
+celery_app.conf.beat_schedule = {
+    # Periodic break-reminder check.  Every 5 minutes.
+    "wellbeing-check-break-reminders": {
+        "task": "wellbeing.check_break_reminders",
+        "schedule": 300.0,  # seconds
+    },
+    # Random mood-prompt scheduler.  Every 20 minutes.
+    "wellbeing-schedule-mood-prompts": {
+        "task": "wellbeing.schedule_mood_prompts",
+        "schedule": 1200.0,
+    },
+    # Weekly digest — Monday 09:00 UTC.
+    "wellbeing-send-weekly-digest": {
+        "task": "wellbeing.send_weekly_digest",
+        "schedule": _weekly_monday_9am(),
+    },
+}

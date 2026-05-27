@@ -55,8 +55,9 @@ class CassandraWellbeingRepository:
             except Exception:
                 pass
         return {
-            "organization_id": organization_id,
-            "user_id": user_id,
+            "id": f"{str(user_id)}:{ts.isoformat()}",
+            "organization_id": str(organization_id),
+            "user_id": str(user_id),
             "metric_type": metric_type,
             "value": value,
             "source": source,

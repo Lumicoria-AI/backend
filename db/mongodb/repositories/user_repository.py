@@ -159,6 +159,17 @@ class UserRepository(BaseRepository[UserInDB]):
 
     async def create_user_settings(self, user_id: str, settings: UserSettings) -> UserSettings:
         settings_dict = settings.model_dump()
+        # Wellbeing is mandatory on the platform — make sure the
+        # break-reminder + work-hour defaults are sensible regardless
+        # of what the caller passed in.  Users can adjust later.
+        settings_dict.setdefault("break_reminders", True)
+        settings_dict.setdefault("email_notifications", True)
+        settings_dict.setdefault("work_hours_start", "09:00")
+        settings_dict.setdefault("work_hours_end", "17:00")
+        settings_dict.setdefault("break_interval_minutes", 60)
+        settings_dict.setdefault("break_duration_minutes", 5)
+        if settings_dict.get("break_reminders") is None:
+            settings_dict["break_reminders"] = True
         settings_dict["user_id"] = ObjectId(user_id)
         settings_dict["created_at"] = datetime.utcnow()
         result = await self.settings_collection.insert_one(settings_dict)

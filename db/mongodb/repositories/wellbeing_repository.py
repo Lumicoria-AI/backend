@@ -95,9 +95,19 @@ class WellbeingRepository(BaseRepository[WellbeingData]):
         timestamp: Optional[datetime] = None
     ) -> Dict[str, Any]:
         collection = await self._get_metrics_collection()
+
+        def _to_object_id(value: Any) -> Any:
+            try:
+                return ObjectId(str(value))
+            except Exception:
+                return str(value)
+
+        user_oid = _to_object_id(user_id)
+        org_oid = _to_object_id(organization_id)
+
         doc = {
-            "user_id": ObjectId(user_id),
-            "organization_id": ObjectId(organization_id),
+            "user_id": user_oid,
+            "organization_id": org_oid,
             "metric_type": metric_type,
             "value": value,
             "metadata": metadata or {},
@@ -109,8 +119,8 @@ class WellbeingRepository(BaseRepository[WellbeingData]):
         doc["_id"] = result.inserted_id
         return {
             "id": str(doc["_id"]),
-            "user_id": user_id,
-            "organization_id": organization_id,
+            "user_id": str(user_id),
+            "organization_id": str(organization_id),
             "metric_type": metric_type,
             "value": value,
             "metadata": metadata or {},
@@ -492,35 +502,43 @@ class WellbeingRepository(BaseRepository[WellbeingData]):
         user_id: str,
         metrics: List[str]
     ) -> Dict[str, float]:
-        """Get the most recent value for specified metrics for a user."""
-        match = {"user_id": ObjectId(user_id)}
+        """Get the most recent value for specified metrics for a user.
+
+        Driven directly off the raw metrics collection so we can pass
+        a projection — the base repository's ``find_one`` does not
+        accept one.
+        """
+        try:
+            object_user_id: Any = ObjectId(user_id)
+        except Exception:
+            object_user_id = user_id
+
+        collection = await self._get_metrics_collection()
         projection = {
-            "metrics_history": {
-                "$elemMatch": {
-                    "metrics": {
-                        "$elemMatch": {
-                            "$in": metrics
-                        }
-                    }
-                }
-            }
+            "metric_type": 1,
+            "value": 1,
+            "timestamp": 1,
+            "_id": 0,
         }
 
-        results = await self.find_one(
-            match,
-            projection=projection
-        )
-
-        if results:
-            metrics_history = results["metrics_history"]
-            latest_metrics = {}
-            for history in metrics_history:
-                for metric, value in history["metrics"].items():
-                    if metric in metrics:
-                        latest_metrics[metric] = value
-            return latest_metrics
-        else:
-            return {}
+        latest_metrics: Dict[str, float] = {}
+        for metric_type in metrics:
+            doc = await collection.find_one(
+                {
+                    "$and": [
+                        {"user_id": {"$in": [object_user_id, user_id]}},
+                        {"metric_type": metric_type},
+                    ]
+                },
+                projection=projection,
+                sort=[("timestamp", -1)],
+            )
+            if doc and "value" in doc:
+                try:
+                    latest_metrics[metric_type] = float(doc["value"])
+                except (TypeError, ValueError):
+                    continue
+        return latest_metrics
 
     # ── Methods required by the wellbeing API endpoints ─────────────────
 
@@ -601,6 +619,11 @@ class WellbeingRepository(BaseRepository[WellbeingData]):
         }
         result = await collection.insert_one(doc)
         doc["id"] = str(result.inserted_id)
+        # ``insert_one`` mutates the doc and adds a Mongo ObjectId in
+        # ``_id`` — strip it so the dict is JSON-safe for FastAPI.
+        doc.pop("_id", None)
+        if isinstance(doc.get("created_at"), datetime):
+            doc["created_at"] = doc["created_at"].isoformat()
         return doc
 
     async def get_recent_activities(
@@ -619,7 +642,27 @@ class WellbeingRepository(BaseRepository[WellbeingData]):
             sort=[("created_at", DESCENDING)],
             limit=limit,
         )
-        return await cursor.to_list(length=limit)
+        docs = await cursor.to_list(length=limit)
+        cleaned: List[Dict[str, Any]] = []
+        for doc in docs:
+            cleaned.append({
+                "id": str(doc.get("_id")) if doc.get("_id") is not None else None,
+                "user_id": str(doc.get("user_id")) if doc.get("user_id") is not None else None,
+                "organization_id": str(doc.get("organization_id"))
+                if doc.get("organization_id") is not None
+                else None,
+                "record_type": doc.get("record_type"),
+                "activity_type": doc.get("activity_type"),
+                "duration_minutes": doc.get("duration_minutes"),
+                "metadata": doc.get("metadata") or {},
+                "created_at": doc.get("created_at").isoformat()
+                if isinstance(doc.get("created_at"), datetime)
+                else doc.get("created_at"),
+                "timestamp": doc.get("timestamp").isoformat()
+                if isinstance(doc.get("timestamp"), datetime)
+                else doc.get("timestamp"),
+            })
+        return cleaned
 
     async def get_last_break_time(
         self,

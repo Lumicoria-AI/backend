@@ -50,6 +50,22 @@ class ActivityType(str, Enum):
     LEARNING = "learning"       # Educational activities
     MINDFULNESS = "mindfulness" # Mindfulness practices
     CUSTOM = "custom"           # Custom activities
+    # Coach-surface aliases — the live UI uses the natural names below.
+    BREAK = "break"             # Short break (Coach break timer)
+    EXERCISE = "exercise"       # Workout / movement session
+    MEDITATION = "meditation"   # Meditation session
+    WALKING = "walking"         # Walk
+    SLEEP = "sleep"             # Sleep log
+    NUTRITION = "nutrition"     # Meals / snacks
+    HYDRATION = "hydration"     # Water / drinks
+    # BreakType passthroughs — the /break-recommendation response uses
+    # the BreakType enum, and the frontend reuses the same string when
+    # the user clicks "Take this break" → log as an activity.
+    MICRO_BREAK = "micro_break"   # 5–10 min
+    SHORT_BREAK = "short_break"   # 15–30 min
+    LUNCH_BREAK = "lunch_break"   # 30–60 min
+    LONG_BREAK = "long_break"     # 1–2 hours
+    REST_DAY = "rest_day"         # full day
 
 class WellbeingMetricBase(BaseModel):
     """Base model for wellbeing metrics."""

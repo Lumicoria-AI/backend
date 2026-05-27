@@ -1,32 +1,87 @@
 {% extends "base.html" %}
 
-{% block title %}Your Weekly Digest - Lumicoria.ai{% endblock %}
+{% block title %}Your Weekly Wellness Digest - Lumicoria.ai{% endblock %}
 
 {% block content %}
-<p class="greeting">Hi {{ user_name }}, here's your week in review 📊</p>
+<p class="greeting">Hi {{ user_name }}, here's your week 💚</p>
 
 <p class="main-text">
-    Check out what you accomplished this week with the help of your AI agents.
+    A snapshot of your wellness and productivity, and a few thoughts from your coach.
 </p>
 
 <!-- Stats Overview -->
 <div style="display: flex; gap: 12px; flex-wrap: wrap; margin: 24px 0;">
     <div
         style="flex: 1; min-width: 120px; background: linear-gradient(135deg, #EDE9FE 0%, #F3E8FF 100%); padding: 20px; border-radius: 16px; text-align: center;">
-        <div style="font-size: 32px; font-weight: 700; color: #7C3AED;">{{ tasks_completed | default('0') }}</div>
+        <div style="font-size: 32px; font-weight: 700; color: #7C3AED;">{{ productivity.tasks_completed_week | default(tasks_completed | default('0')) }}</div>
         <div style="font-size: 12px; color: #6B7280; margin-top: 4px;">Tasks Completed</div>
     </div>
     <div
         style="flex: 1; min-width: 120px; background: linear-gradient(135deg, #D1FAE5 0%, #ECFDF5 100%); padding: 20px; border-radius: 16px; text-align: center;">
-        <div style="font-size: 32px; font-weight: 700; color: #10B981;">{{ documents_processed | default('0') }}</div>
-        <div style="font-size: 12px; color: #6B7280; margin-top: 4px;">Docs Processed</div>
+        <div style="font-size: 32px; font-weight: 700; color: #10B981;">{{ productivity.agent_runs_today | default(documents_processed | default('0')) }}</div>
+        <div style="font-size: 12px; color: #6B7280; margin-top: 4px;">Agent Runs</div>
     </div>
     <div
         style="flex: 1; min-width: 120px; background: linear-gradient(135deg, #FEF3C7 0%, #FFFBEB 100%); padding: 20px; border-radius: 16px; text-align: center;">
-        <div style="font-size: 32px; font-weight: 700; color: #D97706;">{{ focus_hours | default('0') }}h</div>
-        <div style="font-size: 12px; color: #6B7280; margin-top: 4px;">Focus Time</div>
+        <div style="font-size: 32px; font-weight: 700; color: #D97706;">{{ productivity.streak_days | default('0') }}</div>
+        <div style="font-size: 12px; color: #6B7280; margin-top: 4px;">Day Streak</div>
     </div>
 </div>
+
+<!-- Coach Reflection -->
+{% if reflection and reflection.summary %}
+<div class="info-card" style="background: linear-gradient(135deg, #F0FDF4 0%, #ECFDF5 100%); border-left: 4px solid #10B981; padding: 20px; border-radius: 16px; margin: 24px 0;">
+    <p class="info-card-title" style="font-weight: 700; color: #065F46; margin-bottom: 8px;">💚 Your Coach's Reflection</p>
+    <p style="color: #064E3B; line-height: 1.6; margin: 0;">{{ reflection.summary }}</p>
+</div>
+{% endif %}
+
+{% if reflection and (reflection.highlights or reflection.concerns) %}
+<div style="display: flex; gap: 12px; flex-wrap: wrap; margin: 24px 0;">
+    {% if reflection.highlights and reflection.highlights|length > 0 %}
+    <div style="flex: 1; min-width: 240px; background: #F9FAFB; padding: 18px; border-radius: 16px;">
+        <p style="font-size: 12px; font-weight: 700; color: #10B981; margin-bottom: 10px; letter-spacing: 0.5px; text-transform: uppercase;">Highlights</p>
+        <ul style="margin: 0; padding-left: 18px; color: #374151; line-height: 1.7; font-size: 14px;">
+            {% for item in reflection.highlights %}<li>{{ item }}</li>{% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+    {% if reflection.concerns and reflection.concerns|length > 0 %}
+    <div style="flex: 1; min-width: 240px; background: #FFFBEB; padding: 18px; border-radius: 16px;">
+        <p style="font-size: 12px; font-weight: 700; color: #D97706; margin-bottom: 10px; letter-spacing: 0.5px; text-transform: uppercase;">Worth Watching</p>
+        <ul style="margin: 0; padding-left: 18px; color: #374151; line-height: 1.7; font-size: 14px;">
+            {% for item in reflection.concerns %}<li>{{ item }}</li>{% endfor %}
+        </ul>
+    </div>
+    {% endif %}
+</div>
+{% endif %}
+
+{% if reflection and reflection.focus_for_next_week and reflection.focus_for_next_week|length > 0 %}
+<div style="background: linear-gradient(135deg, #EDE9FE 0%, #F3E8FF 100%); padding: 20px; border-radius: 16px; margin: 24px 0;">
+    <p style="font-size: 12px; font-weight: 700; color: #7C3AED; margin-bottom: 10px; letter-spacing: 0.5px; text-transform: uppercase;">Focus for Next Week</p>
+    <ul style="margin: 0; padding-left: 18px; color: #1F2937; line-height: 1.7; font-size: 14px;">
+        {% for item in reflection.focus_for_next_week %}<li>{{ item }}</li>{% endfor %}
+    </ul>
+</div>
+{% endif %}
+
+<!-- Metrics summary -->
+{% if metrics_summary and metrics_summary.items()|list|length > 0 %}
+<div class="info-card">
+    <p class="info-card-title">📊 How you felt this week</p>
+    <div class="info-card-content">
+        <table style="width: 100%; border-collapse: collapse;">
+            {% for mtype, bucket in metrics_summary.items() %}
+            <tr style="{% if not loop.last %}border-bottom: 1px solid #E5E7EB;{% endif %}">
+                <td style="padding: 10px 0; color: #1F2937;"><strong style="text-transform: capitalize;">{{ mtype | replace('_', ' ') }}</strong></td>
+                <td style="padding: 10px 0; color: #6B7280; text-align: right;">avg {{ bucket.avg }} ({{ bucket.count }} logs)</td>
+            </tr>
+            {% endfor %}
+        </table>
+    </div>
+</div>
+{% endif %}
 
 {% if productivity_trend %}
 <div class="highlight-box"
@@ -103,14 +158,20 @@
 </div>
 {% endif %}
 
+{% if reflection and reflection.encouragement %}
+<p class="main-text text-center" style="font-style: italic; color: #065F46; margin-top: 24px; font-size: 15px;">
+    {{ reflection.encouragement }}
+</p>
+{% endif %}
+
 <div class="button-container">
-    <a href="{{ dashboard_url | default('https://lumicoria.ai/dashboard') }}" class="primary-button">
-        View Full Report
+    <a href="{{ dashboard_url | default('https://lumicoria.ai/wellbeing') }}" class="primary-button">
+        Open the Coach
     </a>
 </div>
 
 <p class="main-text text-center text-sm" style="color: #9CA3AF; margin-top: 24px;">
-    Keep up the great work! Your AI agents are here to help you succeed.<br>
+    Your Well-being Coach watches the platform with you so you don't have to.<br>
     <a href="https://lumicoria.ai/settings/digest" style="color: #7C3AED;">Manage digest settings</a>
 </p>
 {% endblock %}
