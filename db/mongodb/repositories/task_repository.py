@@ -429,7 +429,7 @@ class TaskRepository(BaseRepository[Task]):
                 "$lte": end_date
             }
         }
-        
+
         if user_id:
             filters["assigned_to"] = ObjectId(user_id)
 
@@ -437,6 +437,160 @@ class TaskRepository(BaseRepository[Task]):
             filters,
             sort=[("due_date", ASCENDING)]
         )
+
+    # ── CRUD helpers used by the /tasks API endpoint ───────────────────────
+    # These wrap the BaseRepository primitives with org-scoped lookups so the
+    # API layer (backend/api/v1/endpoints/tasks.py) gets tenant isolation for
+    # free.  Org IDs may arrive as ObjectId strings, UUIDs, or Firebase UIDs;
+    # we coerce to ObjectId where possible and fall back to a string compare.
+
+    @staticmethod
+    def _coerce_oid(value: Optional[str]) -> Optional[Any]:
+        """ObjectId if `value` looks like one, otherwise the original string."""
+        if value is None:
+            return None
+        if isinstance(value, ObjectId):
+            return value
+        try:
+            return ObjectId(str(value))
+        except Exception:
+            return str(value)
+
+    async def get_task_by_id(
+        self,
+        task_id: str,
+        organization_id: Optional[str] = None,
+    ) -> Optional[Task]:
+        """Fetch a task by id, optionally constrained to an organization."""
+        oid = self._coerce_oid(task_id)
+        if not isinstance(oid, ObjectId):
+            return None
+        collection = await self.collection
+        query: Dict[str, Any] = {"_id": oid}
+        if organization_id:
+            query["organization_id"] = self._coerce_oid(organization_id)
+        doc = await collection.find_one(query)
+        return Task(**doc) if doc else None
+
+    async def update_task(
+        self,
+        task_id: str,
+        organization_id: str,
+        update_data: Dict[str, Any],
+    ) -> Optional[Task]:
+        """Org-scoped task update.  Records `status_history` automatically
+        when `status` is in the patch so UI status changes are auditable."""
+        oid = self._coerce_oid(task_id)
+        if not isinstance(oid, ObjectId):
+            return None
+        collection = await self.collection
+
+        # Strip Nones, never let the caller overwrite identity fields.
+        cleaned = {
+            k: v for k, v in (update_data or {}).items()
+            if v is not None and k not in {"_id", "id", "created_by", "organization_id", "created_at"}
+        }
+        if not cleaned:
+            return await self.get_task_by_id(task_id, organization_id)
+
+        # Coerce assignee to ObjectId when possible.
+        if "assigned_to" in cleaned and cleaned["assigned_to"]:
+            cleaned["assigned_to"] = self._coerce_oid(cleaned["assigned_to"])
+
+        cleaned["updated_at"] = datetime.utcnow()
+
+        update_doc: Dict[str, Any] = {"$set": cleaned}
+
+        # Auto-historize status changes through this generic path.
+        if "status" in cleaned:
+            update_doc["$push"] = {
+                "status_history": {
+                    "status": cleaned["status"],
+                    "changed_at": datetime.utcnow(),
+                }
+            }
+
+        query: Dict[str, Any] = {"_id": oid}
+        if organization_id:
+            query["organization_id"] = self._coerce_oid(organization_id)
+
+        result = await collection.find_one_and_update(
+            query, update_doc, return_document=True
+        )
+        return Task(**result) if result else None
+
+    async def delete_task(
+        self,
+        task_id: str,
+        organization_id: str,
+    ) -> bool:
+        """Org-scoped task delete."""
+        oid = self._coerce_oid(task_id)
+        if not isinstance(oid, ObjectId):
+            return False
+        collection = await self.collection
+        query: Dict[str, Any] = {"_id": oid}
+        if organization_id:
+            query["organization_id"] = self._coerce_oid(organization_id)
+        result = await collection.delete_one(query)
+        return result.deleted_count > 0
+
+    async def get_task_analytics(
+        self,
+        organization_id: str,
+        user_id: Optional[str] = None,
+        time_range: str = "7d",
+    ) -> Dict[str, Any]:
+        """Lightweight analytics for the /tasks/analytics endpoint.
+
+        Returns counts by status, totals, completion rate, and a per-day
+        completion series for the requested window (1d / 7d / 30d / 90d / 1y).
+        """
+        window_days = {"1d": 1, "7d": 7, "30d": 30, "90d": 90, "1y": 365}.get(time_range, 7)
+        since = datetime.utcnow() - timedelta(days=window_days)
+
+        match: Dict[str, Any] = {
+            "organization_id": self._coerce_oid(organization_id),
+            "created_at": {"$gte": since},
+        }
+        if user_id:
+            match["assigned_to"] = self._coerce_oid(user_id)
+
+        collection = await self.collection
+
+        # Bucket by status
+        status_pipeline = [
+            {"$match": match},
+            {"$group": {"_id": "$status", "count": {"$sum": 1}}},
+        ]
+        status_rows = await collection.aggregate(status_pipeline).to_list(length=None)
+        by_status = {row["_id"] or "unknown": row["count"] for row in status_rows}
+        total = sum(by_status.values())
+        completed = by_status.get("completed", 0) + by_status.get(TaskStatus.COMPLETED, 0)
+
+        # Completion series (per-day)
+        completion_pipeline = [
+            {"$match": {**match, "status": {"$in": ["completed", TaskStatus.COMPLETED]}}},
+            {
+                "$group": {
+                    "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$updated_at"}},
+                    "count": {"$sum": 1},
+                }
+            },
+            {"$sort": {"_id": 1}},
+        ]
+        completion_rows = await collection.aggregate(completion_pipeline).to_list(length=None)
+        by_day = {row["_id"]: row["count"] for row in completion_rows if row["_id"]}
+
+        return {
+            "time_range": time_range,
+            "since": since.isoformat() + "Z",
+            "total": total,
+            "completed": completed,
+            "completion_rate": (completed / total) if total else 0.0,
+            "by_status": by_status,
+            "completions_by_day": by_day,
+        }
 
 # Create a singleton instance
 task_repository = TaskRepository() 
