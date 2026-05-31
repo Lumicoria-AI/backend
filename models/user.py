@@ -120,6 +120,25 @@ class UserProfile(BaseModel):
     
     model_config = ConfigDict(from_attributes=True)
 
+class TaskReminderSettings(BaseModel):
+    """Per-user controls for the task reminder pipeline (Phase 4).
+    Mirror of the same model in db/mongodb/models/user.py — kept here for
+    REST schema generation and for endpoints that import from this module.
+    """
+    daily_morning_enabled: bool = True
+    daily_morning_time: str = "08:00"
+    evening_critical_push: bool = True
+    evening_critical_time: str = "17:00"
+    critical_hour_warning: bool = True
+    weekly_digest_enabled: bool = True
+    weekly_digest_day: str = "friday"
+    weekly_digest_time: str = "09:00"
+    timezone: str = "UTC"
+    quiet_hours_enabled: bool = False
+    quiet_hours_start: str = "22:00"
+    quiet_hours_end: str = "07:00"
+
+
 class UserSettings(BaseModel):
     """Model for user settings data."""
     user_id: str
@@ -134,9 +153,11 @@ class UserSettings(BaseModel):
     break_interval_minutes: int = 60
     break_duration_minutes: int = 5
     preferred_ai_model: str = "default"
+    # ── Phase 1 ─────────────────────────────────────────────────────────
+    task_reminder_settings: TaskReminderSettings = Field(default_factory=TaskReminderSettings)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: Optional[datetime] = None
-    
+
     model_config = ConfigDict(from_attributes=True)
 
 class Token(BaseModel):

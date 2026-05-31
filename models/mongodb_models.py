@@ -103,12 +103,80 @@ class TaskStatus(str, Enum):
     CANCELLED = "cancelled"
     BLOCKED = "blocked"
     DEFERRED = "deferred"
+    ARCHIVED = "archived"
 
 class TaskPriority(str, Enum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
     CRITICAL = "critical"
+
+
+# ── Phase 1: assignment + agent-proposal + reminder-state primitives ──────
+# These are additive types used by the Task model.  Each one is optional on
+# the existing tasks collection — older rows simply have these as None.
+
+class AssigneeKind(str, Enum):
+    """How a task's assignment is resolved at runtime.
+
+    user             — fully resolved to a known Lumicoria user
+    email_invite     — assigned to an email address that has no account yet
+    agent            — assigned exclusively to one of the 21 production agents
+    user_and_agent   — co-owned by a human and an agent (the agent drafts,
+                       the human reviews and approves)
+    """
+    USER = "user"
+    EMAIL_INVITE = "email_invite"
+    AGENT = "agent"
+    USER_AND_AGENT = "user_and_agent"
+
+
+class AgentProposalStatus(str, Enum):
+    PENDING_REVIEW = "pending_review"   # agent has drafted, waiting for human
+    APPROVED       = "approved"          # human approved — task is done
+    REVISION       = "revision"          # human asked agent to redo with notes
+    REJECTED       = "rejected"          # human rejected, will take over manually
+    ERROR          = "error"             # agent execution failed
+
+
+class AgentProposal(BaseModel):
+    """An AI agent's drafted output for a task, awaiting human review.
+
+    Lives at `Task.agent_proposal`.  The autonomous executor (Phase 6) writes
+    this; the frontend renders a review surface from it.
+    """
+    status: AgentProposalStatus = AgentProposalStatus.PENDING_REVIEW
+    content: Optional[str] = None
+    sources: List[Dict[str, Any]] = Field(default_factory=list)
+    revision_notes: Optional[str] = None        # set when human requests revision
+    decision: Optional[str] = None              # "approved" | "rejected" | "revised"
+    agent_run_id: Optional[PyObjectId] = None   # link to agent_runs row
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    reviewed_at: Optional[datetime] = None
+    reviewed_by: Optional[PyObjectId] = None    # user_id who reviewed
+
+    model_config = {
+        "populate_by_name": True,
+        "arbitrary_types_allowed": True,
+        "json_encoders": {ObjectId: str},
+    }
+
+
+class ReminderState(BaseModel):
+    """Idempotency markers for the task reminder pipeline (Phase 4).
+
+    Each timestamp records the last time we *sent* that kind of notification
+    for this task, so the Celery cron can avoid duplicate emails / pushes.
+    """
+    last_morning_sent: Optional[datetime] = None       # daily 8am digest
+    last_evening_sent: Optional[datetime] = None       # evening critical push
+    last_critical_push: Optional[datetime] = None      # 1-hour-before push
+    last_digest: Optional[datetime] = None             # weekly Fri/Sat digest
+    last_overdue_alert: Optional[datetime] = None      # overdue notification
+    notify_on_complete: bool = True                    # toggle per-task
+
+    model_config = {"populate_by_name": True}
 
 class AgentStatus(str, Enum):
     ACTIVE = "active"
@@ -452,7 +520,11 @@ class TaskCreate(BaseModel):
     agent_id: Optional[PyObjectId] = None
     tags: List[str] = []
     metadata: Dict[str, Any] = {}
-    
+    # ── Phase 1 additions (all optional) ────────────────────────────────
+    assignee_kind: Optional[AssigneeKind] = None
+    assigned_to_email: Optional[str] = None
+    assigned_to_agent: Optional[str] = None       # one of 21 AGENT_REGISTRY keys
+
 class Task(MongoBaseModel):
     title: str
     description: Optional[str] = None
@@ -472,6 +544,18 @@ class Task(MongoBaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
+    # ── Phase 1: assignment, agent, calendar, reminder, history ──────────
+    assignee_kind: Optional[AssigneeKind] = None
+    assigned_to_email: Optional[str] = None
+    assigned_to_agent: Optional[str] = None              # agent key, e.g. "rag"
+    agent_proposal: Optional[AgentProposal] = None
+    reminder_state: Optional[ReminderState] = None
+    calendar_event_id: Optional[PyObjectId] = None       # lumicoria_calendar_events._id
+    gcal_event_id: Optional[str] = None                  # Google Calendar event id
+    status_history: List[Dict[str, Any]] = Field(default_factory=list)
+    invite_id: Optional[PyObjectId] = None               # invites._id (for email-invite path)
+    inferred_due_date: bool = False                      # True if LLM filled this in
+
 class TaskUpdate(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
@@ -485,6 +569,16 @@ class TaskUpdate(BaseModel):
     tags: Optional[List[str]] = None
     metadata: Optional[Dict[str, Any]] = None
     progress: Optional[int] = None
+    # ── Phase 1: updatable assignment + agent + linkage ─────────────────
+    assignee_kind: Optional[AssigneeKind] = None
+    assigned_to_email: Optional[str] = None
+    assigned_to_agent: Optional[str] = None
+    agent_proposal: Optional[AgentProposal] = None
+    reminder_state: Optional[ReminderState] = None
+    calendar_event_id: Optional[PyObjectId] = None
+    gcal_event_id: Optional[str] = None
+    invite_id: Optional[PyObjectId] = None
+    completed_at: Optional[datetime] = None
 
 # User Model
 class User(MongoBaseModel):

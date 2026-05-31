@@ -42,6 +42,37 @@ class TaskRepository(BaseRepository[Task]):
             ("status", ASCENDING),
             ("due_date", ASCENDING)
         ])
+
+        # ── Phase 1 additions: invite path, agent assignment, calendar link ──
+        # Each is sparse so legacy rows without the field don't bloat the index.
+        await collection.create_index("assigned_to_email", sparse=True)
+        await collection.create_index("assigned_to_agent", sparse=True)
+        await collection.create_index("assignee_kind", sparse=True)
+        await collection.create_index("invite_id", sparse=True)
+        await collection.create_index("calendar_event_id", sparse=True)
+        await collection.create_index("gcal_event_id", sparse=True)
+        await collection.create_index("project_id", sparse=True)
+        await collection.create_index("agent_proposal.status", sparse=True)
+
+        # Compound used by the reminder cron: org + status + due_date already
+        # covered above.  Add one more for "tasks that have agent proposals
+        # awaiting review" — the in-app review surface in Phase 6.
+        await collection.create_index(
+            [
+                ("organization_id", ASCENDING),
+                ("agent_proposal.status", ASCENDING),
+                ("updated_at", DESCENDING),
+            ],
+            name="agent_proposal_review_idx",
+            sparse=True,
+        )
+
+        # Reminder pipeline (Phase 4): scan upcoming dues efficiently.
+        await collection.create_index(
+            [("due_date", ASCENDING), ("status", ASCENDING)],
+            name="reminder_scan_idx",
+        )
+
         # Text search index
         await collection.create_index([
             ("title", "text"),
@@ -55,18 +86,48 @@ class TaskRepository(BaseRepository[Task]):
         creator_id: str,
         organization_id: str
     ) -> Task:
-        """Create a new task."""
+        """Create a new task.
+
+        Phase 1 — also accepts the new optional fields on TaskCreate
+        (assignee_kind, assigned_to_email, assigned_to_agent) and resolves
+        `assignee_kind` automatically when only one of the assignment
+        fields is provided.
+        """
         task_dict = task_data.dict()
         task_dict.update({
-            "created_by": ObjectId(creator_id),
-            "organization_id": ObjectId(organization_id),
-            "status": TaskStatus.TODO,
-            "created_at": datetime.utcnow()
+            "created_by": self._coerce_oid(creator_id),
+            "organization_id": self._coerce_oid(organization_id),
+            "status": task_dict.get("status") or TaskStatus.TODO,
+            "created_at": datetime.utcnow(),
         })
-        
+
         if task_dict.get("assigned_to"):
-            task_dict["assigned_to"] = ObjectId(task_dict["assigned_to"])
-        
+            task_dict["assigned_to"] = self._coerce_oid(task_dict["assigned_to"])
+
+        # Auto-derive assignee_kind from the populated assignment fields when
+        # the caller didn't specify one.  This keeps existing callers working
+        # while letting Phase 5/6 paths use the explicit field.
+        if not task_dict.get("assignee_kind"):
+            has_user = bool(task_dict.get("assigned_to"))
+            has_email = bool(task_dict.get("assigned_to_email"))
+            has_agent = bool(task_dict.get("assigned_to_agent"))
+            if has_user and has_agent:
+                task_dict["assignee_kind"] = "user_and_agent"
+            elif has_agent and not has_user and not has_email:
+                task_dict["assignee_kind"] = "agent"
+            elif has_email and not has_user:
+                task_dict["assignee_kind"] = "email_invite"
+            elif has_user:
+                task_dict["assignee_kind"] = "user"
+            else:
+                task_dict["assignee_kind"] = None
+
+        # Normalise enum values stored as enum to strings (Motor friendlier)
+        for k in ("status", "priority", "assignee_kind"):
+            v = task_dict.get(k)
+            if hasattr(v, "value"):
+                task_dict[k] = v.value
+
         try:
             return await self.create(task_dict)
         except Exception as e:
@@ -74,7 +135,7 @@ class TaskRepository(BaseRepository[Task]):
                 "Failed to create task",
                 error=str(e),
                 creator_id=creator_id,
-                organization_id=organization_id
+                organization_id=organization_id,
             )
             raise
 

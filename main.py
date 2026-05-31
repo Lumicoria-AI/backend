@@ -10,6 +10,35 @@ Hardened for production:
   • uvicorn: reload XOR workers (never both)
 """
 
+# ─── Warnings filter (Python 3.14 noise control) ────────────────────────────
+# Python 3.14 emits a flood of DeprecationWarnings for `datetime.utcnow()`,
+# `asyncio.iscoroutinefunction`, pydantic V2's deprecated `.dict()` (via the
+# `PydanticDeprecatedSince20` subclass), and third-party libs (motor, aiohttp,
+# google-genai, resend) that haven't migrated.  Without filtering they drown
+# the request log on every hit.  Underlying calls still work until at least
+# Python 3.16 / Pydantic v3.  See `backend/scripts/phase1_backfill.py` and
+# the broader datetime refactor (108 call sites) for the migration plan.
+#
+# Must run BEFORE any other import so warnings raised at module load time
+# (which is when most pydantic/google-genai/aiohttp warnings fire) are caught.
+import os as _os
+import warnings as _warnings
+
+# Belt + braces: also push this into the env var so uvicorn worker subprocesses
+# (which use `--reload`) inherit the filter on fresh spawns.
+_os.environ.setdefault("PYTHONWARNINGS", "ignore")
+
+# Wipe any default filters the interpreter / earlier imports installed, then
+# reset to a blanket ignore.  This catches PydanticDeprecatedSince20 (subclass
+# of DeprecationWarning) and every other category in one stroke.
+_warnings.resetwarnings()
+_warnings.simplefilter("ignore")
+
+# Disable logging.captureWarnings so uvicorn's logger config can't re-route
+# any warnings that slip through into py.warnings INFO lines.
+import logging as _logging
+_logging.captureWarnings(False)
+
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse

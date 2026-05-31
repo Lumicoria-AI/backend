@@ -58,6 +58,32 @@ class UserProfile(BaseModel):
         "populate_by_name": True
     }
 
+class TaskReminderSettings(BaseModel):
+    """Per-user controls for the task reminder pipeline (Phase 4).
+
+    Anti-bulking design:
+    - One bundled morning digest per day (08:00 user-tz).
+    - Evening push fires only for critical tasks due within 24h.
+    - Per-task individual emails reserved for critical priority + due ≤ 1h.
+    - Weekly digest is Friday (default) so it doesn't collide with the
+      Monday wellbeing digest.
+    """
+    daily_morning_enabled: bool = True
+    daily_morning_time: str = "08:00"             # HH:MM in user's timezone
+    evening_critical_push: bool = True            # critical-only evening ping
+    evening_critical_time: str = "17:00"
+    critical_hour_warning: bool = True            # 1h-before push for critical tasks
+    weekly_digest_enabled: bool = True
+    weekly_digest_day: str = "friday"             # "friday" | "saturday"
+    weekly_digest_time: str = "09:00"
+    timezone: str = "UTC"                          # IANA tz name (e.g. "Africa/Lagos")
+    quiet_hours_enabled: bool = False
+    quiet_hours_start: str = "22:00"
+    quiet_hours_end: str = "07:00"
+
+    model_config = {"populate_by_name": True}
+
+
 class UserSettings(BaseModel):
     user_id: PyObjectId = Field(alias="_id")
     email_notifications: bool = True
@@ -69,6 +95,8 @@ class UserSettings(BaseModel):
     break_interval_minutes: int = 60
     break_duration_minutes: int = 5
     preferred_ai_model: str = "gemini"
+    # ── Phase 1: granular task-reminder controls ─────────────────────────
+    task_reminder_settings: TaskReminderSettings = Field(default_factory=TaskReminderSettings)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: Optional[datetime] = None
 

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.models.user import User
 from backend.models.task import Task, TaskCreate, TaskUpdate, TaskStatus, TaskPriority
 from backend.services.activity_logger import log_activity
+from backend.services.calendar_service import calendar_service
 
 router = APIRouter()
 
@@ -85,6 +86,22 @@ async def create_task(
             related_resource_type="TASK",
             related_resource_id=str(task.id) if hasattr(task, "id") else None,
         )
+
+        # ── Phase 2: auto-create a Lumicoria calendar event when the task
+        # has a due_date.  Failure-tolerant — never breaks the task POST.
+        try:
+            if getattr(task, "due_date", None):
+                event = await calendar_service.create_event_for_task(
+                    task, owner_user_id=str(current_user.id)
+                )
+                if event:
+                    await task_repository.update_task(
+                        task_id=str(task.id),
+                        organization_id=_get_org_id(current_user),
+                        update_data={"calendar_event_id": str(event.id)},
+                    )
+        except Exception:  # pragma: no cover — observability handled by service
+            pass
 
         return task
     except Exception as e:
@@ -159,6 +176,30 @@ async def update_task(
         related_resource_id=task_id,
     )
 
+    # ── Phase 2: mirror task changes onto the linked calendar event ────
+    try:
+        patched_fields = set(task_in.dict(exclude_unset=True).keys())
+        # If status changed to completed → mark event done.
+        if "status" in patched_fields and getattr(task, "status", None) == TaskStatus.COMPLETED:
+            await calendar_service.mark_event_completed_for_task(task_id)
+        # If anything that affects the calendar changed, re-sync.
+        if patched_fields & {"due_date", "title", "description", "priority", "status"}:
+            await calendar_service.update_event_for_task(
+                task, owner_user_id=str(current_user.id)
+            )
+            # Make sure the task carries the calendar_event_id back.
+            if not getattr(task, "calendar_event_id", None) and getattr(task, "due_date", None):
+                from backend.db.mongodb.repositories.calendar_repository import calendar_repository
+                ev = await calendar_repository.get_by_task_id(task_id)
+                if ev:
+                    await task_repository.update_task(
+                        task_id=task_id,
+                        organization_id=_get_org_id(current_user),
+                        update_data={"calendar_event_id": str(ev.id)},
+                    )
+    except Exception:
+        pass
+
     return task
 
 @router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -201,6 +242,12 @@ async def delete_task(
         related_resource_type="TASK",
         related_resource_id=task_id,
     )
+
+    # ── Phase 2: also remove the linked calendar event ─────────────────
+    try:
+        await calendar_service.delete_event_for_task(task_id)
+    except Exception:
+        pass
 
     return None
 

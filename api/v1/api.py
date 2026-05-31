@@ -39,6 +39,7 @@ from backend.api.v1.endpoints import (
     security,
     upload,
     blog,
+    calendar,  # Phase 2: Lumicoria-native Calendar
 )
 from backend.api.routers.research_mentor import router as research_mentor_router
 from backend.api.routers.ethics_bias_router import router as ethics_bias_router
@@ -93,6 +94,9 @@ api_router.include_router(live_interaction.router, prefix="/live", tags=["live i
 
 # Task endpoints
 api_router.include_router(tasks.router, prefix="/tasks", tags=["tasks"])
+
+# Calendar endpoints (Lumicoria-native; Google mirror is opt-in)
+api_router.include_router(calendar.router, prefix="/calendar", tags=["calendar"])
 
 # Activity endpoints
 api_router.include_router(activity.router, prefix="/activity", tags=["activity"])
