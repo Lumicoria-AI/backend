@@ -25,6 +25,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import structlog
+from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from backend.api.deps import get_current_active_user
@@ -34,6 +35,7 @@ from backend.db.mongodb.models.calendar_event import (
     CalendarEventSource,
     CalendarEventUpdate,
 )
+from backend.db.mongodb.mongodb import MongoDB
 from backend.db.mongodb.repositories.task_repository import task_repository
 from backend.models.user import User
 from backend.services.activity_logger import log_activity
@@ -263,3 +265,98 @@ async def sync_all_to_google(
     return await calendar_service.sync_all_events_to_google(
         user_id=str(current_user.id), days_ahead=days_ahead
     )
+
+
+@router.post("/events/{event_id}/unsync/google", response_model=None)
+async def unsync_event_from_google(
+    event_id: str,
+    current_user: User = Depends(get_current_active_user),
+) -> Dict[str, Any]:
+    """Detach one Lumicoria event from its Google mirror (deletes on Google)."""
+    result = await calendar_service.unsync_event_from_google(event_id, str(current_user.id))
+    if result.get("reason") == "not_synced":
+        raise HTTPException(status_code=400, detail="Event is not synced to Google")
+    return result
+
+
+# ── Calendar settings (per-user) ─────────────────────────────────────
+
+@router.get("/settings", response_model=None)
+async def get_calendar_settings(
+    current_user: User = Depends(get_current_active_user),
+) -> Dict[str, Any]:
+    """Return the user's calendar-related settings.
+
+    Phase 3 surfaces just the Google toggle + a `google_connected` flag so
+    the frontend can render the right state without making a second call.
+    """
+    auto_sync = False
+    try:
+        col = await MongoDB.get_collection("user_settings")
+        try:
+            uid: Any = ObjectId(str(current_user.id))
+        except Exception:
+            uid = str(current_user.id)
+        doc = await col.find_one({"_id": uid}) or await col.find_one({"user_id": uid})
+        if doc:
+            auto_sync = bool(doc.get("auto_sync_google_calendar", False))
+    except Exception as e:
+        logger.debug("calendar settings read failed", error=str(e))
+
+    google_connected = False
+    try:
+        from backend.db.mongodb.repositories.integration_repository import integration_repository
+        records = await integration_repository.get_user_integrations(
+            user_id=str(current_user.id), integration_type="google_workspace",
+        )
+        google_connected = len(records) > 0
+    except Exception:
+        pass
+
+    return {
+        "auto_sync_google_calendar": auto_sync,
+        "google_connected": google_connected,
+    }
+
+
+@router.put("/settings", response_model=None)
+async def update_calendar_settings(
+    payload: Dict[str, Any],
+    current_user: User = Depends(get_current_active_user),
+) -> Dict[str, Any]:
+    """Update calendar settings.  Only `auto_sync_google_calendar` for now."""
+    if "auto_sync_google_calendar" not in payload:
+        raise HTTPException(
+            status_code=400, detail="No supported settings in payload"
+        )
+
+    auto_sync = bool(payload["auto_sync_google_calendar"])
+
+    col = await MongoDB.get_collection("user_settings")
+    try:
+        uid: Any = ObjectId(str(current_user.id))
+    except Exception:
+        uid = str(current_user.id)
+
+    await col.update_one(
+        {"_id": uid},
+        {
+            "$set": {
+                "auto_sync_google_calendar": auto_sync,
+                "updated_at": datetime.utcnow(),
+            },
+            "$setOnInsert": {"user_id": uid, "created_at": datetime.utcnow()},
+        },
+        upsert=True,
+    )
+
+    await log_activity(
+        user_id=str(current_user.id),
+        organization_id=_org_id(current_user) or str(current_user.id),
+        activity_type="calendar.settings_updated",
+        details={"auto_sync_google_calendar": auto_sync},
+        related_resource_type="USER_SETTINGS",
+        related_resource_id=str(current_user.id),
+    )
+
+    return {"auto_sync_google_calendar": auto_sync, "ok": True}

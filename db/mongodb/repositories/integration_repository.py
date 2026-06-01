@@ -163,6 +163,46 @@ class IntegrationRepository(BaseRepository[Integration]):
             sort=[("created_at", DESCENDING)]
         )
 
+    async def get_user_integrations(
+        self,
+        user_id: str,
+        integration_type: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Integration]:
+        """Phase 3: find integrations connected by a single user.
+
+        Looks up across the three id fields used in this codebase
+        (`user_id`, `created_by`, and the `organization_id == user_id`
+        fallback for users without a separate org row).  Returns the most
+        recently created match first.
+        """
+        try:
+            filters: Dict[str, Any] = {
+                "$or": [
+                    {"user_id": str(user_id)},
+                    {"created_by": str(user_id)},
+                    {"organization_id": str(user_id)},
+                ]
+            }
+            if integration_type:
+                filters["config.type"] = integration_type
+            if status:
+                filters["status"] = status
+            return await self.find_many(
+                filters,
+                limit=limit,
+                sort=[("created_at", DESCENDING)],
+            )
+        except Exception as e:
+            logger.error(
+                "Failed to list user integrations",
+                error=str(e),
+                user_id=user_id,
+                integration_type=integration_type,
+            )
+            return []
+
     async def add_error_log(
         self,
         integration_id: str,

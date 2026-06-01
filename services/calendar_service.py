@@ -80,6 +80,30 @@ def _task_field(task: Any, name: str, default: Any = None) -> Any:
 class CalendarService:
     """Application-level operations on the Lumicoria calendar."""
 
+    # ── User-setting helpers ───────────────────────────────────────────
+
+    async def _user_auto_sync_enabled(self, user_id: str) -> bool:
+        """Return True when the user has enabled automatic Google mirroring.
+
+        Reads from the `user_settings` collection; absent settings = False so
+        we never sync without explicit opt-in.  Best-effort — settings lookup
+        errors return False rather than raising.
+        """
+        try:
+            from backend.db.mongodb.mongodb import MongoDB
+            col = await MongoDB.get_collection("user_settings")
+            from bson import ObjectId as _OID
+            try:
+                uid: Any = _OID(str(user_id))
+            except Exception:
+                uid = str(user_id)
+            doc = await col.find_one({"_id": uid}) or await col.find_one({"user_id": uid})
+            if not doc:
+                return False
+            return bool(doc.get("auto_sync_google_calendar", False))
+        except Exception:
+            return False
+
     # ── Manual / API-driven CRUD ───────────────────────────────────────
 
     async def create_event(
@@ -88,7 +112,12 @@ class CalendarService:
         owner_user_id: str,
         organization_id: Optional[str] = None,
     ) -> CalendarEvent:
-        """Create a manual or agent-sourced calendar event."""
+        """Create a manual or agent-sourced calendar event.
+
+        Google mirror runs when EITHER the caller passed `sync_to_google=True`
+        on this specific event, OR the user has `auto_sync_google_calendar`
+        enabled in their settings.  Sync failures never break the create.
+        """
         event = await calendar_repository.create(payload, owner_user_id, organization_id)
         logger.info(
             "calendar_event_created",
@@ -96,9 +125,13 @@ class CalendarService:
             owner=owner_user_id,
             source=event.source.value if hasattr(event.source, "value") else event.source,
         )
-        # Opt-in Google mirror — best-effort, never raises.
-        if payload.sync_to_google:
-            await self.sync_event_to_google(str(event.id), owner_user_id)
+
+        should_sync = bool(payload.sync_to_google) or await self._user_auto_sync_enabled(owner_user_id)
+        if should_sync:
+            try:
+                await self.sync_event_to_google(str(event.id), owner_user_id)
+            except Exception as e:
+                logger.warning("create_event: google sync failed", error=str(e))
         return event
 
     async def update_event(
@@ -124,7 +157,12 @@ class CalendarService:
             return False
         ok = await calendar_repository.soft_delete(event_id, owner_user_id)
         if ok and existing.gcal_event_id:
-            await self._delete_google_event(existing)
+            try:
+                await self._delete_google_event(
+                    existing, user_id=owner_user_id or str(existing.owner_user_id)
+                )
+            except Exception as e:
+                logger.warning("delete_event: google delete failed", error=str(e))
         return ok
 
     async def get_event(
@@ -298,62 +336,161 @@ class CalendarService:
             return False
         return await calendar_repository.soft_delete(str(event.id))
 
-    # ── Google Calendar mirror (Phase 3 stub — safe to call now) ───────
+    # ── Google Calendar bridge (Phase 3) ───────────────────────────────
+    # Failure-tolerant: every method returns a structured `{ synced, reason }`
+    # dict and never raises into the caller.  This lets the task hooks call
+    # mirror methods unconditionally without try/except clutter.
+
+    async def _get_user_google_integration(self, user_id: str) -> Optional[Any]:
+        """Resolve the user's google_workspace integration instance, or None.
+
+        Uses the in-DB integration record (with OAuth token refresh handled
+        by integration_service) so per-user credentials are applied.
+        """
+        try:
+            from backend.db.mongodb.repositories.integration_repository import (
+                integration_repository,
+            )
+            from backend.services.integration_service import integration_service
+        except Exception as e:
+            logger.warning(
+                "calendar_google_bridge: integration deps unavailable", error=str(e)
+            )
+            return None
+
+        try:
+            records = await integration_repository.get_user_integrations(
+                user_id=user_id, integration_type="google_workspace", status="active",
+            )
+            if not records:
+                # Fall back to any status — user might be 'connecting'/'connected'/etc.
+                records = await integration_repository.get_user_integrations(
+                    user_id=user_id, integration_type="google_workspace",
+                )
+            if not records:
+                return None
+            integration_id = str(getattr(records[0], "id", None) or records[0].dict().get("_id"))
+            if not integration_id or integration_id == "None":
+                return None
+            return await integration_service.get_user_integration(integration_id)
+        except Exception as e:
+            logger.debug(
+                "calendar_google_bridge: integration lookup failed",
+                user_id=user_id, error=str(e),
+            )
+            return None
 
     async def sync_event_to_google(
         self,
         event_id: str,
         user_id: str,
+        *,
+        calendar_id: str = "primary",
     ) -> Dict[str, Any]:
-        """Mirror a Lumicoria event onto Google Calendar.
+        """Create or update the Google Calendar mirror of a Lumicoria event.
 
-        Phase 2: this method is intentionally a *graceful no-op*.  It looks
-        up the user's google_workspace integration; if none, it returns
-        `{"synced": False, "reason": "google_not_connected"}` without raising.
-        Phase 3 plugs in the real Google call here.  Callers never have to
-        feature-flag — they can always call sync_event_to_google.
+        Idempotent: if `gcal_event_id` already exists, we PATCH instead of
+        inserting a duplicate.  Returns:
+            { synced: True,  gcal_event_id: "...", action: "created"|"updated" }
+            { synced: False, reason: "google_not_connected" | ... }
         """
         event = await calendar_repository.get_by_id(event_id, owner_user_id=user_id)
         if not event:
             return {"synced": False, "reason": "event_not_found", "event_id": event_id}
 
-        # Lazy import — keeps the integration_service dependency optional
-        # in environments where Google isn't wired up at all.
-        try:
-            from backend.services.integration_service import integration_service
-        except Exception as e:
-            logger.warning("sync_event_to_google: integration_service unavailable", error=str(e))
-            return {"synced": False, "reason": "integration_service_unavailable"}
+        integration = await self._get_user_google_integration(user_id)
+        if integration is None:
+            return {"synced": False, "reason": "google_not_connected", "event_id": event_id}
 
-        # Look for a connected google_workspace integration for this user.
-        try:
-            from backend.db.mongodb.repositories.integration_repository import integration_repository
+        # Build attendee list from Lumicoria attendees (those with an email).
+        attendee_emails: List[str] = [
+            a.get("email") for a in (event.attendees or []) if isinstance(a, dict) and a.get("email")
+        ]
 
-            user_integrations = await integration_repository.get_user_integrations(
-                user_id=user_id, integration_type="google_workspace"
+        try:
+            if event.gcal_event_id:
+                result = await integration.update_calendar_event(
+                    event_id=event.gcal_event_id,
+                    calendar_id=event.gcal_calendar_id or calendar_id,
+                    summary=event.title,
+                    description=event.description or "",
+                    start_time=event.start,
+                    end_time=event.end,
+                    location=event.location or None,
+                    status=("cancelled" if (
+                        event.status == CalendarEventStatus.CANCELLED
+                    ) else None),
+                )
+                if isinstance(result, dict) and result.get("error"):
+                    return {"synced": False, "reason": "google_update_failed", "error": result["error"]}
+                await calendar_repository.link_to_gcal(
+                    str(event.id), event.gcal_event_id, event.gcal_calendar_id or calendar_id
+                )
+                logger.info(
+                    "google_calendar_event_updated",
+                    event_id=str(event.id), gcal_event_id=event.gcal_event_id, user_id=user_id,
+                )
+                return {
+                    "synced": True,
+                    "action": "updated",
+                    "event_id": str(event.id),
+                    "gcal_event_id": event.gcal_event_id,
+                }
+
+            # Create path
+            created = await integration.create_calendar_event(
+                summary=event.title,
+                description=event.description or "",
+                start_time=event.start,
+                end_time=event.end,
+                attendees=attendee_emails or None,
+                calendar_id=calendar_id,
+                location=event.location or None,
             )
+            if not isinstance(created, dict) or created.get("error"):
+                return {
+                    "synced": False,
+                    "reason": "google_create_failed",
+                    "error": (created or {}).get("error", "unknown"),
+                }
+            gcal_event_id = created.get("id")
+            if not gcal_event_id:
+                return {"synced": False, "reason": "google_no_event_id"}
+
+            await calendar_repository.link_to_gcal(
+                str(event.id), gcal_event_id, calendar_id
+            )
+
+            # Also stamp the linked task (if any) with the gcal_event_id so the
+            # Tasks UI can show "On Google Calendar".
+            if event.task_id:
+                try:
+                    from backend.db.mongodb.repositories.task_repository import task_repository
+                    await task_repository.update_task(
+                        task_id=str(event.task_id),
+                        organization_id=str(event.organization_id) if event.organization_id else user_id,
+                        update_data={"gcal_event_id": gcal_event_id},
+                    )
+                except Exception as e:
+                    logger.debug("gcal_event_id back-write to task failed", error=str(e))
+
+            logger.info(
+                "google_calendar_event_created",
+                event_id=str(event.id), gcal_event_id=gcal_event_id, user_id=user_id,
+            )
+            return {
+                "synced": True,
+                "action": "created",
+                "event_id": str(event.id),
+                "gcal_event_id": gcal_event_id,
+            }
+
         except Exception as e:
-            logger.debug("sync_event_to_google: integration lookup failed", error=str(e))
-            user_integrations = []
-
-        if not user_integrations:
-            return {"synced": False, "reason": "google_not_connected"}
-
-        # Phase 3 will replace this branch with the real
-        # integration_service.execute_integration_action(...) call that
-        # invokes GoogleWorkspaceIntegration.create_calendar_event().
-        # We deliberately stop short here so the surface area is stable.
-        logger.info(
-            "google_calendar_sync_pending_phase3",
-            event_id=event_id,
-            user_id=user_id,
-        )
-        return {
-            "synced": False,
-            "reason": "google_sync_not_yet_implemented",
-            "event_id": event_id,
-            "note": "Lumicoria-native calendar already holds the event. Phase 3 will activate Google mirror.",
-        }
+            logger.error(
+                "google_calendar_sync_unexpected_error",
+                event_id=event_id, user_id=user_id, error=str(e),
+            )
+            return {"synced": False, "reason": "exception", "error": str(e)}
 
     async def sync_all_events_to_google(
         self,
@@ -374,13 +511,65 @@ class CalendarService:
             "results": results,
         }
 
-    async def _delete_google_event(self, event: CalendarEvent) -> None:
-        """Remove a previously-mirrored Google event.  No-op in Phase 2."""
-        logger.info(
-            "google_calendar_delete_pending_phase3",
-            event_id=str(event.id),
-            gcal_event_id=event.gcal_event_id,
-        )
+    async def unsync_event_from_google(
+        self,
+        event_id: str,
+        user_id: str,
+    ) -> Dict[str, Any]:
+        """Detach a Lumicoria event from its Google mirror — deletes on Google
+        but keeps the Lumicoria event.  Used when a user wants to stop
+        syncing one event without disconnecting Google entirely.
+        """
+        event = await calendar_repository.get_by_id(event_id, owner_user_id=user_id)
+        if not event or not event.gcal_event_id:
+            return {"synced": False, "reason": "not_synced", "event_id": event_id}
+        ok = await self._delete_google_event(event, user_id=user_id)
+        if ok:
+            # Wipe the link on the Lumicoria side
+            try:
+                await calendar_repository._get_collection()  # ensure init
+                col = calendar_repository._collection
+                await col.update_one(
+                    {"_id": event.id},
+                    {"$set": {"gcal_event_id": None, "gcal_calendar_id": None, "last_synced_at": None}},
+                )
+            except Exception:
+                pass
+        return {"synced": False, "action": "unsynced", "event_id": event_id, "ok": ok}
+
+    async def _delete_google_event(
+        self,
+        event: CalendarEvent,
+        user_id: Optional[str] = None,
+    ) -> bool:
+        """Delete the Google-side mirror of `event`.  Returns True on success."""
+        if not event.gcal_event_id:
+            return True  # nothing to delete is success
+        owner_id = user_id or str(event.owner_user_id)
+        integration = await self._get_user_google_integration(owner_id)
+        if integration is None:
+            logger.debug(
+                "google_calendar_delete_skipped_no_integration",
+                event_id=str(event.id), gcal_event_id=event.gcal_event_id,
+            )
+            return False
+        try:
+            ok = await integration.delete_calendar_event(
+                event_id=event.gcal_event_id,
+                calendar_id=event.gcal_calendar_id or "primary",
+            )
+            if ok:
+                logger.info(
+                    "google_calendar_event_deleted",
+                    event_id=str(event.id), gcal_event_id=event.gcal_event_id,
+                )
+            return bool(ok)
+        except Exception as e:
+            logger.error(
+                "google_calendar_delete_failed",
+                event_id=str(event.id), gcal_event_id=event.gcal_event_id, error=str(e),
+            )
+            return False
 
 
 # Singleton — match the convention used elsewhere (e.g. notification_service).

@@ -234,7 +234,105 @@ class GoogleWorkspaceClient:
         except Exception as e:
             logger.error("Error getting calendar events", error=str(e))
             return []
-    
+
+    async def update_calendar_event(
+        self,
+        event_id: str,
+        *,
+        calendar_id: str = "primary",
+        summary: Optional[str] = None,
+        description: Optional[str] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        location: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Patch an existing Google Calendar event.
+
+        Only fields explicitly passed in are touched — Google's `patch` API
+        leaves the rest alone.  `status="cancelled"` cancels an event in
+        place (instead of deleting it), preserving history on the user's
+        calendar — useful when a Lumicoria task is marked complete.
+        """
+        try:
+            calendar_service = self._get_service(
+                "calendar", "v3", ["https://www.googleapis.com/auth/calendar"]
+            )
+
+            patch: Dict[str, Any] = {}
+            if summary is not None:
+                patch["summary"] = summary
+            if description is not None:
+                patch["description"] = description
+            if location is not None:
+                patch["location"] = location
+            if status is not None:
+                patch["status"] = status
+            if start_time is not None:
+                patch["start"] = {"dateTime": start_time.isoformat(), "timeZone": "UTC"}
+            if end_time is not None:
+                patch["end"] = {"dateTime": end_time.isoformat(), "timeZone": "UTC"}
+
+            if not patch:
+                # Nothing to mirror — return the current event.
+                def _get_event():
+                    return calendar_service.events().get(
+                        calendarId=calendar_id, eventId=event_id
+                    ).execute()
+                return await self.run_in_executor(_get_event)
+
+            def _patch_event():
+                return calendar_service.events().patch(
+                    calendarId=calendar_id,
+                    eventId=event_id,
+                    body=patch,
+                    sendUpdates="all",
+                ).execute()
+
+            return await self.run_in_executor(_patch_event)
+        except Exception as e:
+            logger.error(
+                "Error updating calendar event",
+                error=str(e),
+                event_id=event_id,
+            )
+            raise
+
+    async def delete_calendar_event(
+        self,
+        event_id: str,
+        calendar_id: str = "primary",
+    ) -> bool:
+        """Hard-delete a Google Calendar event.
+
+        Returns True when the delete succeeded or the event was already gone
+        (404 is treated as success — the desired end-state is identical).
+        """
+        try:
+            calendar_service = self._get_service(
+                "calendar", "v3", ["https://www.googleapis.com/auth/calendar"]
+            )
+
+            def _delete_event():
+                return calendar_service.events().delete(
+                    calendarId=calendar_id,
+                    eventId=event_id,
+                    sendUpdates="all",
+                ).execute()
+
+            await self.run_in_executor(_delete_event)
+            return True
+        except HttpError as e:
+            # 404 == already gone, count as success.
+            status_code = getattr(getattr(e, "resp", None), "status", None)
+            if status_code in (404, 410):
+                return True
+            logger.error("Error deleting calendar event", error=str(e), event_id=event_id)
+            return False
+        except Exception as e:
+            logger.error("Error deleting calendar event", error=str(e), event_id=event_id)
+            return False
+
     # Drive API methods
     async def list_files(self, folder_id: str = None, query: str = None, max_results: int = 10) -> List[Dict[str, Any]]:
         """

@@ -97,15 +97,44 @@ class DocumentAgent(BaseAgent):
             )
 
             # --- 2. Task extraction (structured JSON) ---
+            # Phase 4: inject current datetime and tighten the date schema so
+            # downstream reminder/calendar code never has to guess a format.
+            now_utc = datetime.utcnow()
+            user_tz = (user_context or {}).get("timezone", "UTC")
+            now_iso = now_utc.replace(microsecond=0).isoformat() + "Z"
+            week_from_now_iso = (now_utc + timedelta(days=7)).replace(microsecond=0).isoformat() + "Z"
+            five_days_iso = (now_utc + timedelta(days=5)).replace(microsecond=0).isoformat() + "Z"
+
             task_prompt = (
-                "Extract all actionable tasks, deadlines, and action items from the following document. "
-                "Return ONLY a valid JSON array where each element has these keys:\n"
-                '  "title": short task title,\n'
+                "You are extracting actionable tasks from a document for a user's "
+                "task manager.  Return ONLY a JSON array (no prose, no markdown).\n\n"
+                f"Current time (UTC):       {now_iso}\n"
+                f"User timezone:            {user_tz}\n"
+                f"Default if no due hint:   {five_days_iso}\n"
+                f"Maximum allowed due_date: {week_from_now_iso}\n\n"
+                "Schema per element:\n"
+                '  "title": short, imperative task title (verb + object),\n'
                 '  "description": fuller description of what needs to be done,\n'
                 '  "priority": "low" | "medium" | "high" | "critical",\n'
-                '  "deadline": deadline string if mentioned (or null),\n'
+                '  "due_date": ISO-8601 UTC datetime string OR null,\n'
+                '  "deadline": exact phrase from the document if any (or null),\n'
+                '  "inferred_due_date": true if due_date was NOT explicitly stated,\n'
                 '  "assignee": person responsible if mentioned (or null)\n\n'
-                "Only include genuinely actionable items. If there are no tasks, return [].\n\n"
+                "Rules for due_date:\n"
+                "  • If the document gives an absolute date, parse it into ISO-8601 UTC.\n"
+                "  • If language signals urgency (urgent, ASAP, today) → within 24 hours.\n"
+                "  • If language says 'this week' / 'by EOW' → end of the current week.\n"
+                "  • If language says 'next week' → 7 days from now.\n"
+                "  • If no signal, use the default above (5 days from now).\n"
+                f"  • due_date MUST NOT exceed {week_from_now_iso}.\n"
+                "  • Set inferred_due_date=true unless an exact date appeared in the text.\n\n"
+                "Rules for priority:\n"
+                "  • 'critical': blocks the business, security, regulatory, immediate.\n"
+                "  • 'high': named owner + tight deadline.\n"
+                "  • 'medium': default.\n"
+                "  • 'low': nice-to-have, vague timing.\n\n"
+                "Only include genuinely actionable items.  No status updates, no meta.\n"
+                "If there are no tasks, return [].\n\n"
                 f"Document content:\n{text_for_llm}"
             )
 
@@ -137,9 +166,151 @@ class DocumentAgent(BaseAgent):
             logger.error(f"Error processing document: {str(e)}")
             return {"error": f"Failed to process document: {str(e)}"}
 
+    def _normalize_task_record(self, raw: Dict[str, Any]) -> Dict[str, Any]:
+        """Phase 4: normalise one extracted task into the canonical schema.
+
+        Coerces `due_date` to ISO-8601 UTC, falls back to a +5-day default
+        when missing/unparseable, caps at +7 days, and lifts `deadline`
+        into `due_date` when the LLM put a structured value there instead.
+        """
+        if not isinstance(raw, dict):
+            return raw  # let the caller drop non-dict entries
+
+        now = datetime.utcnow().replace(microsecond=0)
+        max_due = now + timedelta(days=7)
+        default_due = now + timedelta(days=5, hours=0)
+
+        # 1. Resolve a candidate datetime from due_date OR deadline.
+        candidate_str = raw.get("due_date") or raw.get("deadline")
+        parsed_due: Optional[datetime] = None
+        if candidate_str:
+            parsed_due = self._coerce_to_datetime(str(candidate_str))
+
+        inferred = bool(raw.get("inferred_due_date"))
+        if parsed_due is None:
+            parsed_due = default_due
+            inferred = True
+
+        # 2. Cap at +7 days (the system promises max-7-day due dates).
+        if parsed_due > max_due:
+            parsed_due = max_due
+            inferred = True
+
+        # 3. Never schedule in the past — bump to +1 hour from now.
+        if parsed_due < now:
+            parsed_due = now + timedelta(hours=1)
+            inferred = True
+
+        priority = str(raw.get("priority", "medium")).lower()
+        if priority not in {"low", "medium", "high", "critical"}:
+            priority = "medium"
+
+        normalized: Dict[str, Any] = {
+            "title": str(raw.get("title") or "Untitled task").strip()[:280],
+            "description": str(raw.get("description") or "").strip(),
+            "priority": priority,
+            # `deadline` stays as the human-readable original phrase for UI
+            "deadline": raw.get("deadline") if isinstance(raw.get("deadline"), str) else None,
+            "due_date": parsed_due.isoformat() + "Z",
+            "inferred_due_date": inferred,
+            "assignee": raw.get("assignee") if isinstance(raw.get("assignee"), str) else None,
+        }
+        return normalized
+
+    def _coerce_to_datetime(self, value: str) -> Optional[datetime]:
+        """Parse a wide range of date formats into a naive UTC datetime.
+
+        Order of attempts:
+          1. ISO-8601 (with or without trailing Z).
+          2. python-dateutil best-effort (handles 'May 1, 2026', 'Mon 14:00', etc.).
+          3. Embedded YYYY-MM-DD substring.
+          4. None — caller will fall back to the +5-day default.
+        """
+        s = (value or "").strip()
+        if not s:
+            return None
+        # Strip trailing 'Z' since fromisoformat (≤3.10) doesn't grok it
+        iso_candidate = s[:-1] if s.endswith("Z") else s
+        try:
+            dt = datetime.fromisoformat(iso_candidate)
+            if dt.tzinfo is not None:
+                # Drop tz and treat as UTC for downstream consistency.
+                dt = dt.replace(tzinfo=None)
+            return dt
+        except ValueError:
+            pass
+        # dateutil
+        try:
+            from dateutil import parser as date_parser  # type: ignore
+            return date_parser.parse(s, fuzzy=True, default=datetime.utcnow().replace(hour=9, minute=0, second=0, microsecond=0))
+        except Exception:
+            pass
+        # Embedded YYYY-MM-DD
+        m = re.search(r"(\d{4})-(\d{2})-(\d{2})", s)
+        if m:
+            try:
+                return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), 9, 0, 0)
+            except ValueError:
+                pass
+        return None
+
     def _parse_tasks_json(self, raw_text: str) -> List[Dict[str, Any]]:
-        """Best-effort parse of an LLM response into a list of task dicts."""
+        """Best-effort parse of an LLM response into a list of task dicts.
+
+        Phase 4: every returned task is normalised via `_normalize_task_record`
+        so the downstream consumer (task creation + reminders) gets a
+        consistent ISO `due_date` and bounded fields.
+        """
+        candidates: List[Any] = []
+
         # Try direct JSON parse first
+        try:
+            parsed = json.loads(raw_text)
+            if isinstance(parsed, list):
+                candidates = parsed
+            elif isinstance(parsed, dict) and "tasks" in parsed:
+                candidates = parsed["tasks"]
+        except json.JSONDecodeError:
+            pass
+
+        # Try extracting JSON array from markdown code fences
+        if not candidates:
+            json_match = re.search(r"```(?:json)?\s*(\[[\s\S]*?\])\s*```", raw_text)
+            if json_match:
+                try:
+                    candidates = json.loads(json_match.group(1))
+                except json.JSONDecodeError:
+                    pass
+
+        # Try finding any JSON array in the text
+        if not candidates:
+            bracket_match = re.search(r"\[[\s\S]*\]", raw_text)
+            if bracket_match:
+                try:
+                    candidates = json.loads(bracket_match.group(0))
+                except json.JSONDecodeError:
+                    pass
+
+        # Last resort: fall back to the existing regex parser, then normalise.
+        if not candidates:
+            candidates = self._parse_tasks(raw_text)
+
+        # Normalise each entry — drops malformed dicts silently.
+        normalized: List[Dict[str, Any]] = []
+        for entry in candidates or []:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                normalized.append(self._normalize_task_record(entry))
+            except Exception:  # pragma: no cover — defensive
+                continue
+        return normalized
+
+    # NB: a second copy of the original method body lives below for
+    # backwards-compatibility with any caller that imports it directly.
+    # The new implementation above supersedes it.
+    def _parse_tasks_json_legacy(self, raw_text: str) -> List[Dict[str, Any]]:
+        """Original parser preserved for back-compat (no normalisation)."""
         try:
             parsed = json.loads(raw_text)
             if isinstance(parsed, list):
@@ -148,8 +319,6 @@ class DocumentAgent(BaseAgent):
                 return parsed["tasks"]
         except json.JSONDecodeError:
             pass
-
-        # Try extracting JSON array from markdown code fences
         json_match = re.search(r"```(?:json)?\s*(\[[\s\S]*?\])\s*```", raw_text)
         if json_match:
             try:

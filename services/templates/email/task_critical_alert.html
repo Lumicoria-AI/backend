@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="x-apple-disable-message-reformatting">
+  <meta name="color-scheme" content="light only">
+  <title>{{ subject|default('Critical task due soon') }}</title>
+  <style>
+    body { margin:0; padding:0; background:#F8FAFC; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; color:#1E293B; }
+    .wrap { padding:32px 16px; background:#F8FAFC; }
+    .container { max-width:520px; margin:0 auto; background:#FFFFFF; border:1px solid #FEE2E2; border-radius:16px; overflow:hidden; }
+    .strip { background:#EF4444; color:#FFFFFF; padding:10px 24px; font-size:12px; font-weight:600; letter-spacing:0.04em; text-transform:uppercase; }
+    .body { padding:24px 28px 8px; }
+    h1 { font-size:20px; font-weight:600; margin:0 0 10px; color:#0F172A; }
+    .lede { margin:0 0 18px; font-size:14px; color:#475569; line-height:1.5; }
+    .task { padding:14px 16px; border:1px solid #E2E8F0; border-radius:12px; }
+    .task-title { font-size:16px; font-weight:600; color:#0F172A; margin:0 0 4px; }
+    .task-meta { font-size:12px; color:#64748B; }
+    .task-meta .due { color:#EF4444; font-weight:600; }
+    .actions { padding:18px 28px 24px; }
+    .btn { display:inline-block; padding:11px 18px; margin-right:8px; border-radius:9px; font-size:14px; font-weight:500; text-decoration:none; line-height:1; }
+    .btn-complete { background:#10B981; color:#FFFFFF; }
+    .btn-start { background:#3B82F6; color:#FFFFFF; }
+    .btn-snooze { background:#FFFFFF; color:#475569; border:1px solid #E2E8F0; }
+    .footer { padding:16px 28px 24px; background:#F8FAFC; border-top:1px solid #E2E8F0; font-size:12px; color:#94A3B8; }
+    .footer a { color:#6C4AB0; text-decoration:none; }
+    .brand { display:flex; align-items:center; gap:8px; padding:18px 28px 0; }
+    .brand .dot { width:28px; height:28px; border-radius:7px; background:#6C4AB0; color:#fff; text-align:center; line-height:28px; font-weight:700; font-size:12px; }
+    .brand .name { font-size:13px; font-weight:600; color:#0F172A; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="container">
+      <div class="strip">⚠ Critical task — due within the hour</div>
+      <div class="brand">
+        <div class="dot">L</div>
+        <div class="name">Lumicoria</div>
+      </div>
+      <div class="body">
+        <h1>{{ task.title }}</h1>
+        <p class="lede">{{ task.description|default('') }}</p>
+        <div class="task">
+          <p class="task-title">⏰ Due now</p>
+          <p class="task-meta"><span class="due">{{ task.due_label }}</span>{% if task.assignee %} · {{ task.assignee }}{% endif %}</p>
+        </div>
+      </div>
+      <div class="actions">
+        {% if task.complete_url %}<a class="btn btn-complete" href="{{ task.complete_url }}">Mark complete</a>{% endif %}
+        {% if task.start_url %}<a class="btn btn-start" href="{{ task.start_url }}">Mark started</a>{% endif %}
+        {% if task.snooze_url %}<a class="btn btn-snooze" href="{{ task.snooze_url }}">Snooze 1 day</a>{% endif %}
+      </div>
+      <div class="footer">
+        <a href="{{ dashboard_url|default('https://lumicoria.ai/tasks') }}">Open in Lumicoria</a>
+        · We only send critical alerts for the highest-priority tasks within the hour.
+      </div>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, OAuth2PasswordRequestForm
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 import asyncio
 import firebase_admin
 from firebase_admin import auth
@@ -137,6 +137,20 @@ async def signup(
         name=user.full_name or "User",
     ))
 
+    # Phase 5: accept any pending invites addressed to this email.  Synchronous
+    # because the response payload includes a `pending_invites` summary so the
+    # frontend can show "you joined X organizations" right after signup.
+    invite_summary: Dict[str, Any] = {"accepted": 0, "orgs_joined": 0, "tasks_reassigned": 0}
+    try:
+        from backend.services.invite_service import invite_service
+        invite_summary = await invite_service.accept_pending_invites_for_user(
+            user_id=str(user.id),
+            email=user.email,
+        )
+    except Exception as e:  # pragma: no cover — never block signup on this
+        import structlog as _sl
+        _sl.get_logger().warning("signup_invite_accept_failed", error=str(e))
+
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
@@ -149,7 +163,8 @@ async def signup(
             "avatar_url": getattr(user, "avatar_url", None),
             "onboarding_completed": getattr(user, "onboarding_completed", False),
             "created_at": created_at,
-            "updated_at": getattr(user, "updated_at", None)
+            "updated_at": getattr(user, "updated_at", None),
+            "pending_invites": invite_summary,
         }
     }
 

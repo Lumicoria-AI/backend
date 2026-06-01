@@ -97,6 +97,11 @@ class UserSettings(BaseModel):
     preferred_ai_model: str = "gemini"
     # ── Phase 1: granular task-reminder controls ─────────────────────────
     task_reminder_settings: TaskReminderSettings = Field(default_factory=TaskReminderSettings)
+    # ── Phase 3: Google Calendar dual-write toggle ───────────────────────
+    # When True, every Lumicoria calendar event is also pushed to the user's
+    # Google Calendar.  When False, syncing is purely per-event (the user
+    # ticks "Sync to Google" on the event drawer).
+    auto_sync_google_calendar: bool = False
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: Optional[datetime] = None
 

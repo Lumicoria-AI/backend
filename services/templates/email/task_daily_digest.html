@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="x-apple-disable-message-reformatting">
+  <meta name="color-scheme" content="light only">
+  <meta name="supported-color-schemes" content="light">
+  <title>{{ subject|default('Your tasks today') }}</title>
+  <style>
+    /* Phase 4 — no gradients, brand purple #6C4AB0, slate text. */
+    body { margin:0; padding:0; background:#F8FAFC; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; color:#1E293B; }
+    .wrap { width:100%; background:#F8FAFC; padding:32px 16px; }
+    .container { max-width:560px; margin:0 auto; background:#FFFFFF; border:1px solid #E2E8F0; border-radius:16px; overflow:hidden; }
+    .header { padding:24px 28px 16px; border-bottom:1px solid #E2E8F0; }
+    .brand { display:flex; align-items:center; gap:10px; }
+    .brand .dot { width:32px; height:32px; border-radius:8px; background:#6C4AB0; color:#fff; text-align:center; line-height:32px; font-weight:700; font-size:14px; }
+    .brand .name { font-size:14px; font-weight:600; color:#0F172A; }
+    h1 { margin:14px 0 4px; font-size:22px; font-weight:600; color:#0F172A; }
+    .lede { margin:0; font-size:13px; color:#64748B; }
+    .section-title { padding:18px 28px 8px; font-size:11px; text-transform:uppercase; letter-spacing:0.08em; color:#94A3B8; font-weight:600; }
+    .task { padding:14px 28px; border-top:1px solid #F1F5F9; }
+    .task:first-of-type { border-top:none; }
+    .task-row { display:flex; align-items:flex-start; gap:10px; }
+    .priority-dot { width:8px; height:8px; border-radius:50%; margin-top:6px; flex:0 0 8px; }
+    .pri-critical { background:#EF4444; }
+    .pri-high { background:#F59E0B; }
+    .pri-medium { background:#6C4AB0; }
+    .pri-low { background:#94A3B8; }
+    .task-title { font-size:15px; font-weight:500; color:#0F172A; margin:0 0 2px; }
+    .task-meta { font-size:12px; color:#64748B; }
+    .task-meta .due { color:#475569; font-weight:500; }
+    .task-meta .inferred { font-size:11px; color:#94A3B8; }
+    .actions { margin-top:10px; }
+    .btn { display:inline-block; padding:8px 14px; margin-right:6px; border-radius:8px; font-size:13px; font-weight:500; text-decoration:none; line-height:1; }
+    .btn-complete { background:#10B981; color:#FFFFFF; }
+    .btn-start { background:#3B82F6; color:#FFFFFF; }
+    .btn-view { background:#FFFFFF; color:#475569; border:1px solid #E2E8F0; }
+    .footer { padding:20px 28px 28px; background:#F8FAFC; border-top:1px solid #E2E8F0; font-size:12px; color:#94A3B8; }
+    .footer a { color:#6C4AB0; text-decoration:none; }
+    .empty { padding:24px 28px; color:#64748B; font-size:13px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="container">
+      <div class="header">
+        <div class="brand">
+          <div class="dot">L</div>
+          <div class="name">Lumicoria</div>
+        </div>
+        <h1>Good morning{% if user_name %}, {{ user_name }}{% endif %}.</h1>
+        <p class="lede">
+          You have <strong>{{ today_count|default(0) }}</strong> task{% if today_count != 1 %}s{% endif %} due today
+          {% if tomorrow_count and tomorrow_count > 0 %}and <strong>{{ tomorrow_count }}</strong> due tomorrow{% endif %}.
+        </p>
+      </div>
+
+      {% if today_tasks and today_tasks|length > 0 %}
+      <div class="section-title">Today</div>
+      {% for task in today_tasks %}
+      <div class="task">
+        <div class="task-row">
+          <span class="priority-dot pri-{{ task.priority|default('medium') }}"></span>
+          <div style="flex:1;">
+            <p class="task-title">{{ task.title }}</p>
+            <p class="task-meta">
+              <span class="due">{{ task.due_label }}</span>
+              {% if task.assignee %} · {{ task.assignee }}{% endif %}
+              {% if task.inferred_due_date %} <span class="inferred">· auto-scheduled</span>{% endif %}
+            </p>
+            <div class="actions">
+              {% if task.start_url %}<a class="btn btn-start" href="{{ task.start_url }}">Mark started</a>{% endif %}
+              {% if task.complete_url %}<a class="btn btn-complete" href="{{ task.complete_url }}">Mark complete</a>{% endif %}
+              {% if task.view_url %}<a class="btn btn-view" href="{{ task.view_url }}">View</a>{% endif %}
+            </div>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+      {% endif %}
+
+      {% if tomorrow_tasks and tomorrow_tasks|length > 0 %}
+      <div class="section-title">Tomorrow</div>
+      {% for task in tomorrow_tasks %}
+      <div class="task">
+        <div class="task-row">
+          <span class="priority-dot pri-{{ task.priority|default('medium') }}"></span>
+          <div style="flex:1;">
+            <p class="task-title">{{ task.title }}</p>
+            <p class="task-meta">
+              <span class="due">{{ task.due_label }}</span>
+              {% if task.assignee %} · {{ task.assignee }}{% endif %}
+            </p>
+            <div class="actions">
+              {% if task.start_url %}<a class="btn btn-start" href="{{ task.start_url }}">Mark started</a>{% endif %}
+              {% if task.complete_url %}<a class="btn btn-complete" href="{{ task.complete_url }}">Mark complete</a>{% endif %}
+            </div>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+      {% endif %}
+
+      {% if (not today_tasks or today_tasks|length == 0) and (not tomorrow_tasks or tomorrow_tasks|length == 0) %}
+      <div class="empty">Nothing due — enjoy the breathing room.</div>
+      {% endif %}
+
+      <div class="footer">
+        <a href="{{ dashboard_url|default('https://lumicoria.ai/tasks') }}">Open Lumicoria</a>
+        · Quiet hours and digest cadence in
+        <a href="{{ settings_url|default('https://lumicoria.ai/settings') }}">settings</a>.
+      </div>
+    </div>
+  </div>
+</body>
+</html>

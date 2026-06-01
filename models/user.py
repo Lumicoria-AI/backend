@@ -155,6 +155,8 @@ class UserSettings(BaseModel):
     preferred_ai_model: str = "default"
     # ── Phase 1 ─────────────────────────────────────────────────────────
     task_reminder_settings: TaskReminderSettings = Field(default_factory=TaskReminderSettings)
+    # ── Phase 3: Google Calendar dual-write toggle ──────────────────────
+    auto_sync_google_calendar: bool = False
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: Optional[datetime] = None
 

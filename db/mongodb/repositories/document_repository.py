@@ -494,13 +494,29 @@ class DocumentRepository(BaseRepository[Document]):
                     "tags": ["auto-generated", "document-extraction"],
                 }
 
-                # Parse deadline to due_date if present
-                if "deadline" in task and task["deadline"]:
+                # Phase 4: prefer the normalised `due_date` (ISO-8601 UTC) from
+                # the agent's _normalize_task_record.  Fall back to parsing the
+                # raw `deadline` phrase for legacy paths.
+                if task.get("due_date"):
+                    try:
+                        raw_dd = str(task["due_date"])
+                        iso_candidate = raw_dd[:-1] if raw_dd.endswith("Z") else raw_dd
+                        task_data["due_date"] = datetime.fromisoformat(iso_candidate)
+                    except Exception:
+                        from dateutil import parser as date_parser
+                        try:
+                            task_data["due_date"] = date_parser.parse(task["due_date"])
+                        except (ValueError, TypeError):
+                            task_data["metadata"]["raw_deadline"] = task.get("deadline") or task.get("due_date")
+                elif task.get("deadline"):
                     from dateutil import parser as date_parser
                     try:
                         task_data["due_date"] = date_parser.parse(task["deadline"])
                     except (ValueError, TypeError):
                         task_data["metadata"]["raw_deadline"] = task["deadline"]
+
+                if task.get("inferred_due_date"):
+                    task_data["metadata"]["inferred_due_date"] = True
 
                 if "assignee" in task and task["assignee"]:
                     task_data["metadata"]["suggested_assignee"] = task["assignee"]

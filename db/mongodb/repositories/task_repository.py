@@ -538,19 +538,31 @@ class TaskRepository(BaseRepository[Task]):
         task_id: str,
         organization_id: str,
         update_data: Dict[str, Any],
+        *,
+        changed_by: Optional[str] = None,
+        changed_by_name: Optional[str] = None,
     ) -> Optional[Task]:
-        """Org-scoped task update.  Records `status_history` automatically
-        when `status` is in the patch so UI status changes are auditable."""
+        """Org-scoped task update.
+
+        Auto-historizes `status` and `assigned_to` transitions.  When
+        `changed_by` (a user id) is supplied, it's recorded on the history
+        entry so the UI can render "Completed by Grace" without a second
+        round-trip.
+        """
         oid = self._coerce_oid(task_id)
         if not isinstance(oid, ObjectId):
             return None
         collection = await self.collection
 
-        # Strip Nones, never let the caller overwrite identity fields.
-        cleaned = {
-            k: v for k, v in (update_data or {}).items()
-            if v is not None and k not in {"_id", "id", "created_by", "organization_id", "created_at"}
-        }
+        # Strip Nones — except for fields we explicitly allow nulling.
+        nullable_fields = {"assigned_to", "assigned_to_email", "due_date", "calendar_event_id", "gcal_event_id", "invite_id"}
+        cleaned: Dict[str, Any] = {}
+        for k, v in (update_data or {}).items():
+            if k in {"_id", "id", "created_by", "organization_id", "created_at"}:
+                continue
+            if v is None and k not in nullable_fields:
+                continue
+            cleaned[k] = v
         if not cleaned:
             return await self.get_task_by_id(task_id, organization_id)
 
@@ -558,18 +570,39 @@ class TaskRepository(BaseRepository[Task]):
         if "assigned_to" in cleaned and cleaned["assigned_to"]:
             cleaned["assigned_to"] = self._coerce_oid(cleaned["assigned_to"])
 
-        cleaned["updated_at"] = datetime.utcnow()
+        now = datetime.utcnow()
+        cleaned["updated_at"] = now
 
         update_doc: Dict[str, Any] = {"$set": cleaned}
+        pushes: Dict[str, Any] = {}
 
         # Auto-historize status changes through this generic path.
         if "status" in cleaned:
-            update_doc["$push"] = {
-                "status_history": {
-                    "status": cleaned["status"],
-                    "changed_at": datetime.utcnow(),
-                }
+            history_entry: Dict[str, Any] = {
+                "status": cleaned["status"],
+                "changed_at": now,
             }
+            if changed_by:
+                history_entry["changed_by"] = self._coerce_oid(changed_by)
+            if changed_by_name:
+                history_entry["changed_by_name"] = changed_by_name
+            pushes["status_history"] = history_entry
+
+        # Also historize assignment changes — useful for "who reassigned this".
+        if "assigned_to" in cleaned or "assigned_to_email" in cleaned:
+            assign_entry: Dict[str, Any] = {
+                "assigned_to": cleaned.get("assigned_to"),
+                "assigned_to_email": cleaned.get("assigned_to_email"),
+                "changed_at": now,
+            }
+            if changed_by:
+                assign_entry["changed_by"] = self._coerce_oid(changed_by)
+            if changed_by_name:
+                assign_entry["changed_by_name"] = changed_by_name
+            pushes["assignment_history"] = assign_entry
+
+        if pushes:
+            update_doc["$push"] = pushes
 
         query: Dict[str, Any] = {"_id": oid}
         if organization_id:

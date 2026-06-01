@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Request
+import re
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Request, Query
 from fastapi.responses import JSONResponse
-from typing import Any, List
+from typing import Any, Dict, List
 from backend.api.deps import get_db, get_current_user, get_current_active_user
 from backend.db.mongodb.repositories.user_repository import UserRepository, get_user_repository
 from backend.models.user import User, UserUpdate, UserResponse
@@ -169,3 +170,75 @@ async def upload_user_avatar(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Error uploading avatar"
         )
+
+
+# ── Phase 5: lightweight user search for the assignee popover ─────────────
+
+@router.get("/search", response_model=None)
+async def search_users(
+    q: str = Query("", description="Substring of name or email (case-insensitive)"),
+    limit: int = Query(8, ge=1, le=25),
+    current_user: User = Depends(get_current_active_user),
+) -> List[Dict[str, Any]]:
+    """Return matching users for the Tasks → Assignee popover.
+
+    Scope: the current user's organization (or the user themself when no
+    distinct org exists).  Matches against `full_name` (case-insensitive
+    substring) and `email` (prefix).  Returns at most `limit` rows.
+
+    The search is intentionally narrow — we don't want this becoming a
+    user-enumeration vector.  Empty / whitespace-only `q` returns [].
+    """
+    needle = (q or "").strip()
+    if len(needle) < 1:
+        return []
+
+    org_id = getattr(current_user, "organization_id", None) or str(current_user.id)
+
+    from backend.db.mongodb.mongodb import MongoDB
+    from bson import ObjectId
+    try:
+        org_oid: Any = ObjectId(str(org_id))
+    except Exception:
+        org_oid = str(org_id)
+
+    safe = re.escape(needle)
+    col = await MongoDB.get_collection("users")
+
+    # Match scope:
+    #   • Same organization_id (covers users that share a real org), OR
+    #   • The current user themself, OR
+    #   • Users whose org_id field is missing (legacy / personal accounts —
+    #     the current user is their own org in that case anyway).
+    query = {
+        "$and": [
+            {
+                "$or": [
+                    {"full_name": {"$regex": safe, "$options": "i"}},
+                    {"email": {"$regex": "^" + safe, "$options": "i"}},
+                ]
+            },
+            {
+                "$or": [
+                    {"organization_id": org_oid},
+                    {"organization_id": str(org_id)},
+                    {"_id": ObjectId(str(current_user.id))} if ObjectId.is_valid(str(current_user.id)) else {"_id": str(current_user.id)},
+                ]
+            },
+        ]
+    }
+
+    rows: List[Dict[str, Any]] = []
+    async for doc in col.find(
+        query,
+        projection={"_id": 1, "email": 1, "full_name": 1, "avatar_url": 1, "job_title": 1},
+    ).limit(limit):
+        rows.append({
+            "id": str(doc.get("_id")),
+            "email": doc.get("email"),
+            "full_name": doc.get("full_name") or "",
+            "avatar_url": doc.get("avatar_url"),
+            "job_title": doc.get("job_title"),
+        })
+    return rows
+

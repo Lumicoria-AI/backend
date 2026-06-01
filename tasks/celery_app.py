@@ -41,6 +41,34 @@ def _weekly_monday_9am():
     return crontab(hour=9, minute=0, day_of_week="monday")
 
 
+# Phase 4 task-reminder schedules.  Each is a crontab so we can run them on
+# specific *local* hours; per-user timezone filtering happens inside the
+# service.  All windows include a ±30 min tolerance.
+def _hourly_morning_window():
+    """Every hour at :05.  The per-user task checks the user's local 08:00."""
+    from celery.schedules import crontab
+    return crontab(minute=5)
+
+
+def _hourly_evening_window():
+    """Every hour at :07.  The per-user task checks the user's local 17:00."""
+    from celery.schedules import crontab
+    return crontab(minute=7)
+
+
+def _critical_every_15min():
+    """Every 15 minutes — guarded by reminder_state.last_critical_push."""
+    from celery.schedules import crontab
+    return crontab(minute="*/15")
+
+
+def _weekly_fri_sat_9am():
+    """Friday 09:00 UTC.  Saturday-preferring users are handled inside the
+    fan-out (it inspects each user's weekly_digest_day setting)."""
+    from celery.schedules import crontab
+    return crontab(hour=9, minute=0, day_of_week="friday,saturday")
+
+
 celery_app = Celery(
     "lumicoria",
     broker=_build_broker_url(),
@@ -48,6 +76,7 @@ celery_app = Celery(
     include=[
         "backend.tasks.document_tasks",
         "backend.tasks.wellbeing_tasks",
+        "backend.tasks.task_reminder_tasks",  # Phase 4
     ],
 )
 
@@ -97,9 +126,30 @@ celery_app.conf.beat_schedule = {
         "task": "wellbeing.schedule_mood_prompts",
         "schedule": 1200.0,
     },
-    # Weekly digest — Monday 09:00 UTC.
+    # Weekly wellbeing digest — Monday 09:00 UTC.
     "wellbeing-send-weekly-digest": {
         "task": "wellbeing.send_weekly_digest",
         "schedule": _weekly_monday_9am(),
+    },
+
+    # ── Phase 4: task-reminder fan-outs ─────────────────────────────────
+    # Hourly fan-outs let the per-user task gate on the user's local
+    # 08:00 / 17:00 without exploding the schedule.  Idempotency lives
+    # in `reminder_state.last_*` on each task.
+    "tasks-fanout-morning-digest": {
+        "task": "tasks.fanout_morning_digest",
+        "schedule": _hourly_morning_window(),
+    },
+    "tasks-fanout-evening-critical-push": {
+        "task": "tasks.fanout_evening_critical_push",
+        "schedule": _hourly_evening_window(),
+    },
+    "tasks-fanout-critical-hour-warning": {
+        "task": "tasks.fanout_critical_hour_warning",
+        "schedule": _critical_every_15min(),
+    },
+    "tasks-fanout-weekly-digest": {
+        "task": "tasks.fanout_weekly_digest",
+        "schedule": _weekly_fri_sat_9am(),
     },
 }

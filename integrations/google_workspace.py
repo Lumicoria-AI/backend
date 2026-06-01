@@ -53,8 +53,8 @@ class GoogleWorkspaceIntegration:
             logger.error("Error creating calendar event", error=str(e))
             return {"error": str(e)}
     
-    async def get_upcoming_events(self, 
-                               calendar_id: str = "primary", 
+    async def get_upcoming_events(self,
+                               calendar_id: str = "primary",
                                max_results: int = 10) -> List[Dict[str, Any]]:
         """
         Get upcoming events from a calendar.
@@ -67,7 +67,53 @@ class GoogleWorkspaceIntegration:
         except Exception as e:
             logger.error("Error getting upcoming events", error=str(e))
             return []
-    
+
+    async def update_calendar_event(
+        self,
+        event_id: str,
+        *,
+        calendar_id: str = "primary",
+        summary: Optional[str] = None,
+        description: Optional[str] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        location: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Patch an existing Google Calendar event.
+
+        Phase 3: lets the Lumicoria calendar mirror local edits onto Google
+        without recreating the event (which would orphan invitations).
+        """
+        try:
+            return await self.client.update_calendar_event(
+                event_id=event_id,
+                calendar_id=calendar_id,
+                summary=summary,
+                description=description,
+                start_time=start_time,
+                end_time=end_time,
+                location=location,
+                status=status,
+            )
+        except Exception as e:
+            logger.error("Error updating calendar event", error=str(e), event_id=event_id)
+            return {"error": str(e)}
+
+    async def delete_calendar_event(
+        self,
+        event_id: str,
+        calendar_id: str = "primary",
+    ) -> bool:
+        """Delete a Google Calendar event.  Returns True on success or 404."""
+        try:
+            return await self.client.delete_calendar_event(
+                event_id=event_id, calendar_id=calendar_id
+            )
+        except Exception as e:
+            logger.error("Error deleting calendar event", error=str(e), event_id=event_id)
+            return False
+
     # ----- Drive Methods -----
     
     async def list_files(self, folder_id: str = None, query: str = None, max_results: int = 10) -> List[Dict[str, Any]]:

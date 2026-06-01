@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="x-apple-disable-message-reformatting">
+  <meta name="color-scheme" content="light only">
+  <meta name="supported-color-schemes" content="light">
+  <title>{{ subject|default('You have been invited to Lumicoria') }}</title>
+  <style>
+    /* ── Phase 5: premium iOS-feel invite ─────────────────────────────────
+       Brand purple lead, periwinkle accent, generous spacing, no AI slop.
+       Gradients are used purposefully: hero, brand tile, CTA. Body type is
+       slate-on-white for clarity. */
+    body { margin:0; padding:0; background:#EDE9FE; font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Inter','Segoe UI',Helvetica,Arial,sans-serif; color:#0F172A; -webkit-font-smoothing:antialiased; }
+    a { color:#6C4AB0; text-decoration:none; }
+
+    .wrap { padding:40px 16px; background:linear-gradient(180deg,#EDE9FE 0%,#F5F3FF 35%,#FFFFFF 100%); }
+    .container { max-width:600px; margin:0 auto; background:#FFFFFF; border-radius:22px; overflow:hidden; box-shadow:0 24px 60px -24px rgba(76,29,149,0.28), 0 4px 16px -4px rgba(15,23,42,0.06); }
+
+    /* ── Brand header — gradient hero ─────────────────────────────────── */
+    .hero { position:relative; padding:36px 36px 32px; background:linear-gradient(135deg,#7C3AED 0%,#6C4AB0 45%,#4C1D95 100%); color:#FFFFFF; }
+    .hero-mesh { position:absolute; inset:0; background:radial-gradient(circle at 85% 10%, rgba(255,255,255,0.18) 0%, transparent 50%), radial-gradient(circle at 10% 90%, rgba(196,181,253,0.25) 0%, transparent 55%); pointer-events:none; }
+
+    .brand { display:table; width:100%; position:relative; z-index:1; }
+    .brand-cell { display:table-cell; vertical-align:middle; }
+    .brand-cell.logo { width:56px; }
+    /* CSS-only fallback tile — works in 100% of email clients without loading an image */
+    .logo-tile { display:inline-block; width:48px; height:48px; border-radius:13px; background:linear-gradient(135deg,#FFFFFF 0%,#F5F3FF 100%); box-shadow:0 6px 18px -4px rgba(0,0,0,0.18), inset 0 1px 0 rgba(255,255,255,0.5); text-align:center; line-height:48px; }
+    .logo-tile img { width:30px; height:30px; vertical-align:middle; border-radius:7px; }
+    .logo-tile .lett { font-size:22px; font-weight:700; color:#6C4AB0; letter-spacing:-0.02em; line-height:48px; font-family:-apple-system,'SF Pro Display','Inter',sans-serif; }
+
+    .brand-cell.name { padding-left:14px; }
+    .brand-name { color:#FFFFFF; font-size:17px; font-weight:600; letter-spacing:-0.01em; line-height:1.1; }
+    .brand-tag { color:#E9DEFA; font-size:11px; text-transform:uppercase; letter-spacing:0.14em; font-weight:500; margin-top:3px; }
+
+    .hero-headline { position:relative; z-index:1; margin:28px 0 0; color:#FFFFFF; font-size:26px; line-height:1.25; font-weight:600; letter-spacing:-0.02em; }
+    .hero-headline em { font-style:normal; color:#F5F3FF; background:linear-gradient(180deg,transparent 60%, rgba(255,255,255,0.18) 60%); padding:0 2px; }
+    .hero-sub { position:relative; z-index:1; margin:14px 0 0; color:#E9DEFA; font-size:15px; line-height:1.55; max-width:480px; }
+
+    /* ── Body ─────────────────────────────────────────────────────────── */
+    .body { padding:32px 36px 8px; }
+    .eyebrow { font-size:11px; text-transform:uppercase; letter-spacing:0.12em; color:#8B5CF6; font-weight:600; margin:0 0 12px; }
+    h2 { font-size:18px; font-weight:600; color:#0F172A; margin:0 0 8px; letter-spacing:-0.01em; }
+    .lede { font-size:15px; line-height:1.65; color:#475569; margin:0 0 24px; }
+    .inviter { color:#0F172A; font-weight:600; }
+
+    /* iOS-style soft card with subtle inner glow */
+    .context-card { background:linear-gradient(180deg,#F8FAFF 0%,#F1EEFB 100%); border:1px solid rgba(124,58,237,0.10); border-radius:16px; padding:20px 22px; margin:0 0 24px; box-shadow:inset 0 1px 0 rgba(255,255,255,0.6); }
+    .context-table { display:table; width:100%; }
+    .context-row { display:table-row; }
+    .context-cell { display:table-cell; padding:7px 0; font-size:14px; vertical-align:top; }
+    .context-cell.lbl { width:100px; color:#94A3B8; font-size:11px; text-transform:uppercase; letter-spacing:0.08em; font-weight:600; padding-top:9px; }
+    .context-cell.val { color:#0F172A; font-weight:500; }
+
+    /* Personal note — quote feel */
+    .note { background:linear-gradient(135deg,#F5F3FF 0%,#FDF4FF 100%); border-left:3px solid #8B5CF6; padding:14px 18px; border-radius:0 12px 12px 0; color:#3D2D6F; font-size:15px; line-height:1.55; margin:0 0 24px; font-style:italic; }
+
+    /* Task list */
+    .section-title { font-size:11px; text-transform:uppercase; letter-spacing:0.12em; color:#8B5CF6; font-weight:600; margin:28px 0 12px; }
+    .task { display:table; width:100%; padding:14px 16px; background:#FFFFFF; border:1px solid #EEF2FF; border-radius:13px; margin-bottom:10px; box-shadow:0 1px 2px rgba(15,23,42,0.04); }
+    .task-cell { display:table-cell; vertical-align:top; }
+    .task-cell.dot { width:16px; padding-top:7px; }
+    .task-cell.body { padding-left:8px; }
+    .pri-dot { display:inline-block; width:9px; height:9px; border-radius:50%; box-shadow:0 0 0 3px rgba(0,0,0,0.04); }
+    .pri-critical { background:linear-gradient(135deg,#F87171,#EF4444); box-shadow:0 0 0 3px rgba(239,68,68,0.10); }
+    .pri-high { background:linear-gradient(135deg,#FBBF24,#F59E0B); box-shadow:0 0 0 3px rgba(245,158,11,0.10); }
+    .pri-medium { background:linear-gradient(135deg,#A78BFA,#6C4AB0); box-shadow:0 0 0 3px rgba(108,74,176,0.10); }
+    .pri-low { background:linear-gradient(135deg,#CBD5E1,#94A3B8); box-shadow:0 0 0 3px rgba(148,163,184,0.10); }
+    .task .title { font-size:15px; font-weight:600; color:#0F172A; margin:0 0 3px; letter-spacing:-0.005em; }
+    .task .meta { font-size:12px; color:#64748B; }
+
+    /* CTA */
+    .cta-wrap { padding:12px 0 4px; text-align:center; }
+    .cta { display:inline-block; background:linear-gradient(135deg,#7C3AED 0%,#6C4AB0 100%); color:#FFFFFF !important; font-size:15px; font-weight:600; text-decoration:none; padding:15px 36px; border-radius:9999px; letter-spacing:-0.005em; box-shadow:0 10px 30px -8px rgba(124,58,237,0.50), inset 0 1px 0 rgba(255,255,255,0.16); -webkit-text-size-adjust:none; }
+    .cta:hover { background:linear-gradient(135deg,#6D28D9 0%,#5C3C9D 100%); }
+    .fine { text-align:center; font-size:12px; color:#94A3B8; margin:14px 0 0; }
+
+    /* Footer */
+    .footer { padding:28px 36px 32px; background:linear-gradient(180deg,#FFFFFF 0%,#FAFAFE 100%); border-top:1px solid #F1F5F9; }
+    .footer p { margin:0 0 8px; font-size:12px; color:#64748B; line-height:1.6; }
+    .footer a { color:#6C4AB0; }
+    .footer .link-row { word-break:break-all; }
+    .legal { font-size:11px; color:#94A3B8; margin-top:18px; line-height:1.6; }
+    .legal-brand { color:#0F172A; font-weight:600; }
+
+    /* Mobile */
+    @media only screen and (max-width: 480px) {
+      .wrap { padding:24px 12px; }
+      .hero { padding:30px 24px 26px; }
+      .body { padding:26px 24px 4px; }
+      .footer { padding:22px 24px 28px; }
+      .hero-headline { font-size:22px; }
+      .lede { font-size:14px; }
+      .cta { width:100%; box-sizing:border-box; padding:14px 22px; }
+      .context-cell.lbl { width:84px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="container">
+
+      <!-- ── Brand hero with gradient + bottom-attached headline ── -->
+      <div class="hero">
+        <div class="hero-mesh"></div>
+        <div class="brand">
+          <div class="brand-cell logo">
+            <span class="logo-tile">
+              {% if logo_url %}
+              <img src="{{ logo_url }}" alt="L" />
+              {% else %}
+              <span class="lett">L</span>
+              {% endif %}
+            </span>
+          </div>
+          <div class="brand-cell name">
+            <div class="brand-name">Lumicoria</div>
+            <div class="brand-tag">AI workspace</div>
+          </div>
+        </div>
+
+        <p class="hero-headline">
+          {% if organization_name %}You're invited to <em>{{ organization_name }}</em>
+          {% elif project_name %}You're invited to <em>{{ project_name }}</em>
+          {% elif task_count and task_count > 0 %}You have <em>{{ task_count }} task{% if task_count != 1 %}s{% endif %}</em> waiting
+          {% else %}You're invited to Lumicoria{% endif %}
+        </p>
+        <p class="hero-sub">
+          {{ inviter_name|default('A teammate') }} wants you to collaborate inside an AI workspace where
+          your team plans, assigns, and completes work alongside specialised AI agents.
+        </p>
+      </div>
+
+      <!-- ── Body ── -->
+      <div class="body">
+        <p class="eyebrow">Invitation</p>
+        <h2>From {{ inviter_name|default('Lumicoria') }}{% if inviter_email %} <span style="color:#94A3B8; font-weight:400;">({{ inviter_email }})</span>{% endif %}</h2>
+        <p class="lede">
+          Accept to join {{ organization_name|default('the workspace') }}
+          {% if role %}as <strong>{{ role|capitalize }}</strong>{% endif %}.
+          Your account takes about a minute to set up — and any tasks shown below will be assigned to you on the spot.
+        </p>
+
+        {% if message %}
+        <div class="note">"{{ message }}"</div>
+        {% endif %}
+
+        <div class="context-card">
+          <div class="context-table">
+            {% if organization_name %}
+            <div class="context-row">
+              <div class="context-cell lbl">Workspace</div>
+              <div class="context-cell val">{{ organization_name }}</div>
+            </div>
+            {% endif %}
+            {% if project_name %}
+            <div class="context-row">
+              <div class="context-cell lbl">Project</div>
+              <div class="context-cell val">{{ project_name }}</div>
+            </div>
+            {% endif %}
+            <div class="context-row">
+              <div class="context-cell lbl">Your role</div>
+              <div class="context-cell val">{{ role|capitalize|default('Member') }}</div>
+            </div>
+            <div class="context-row">
+              <div class="context-cell lbl">Invited as</div>
+              <div class="context-cell val">{{ recipient_email }}</div>
+            </div>
+          </div>
+        </div>
+
+        {% if tasks and tasks|length > 0 %}
+        <div class="section-title">Tasks waiting for you</div>
+        {% for task in tasks %}
+        <div class="task">
+          <div class="task-cell dot"><span class="pri-dot pri-{{ task.priority|default('medium') }}"></span></div>
+          <div class="task-cell body">
+            <p class="title">{{ task.title }}</p>
+            <p class="meta">{{ task.due_label }}</p>
+          </div>
+        </div>
+        {% endfor %}
+        {% endif %}
+
+        <div class="cta-wrap" style="margin-top:32px;">
+          <a class="cta" href="{{ accept_url }}">Accept invitation</a>
+          {% if expires_at %}
+          <p class="fine">This invitation is valid until {{ expires_at }}.</p>
+          {% endif %}
+        </div>
+      </div>
+
+      <!-- ── Footer ── -->
+      <div class="footer">
+        <p>
+          If you do not have a Lumicoria account, accepting will let you create one in seconds.
+          The link is unique to {{ recipient_email }}, so keep it private.
+        </p>
+        <p>Trouble with the button? Copy and paste this link into your browser:</p>
+        <p class="link-row"><a href="{{ accept_url }}">{{ accept_url }}</a></p>
+        <p class="legal">
+          <span class="legal-brand">Lumicoria</span> · AI workspace for teams.<br>
+          You are receiving this because someone invited you. If this was unexpected, you can safely ignore it.
+        </p>
+      </div>
+
+    </div>
+  </div>
+</body>
+</html>
