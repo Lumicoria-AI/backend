@@ -42,6 +42,7 @@ from backend.api.v1.endpoints import (
     calendar,  # Phase 2: Lumicoria-native Calendar
     invites,   # Phase 5: invite module
     organizations,  # Phase 8: Organizations REST API
+    analytics,      # Phase 9: Dashboard analytics
 )
 from backend.api.routers.research_mentor import router as research_mentor_router
 from backend.api.routers.ethics_bias_router import router as ethics_bias_router
@@ -105,6 +106,9 @@ api_router.include_router(invites.router, prefix="/invites", tags=["invites"])
 
 # Organization endpoints (Phase 8 — settings + members + invites)
 api_router.include_router(organizations.router, prefix="/organizations", tags=["organizations"])
+
+# Dashboard analytics (Phase 9 — single payload for the Dashboard surface)
+api_router.include_router(analytics.router, prefix="/analytics", tags=["analytics"])
 
 # Activity endpoints
 api_router.include_router(activity.router, prefix="/activity", tags=["activity"])
