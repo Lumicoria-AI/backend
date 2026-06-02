@@ -14,6 +14,12 @@ class UserBase(BaseModel):
     company: Optional[str] = None
     timezone: str = "UTC"
     preferred_language: str = "en"
+    # Phase 8: surface organization membership on the model so endpoints can
+    # check `current_user.organization_ids`.  The DB carries this as a list
+    # (a user can theoretically belong to multiple orgs).  `organization_id`
+    # is a convenience pointer to the primary org (first in the list).
+    organization_ids: List[str] = Field(default_factory=list)
+    organization_id: Optional[str] = None
 
     model_config = ConfigDict(
         populate_by_name=True,

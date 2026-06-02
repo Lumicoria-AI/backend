@@ -7,7 +7,7 @@ from backend.models.mongodb_models import (
     OrganizationCreate,
     User
 )
-from .user_repository import user_repository
+from .user_repository import user_repository, get_user_repository
 import structlog
 
 logger = structlog.get_logger()
@@ -43,7 +43,8 @@ class OrganizationRepository(BaseRepository[Organization]):
         try:
             organization = await self.create(org_dict)
             # Add organization to creator's organizations
-            await user_repository.add_to_organization(creator_id, str(organization.id))
+            user_repo = await get_user_repository()
+            await user_repo.add_to_organization(creator_id, str(organization.id))
             return organization
         except Exception as e:
             logger.error("Failed to create organization", error=str(e), creator_id=creator_id)
@@ -112,7 +113,8 @@ class OrganizationRepository(BaseRepository[Organization]):
         try:
             org = await self.update(organization_id, update_data)
             if org:
-                await user_repository.add_to_organization(user_id, organization_id)
+                user_repo = await get_user_repository()
+                await user_repo.add_to_organization(user_id, organization_id)
             return org
         except Exception as e:
             logger.error(
@@ -139,7 +141,8 @@ class OrganizationRepository(BaseRepository[Organization]):
         try:
             org = await self.update(organization_id, update_data)
             if org:
-                await user_repository.remove_from_organization(user_id, organization_id)
+                user_repo = await get_user_repository()
+                await user_repo.remove_from_organization(user_id, organization_id)
             return org
         except Exception as e:
             logger.error(
@@ -182,8 +185,9 @@ class OrganizationRepository(BaseRepository[Organization]):
         org = await self.get_by_id(organization_id)
         if not org:
             return []
-        
-        return await user_repository.find_many(
+
+        user_repo = await get_user_repository()
+        return await user_repo.find_many(
             {"_id": {"$in": org.member_ids}},
             skip=skip,
             limit=limit,
@@ -200,8 +204,9 @@ class OrganizationRepository(BaseRepository[Organization]):
         org = await self.get_by_id(organization_id)
         if not org:
             return []
-        
-        return await user_repository.find_many(
+
+        user_repo = await get_user_repository()
+        return await user_repo.find_many(
             {"_id": {"$in": org.admin_ids}},
             skip=skip,
             limit=limit,

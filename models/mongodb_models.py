@@ -701,6 +701,52 @@ class WellbeingData(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
+# ── Organization Models (Phase 8) ─────────────────────────────────────
+class Organization(MongoBaseModel):
+    """A tenant in the Lumicoria platform.  Members and admins are tracked
+    by ObjectId lists; the `User.organization_id` field points back at
+    this row so org-scoped queries are cheap on the user side too.
+    """
+    name: str
+    description: Optional[str] = None
+    industry: Optional[str] = None
+    website: Optional[str] = None
+    logo_url: Optional[str] = None
+    # Plan / billing reference — populated by Phase 9 billing flow.
+    plan: Optional[str] = None
+    # Member + admin rosters.  An admin is also always a member.
+    member_ids: List[PyObjectId] = Field(default_factory=list)
+    admin_ids: List[PyObjectId] = Field(default_factory=list)
+    # The user who created the org; cannot be removed without ownership transfer.
+    owner_id: Optional[PyObjectId] = None
+    settings: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    model_config = {
+        "populate_by_name": True,
+        "arbitrary_types_allowed": True,
+        "json_encoders": {ObjectId: str, datetime: lambda v: v.isoformat()},
+    }
+
+
+class OrganizationCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    industry: Optional[str] = None
+    website: Optional[str] = None
+    logo_url: Optional[str] = None
+
+
+class OrganizationUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    industry: Optional[str] = None
+    website: Optional[str] = None
+    logo_url: Optional[str] = None
+    settings: Optional[Dict[str, Any]] = None
+
+
 # Student Models
 class StudentInteraction(MongoBaseModel):
     """Model for storing student agent interactions."""

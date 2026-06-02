@@ -41,6 +41,7 @@ from backend.api.v1.endpoints import (
     blog,
     calendar,  # Phase 2: Lumicoria-native Calendar
     invites,   # Phase 5: invite module
+    organizations,  # Phase 8: Organizations REST API
 )
 from backend.api.routers.research_mentor import router as research_mentor_router
 from backend.api.routers.ethics_bias_router import router as ethics_bias_router
@@ -101,6 +102,9 @@ api_router.include_router(calendar.router, prefix="/calendar", tags=["calendar"]
 
 # Invite endpoints (Phase 5 — invite-to-task / invite-to-org collaboration)
 api_router.include_router(invites.router, prefix="/invites", tags=["invites"])
+
+# Organization endpoints (Phase 8 — settings + members + invites)
+api_router.include_router(organizations.router, prefix="/organizations", tags=["organizations"])
 
 # Activity endpoints
 api_router.include_router(activity.router, prefix="/activity", tags=["activity"])
