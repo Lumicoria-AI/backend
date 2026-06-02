@@ -34,7 +34,8 @@ from ....services.document_processor import document_processor
 from ....agents.agent_service import AgentService
 from ....services.activity_logger import log_activity
 from ....core.dependencies import get_agent_service
-from ....agents.router import get_router
+from ....agents.router import get_router, plan_steps
+from ....agents.step_graph import StepGraph
 from ....agents import memory as conversation_memory
 from ....agents.response_normalizer import normalize_agent_response
 
@@ -327,26 +328,43 @@ async def ask_lumicoria_stream(
         )
 
         try:
-            # ── Step 3: Route intent (always runs the auto-router) ──
-            intent_router = await get_router()
-            route_result = await intent_router.route(
+            # ── Step 3: Plan agent flow (Phase 7).  The planner produces a
+            # 1-step plan for trivial queries (legacy behaviour) and a 2-4
+            # step plan for genuinely multi-domain questions.  Single-step
+            # plans are walked inline below; multi-step plans hand off to
+            # the StepGraph orchestrator.
+            plan = await plan_steps(
                 message=request.query,
                 conversation_history=history,
             )
-            agent_key = route_result["agent"]
-            confidence = route_result["confidence"]
+            agent_key = plan["steps"][0]["agent"] if plan.get("steps") else "general"
+            confidence = 0.9 if plan.get("multi_step") else 0.85
 
-            # If user explicitly tagged an agent via /, use it as a hint:
-            # override only when auto-router has low confidence or picked "general"
+            # If user explicitly tagged an agent via /, prefer it for
+            # single-step plans (multi-step plans keep their first hop
+            # because the user's @-tag means "this is the final composer").
             if request.agent_override:
-                if confidence < 0.7 or agent_key == "general":
+                if not plan.get("multi_step"):
                     agent_key = request.agent_override
-                    confidence = max(confidence, 0.9)
+                    plan = {
+                        "multi_step": False,
+                        "steps": [{"agent": agent_key, "purpose": "Answer the question."}],
+                        "reason": "user-pinned agent",
+                    }
+                else:
+                    # Replace the final composer with the override.
+                    plan["steps"][-1] = {
+                        "agent": request.agent_override,
+                        "purpose": "Compose the final answer using the gathered context.",
+                    }
+                    agent_key = plan["steps"][0]["agent"]
 
-            # First frame: metadata
-            yield f"data: {json.dumps({'type': 'meta', 'conversation_id': conversation_id, 'agent_used': agent_key, 'confidence': confidence})}\n\n"
+            # First frame: metadata (agent_used = the composer / sole agent
+            # so the UI's existing badge still works for single-step).
+            composer_agent = plan["steps"][-1]["agent"] if plan.get("steps") else "general"
+            yield f"data: {json.dumps({'type': 'meta', 'conversation_id': conversation_id, 'agent_used': composer_agent, 'confidence': confidence, 'multi_step': bool(plan.get('multi_step'))})}\n\n"
 
-            # ── Step 4: Resolve agent ──
+            # ── Step 4: Resolve agent (single-step path) ──
             try:
                 agent = agent_service.get_agent(agent_key)
             except (ValueError, KeyError):
@@ -425,11 +443,95 @@ async def ask_lumicoria_stream(
                 logger.warning("rag_context_fetch_failed", error=str(ctx_err))
                 rag_context = ""
 
-            # ── Step 6: Stream with RAG context ──
+            # ── Step 6: Generate the answer ──
+            # Phase 7: multi-step plans (2+ specialised agents) walk through
+            # the StepGraph orchestrator which emits step_start/step_end
+            # frames alongside the delta tokens.  Single-step plans use the
+            # existing direct streamer (zero behaviour change).
             llm = getattr(agent, "llm_client", None) or getattr(agent, "perplexity_client", None)
 
-            if llm and hasattr(llm, "stream"):
-                # Build system prompt with RAG context
+            if plan.get("multi_step") and len(plan.get("steps") or []) > 1:
+                from ....services.task_executor import instantiate_agent as _instantiate
+
+                # Compose-step streamer mirrors the single-step prompt shape
+                # (system + history + user) but threads in the accumulated
+                # context produced by the upstream steps.
+                async def _composer_streamer(*, agent, query, history, accumulated_context, purpose):
+                    base_system = getattr(agent, "system_prompt", None) or (
+                        "You are Lumicoria.ai, a helpful AI assistant. "
+                        "Answer the user's question accurately and helpfully."
+                    )
+                    if accumulated_context:
+                        sys = (
+                            f"{base_system}\n\n"
+                            "Below is research and context gathered by other Lumicoria "
+                            "agents.  Use it to compose a clear, helpful answer.  When "
+                            "you reference a source by its number, place [1], [2] inline.\n\n"
+                            f"{accumulated_context}"
+                        )
+                    else:
+                        sys = base_system
+                    messages = [{"role": "system", "content": sys}]
+                    if history:
+                        for m in history[-8:]:
+                            messages.append({"role": m.get("role", "user"), "content": m.get("content", "")})
+                    messages.append({"role": "user", "content": query})
+                    cfg = LLMConfig(temperature=0.7, max_tokens=None)
+                    composer_llm = getattr(agent, "llm_client", None) or getattr(agent, "perplexity_client", None)
+                    full = ""
+                    if composer_llm and hasattr(composer_llm, "stream"):
+                        try:
+                            async for chunk in composer_llm.stream(messages, config=cfg):
+                                if getattr(chunk, "content", None):
+                                    full += chunk.content
+                                    yield chunk.content, full
+                            return
+                        except Exception as e:  # noqa: BLE001
+                            logger.warning("composer_stream_failed", error=str(e))
+                    # process_async fallback
+                    try:
+                        raw_result = await agent.process_async({
+                            "query": query, "content": query, "prompt": query,
+                            "user_id": user_id, "conversation_id": conversation_id,
+                            "conversation_history": history,
+                            "context_snippets": [accumulated_context] if accumulated_context else [],
+                        })
+                        normalized = normalize_agent_response(raw_result, agent_key=plan["steps"][-1]["agent"])
+                        text = normalized.get("response", "") or ""
+                        if text:
+                            yield text, text
+                    except Exception as e:  # noqa: BLE001
+                        logger.error("composer_fallback_failed", error=str(e))
+
+                sg = StepGraph(
+                    plan=plan,
+                    user_id=str(user_id),
+                    organization_id=current_user.get("organization_id"),
+                    conversation_id=conversation_id,
+                    instantiate_agent=_instantiate,
+                    composer_streamer=_composer_streamer,
+                )
+
+                async for event in sg.run(
+                    query=request.query,
+                    history=history,
+                    rag_context=rag_context,
+                    rag_sources=sources,
+                ):
+                    etype = event.get("type")
+                    if etype == "delta":
+                        full_response += event.get("text", "")
+                        yield f"data: {json.dumps({'type': 'delta', 'text': event.get('text', '')})}\n\n"
+                    elif etype in ("plan", "step_start", "step_end"):
+                        yield f"data: {json.dumps(event)}\n\n"
+                    elif etype == "all_done":
+                        sources = event.get("all_sources", sources)
+                        context_used = event.get("context_used", context_used)
+                        if not full_response:
+                            full_response = event.get("final_text", "") or ""
+
+            elif llm and hasattr(llm, "stream"):
+                # Single-step plan with a streaming-capable agent (the common case).
                 base_system = getattr(agent, "system_prompt", None) or (
                     "You are Lumicoria.ai, a helpful AI assistant. "
                     "Answer the user's question accurately and helpfully."

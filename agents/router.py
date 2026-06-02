@@ -199,6 +199,31 @@ class AgentRouter:
         }
 
 
+PLAN_PROMPT = """You are a planner for the Lumicoria AI platform.  A user has asked a question and you must decide how many specialised agents are needed to answer it.
+
+Available agents and their specialties:
+{agent_list}
+
+Rules:
+1. Return ONLY a JSON object.  No markdown, no prose.
+2. Schema: {{"multi_step": <bool>, "steps": [{{"agent": "<agent_key>", "purpose": "<one short sentence>"}}], "reason": "<one sentence>"}}
+3. Use ONE step when the question can be answered by a single agent (the common case).  Set multi_step=false.
+4. Use 2–4 steps ONLY when the question genuinely needs multiple specialised agents (e.g. "summarise our last meeting and turn the action items into a Slack post" — meeting + creative + composer).
+5. The LAST step is always the *composer* — the agent that writes the final answer to the user.  Choose "general" when no specialised agent is the natural composer.
+6. Earlier steps are *context gatherers* — they prepare snippets / facts / drafts for the composer.  Their "purpose" must describe what context they produce.
+7. NEVER repeat an agent in two adjacent steps.
+8. NEVER include more than 4 steps.
+9. If the conversation history shows we're already mid-task, prefer fewer steps (the context has been built up).
+
+Conversation history (last {history_count} messages):
+{history}
+
+User's new message:
+{message}
+
+Return your plan as JSON:"""
+
+
 # ── Module-level singleton for convenience ──
 _router_instance: Optional[AgentRouter] = None
 
@@ -208,3 +233,129 @@ async def get_router() -> AgentRouter:
     if _router_instance is None:
         _router_instance = AgentRouter()
     return _router_instance
+
+
+# ── Multi-step planning (Phase 7) ─────────────────────────────────────
+
+
+async def plan_steps(
+    message: str,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+    max_history: int = 6,
+    max_steps: int = 4,
+) -> Dict[str, Any]:
+    """Decide which agent(s) should handle the user's message, in order.
+
+    For trivial queries returns a single-step plan that matches what the
+    classic `route()` would have produced.  For genuinely multi-domain
+    questions returns up to `max_steps` steps; the LAST step is always the
+    composer that writes the final answer back to the user.
+
+    Returns:
+        {
+          "multi_step": bool,
+          "steps": [{"agent": str, "purpose": str}, ...],
+          "reason": str,
+        }
+
+    Falls back to a single-step "general" plan if the LLM call or parsing
+    fails — the chat endpoint stays useful even with a flaky router.
+    """
+    from backend.ai_models import LLMConfig
+
+    router = await get_router()
+    history = conversation_history or []
+    recent = history[-max_history:] if len(history) > max_history else history
+
+    if recent:
+        history_text = "\n".join(
+            f"  [{msg.get('role', 'user')}]: {str(msg.get('content', ''))[:200]}"
+            for msg in recent
+        )
+    else:
+        history_text = "  (No previous messages — this is the start of the conversation)"
+
+    agent_list = "\n".join(
+        f'  - "{key}": {desc}' for key, desc in AGENT_REGISTRY.items()
+    )
+    prompt = PLAN_PROMPT.format(
+        agent_list=agent_list,
+        history_count=len(recent),
+        history=history_text,
+        message=message,
+    )
+
+    fallback_route = await router.route(message=message, conversation_history=recent)
+    fallback_plan: Dict[str, Any] = {
+        "multi_step": False,
+        "steps": [{
+            "agent": fallback_route["agent"],
+            "purpose": fallback_route.get("reason") or "Answer the question.",
+        }],
+        "reason": fallback_route.get("reason") or "single-agent fallback",
+    }
+
+    try:
+        cfg = LLMConfig(model=router.model, temperature=0.1, max_tokens=400)
+        response = await router.llm_client.generate(
+            messages=[{"role": "user", "content": prompt}],
+            config=cfg,
+        )
+        raw = response.content or ""
+    except Exception as e:  # noqa: BLE001
+        logger.warning("planner_llm_failed", error=str(e))
+        return fallback_plan
+
+    # Strip markdown fences if any
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[-1]
+    if cleaned.endswith("```"):
+        cleaned = cleaned.rsplit("```", 1)[0]
+    cleaned = cleaned.strip()
+
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        import re
+        match = re.search(r"\{[\s\S]*\}", raw)
+        if not match:
+            logger.warning("planner_no_json", preview=raw[:120])
+            return fallback_plan
+        try:
+            parsed = json.loads(match.group())
+        except json.JSONDecodeError:
+            logger.warning("planner_bad_json", preview=raw[:120])
+            return fallback_plan
+
+    raw_steps = parsed.get("steps") if isinstance(parsed, dict) else None
+    if not isinstance(raw_steps, list) or not raw_steps:
+        return fallback_plan
+
+    # Validate every step against the registry; collapse repeated adjacent agents.
+    clean_steps: List[Dict[str, str]] = []
+    prev_agent: Optional[str] = None
+    for entry in raw_steps[:max_steps]:
+        if not isinstance(entry, dict):
+            continue
+        agent_key = str(entry.get("agent") or "").strip().lower()
+        if agent_key not in AGENT_REGISTRY:
+            continue
+        if agent_key == prev_agent:
+            continue
+        purpose = str(entry.get("purpose") or "").strip()[:200] or "Process this step."
+        clean_steps.append({"agent": agent_key, "purpose": purpose})
+        prev_agent = agent_key
+
+    if not clean_steps:
+        return fallback_plan
+
+    multi_step = bool(parsed.get("multi_step")) and len(clean_steps) > 1
+    if len(clean_steps) == 1:
+        multi_step = False
+
+    return {
+        "multi_step": multi_step,
+        "steps": clean_steps,
+        "reason": str(parsed.get("reason") or "")[:300],
+    }
