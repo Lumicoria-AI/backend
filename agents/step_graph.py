@@ -114,6 +114,11 @@ class StepGraph:
         self.all_sources: List[Dict[str, Any]] = []
         self.context_used: int = 0
         self.parent_run_id: Optional[str] = None
+        # Aggregate token / cost totals across all steps — stamped onto
+        # the parent run when the plan closes.
+        self._parent_tokens_in: int = 0
+        self._parent_tokens_out: int = 0
+        self._parent_cost: float = 0.0
 
     # ── public API ────────────────────────────────────────────────────
 
@@ -193,6 +198,12 @@ class StepGraph:
                 agent = self._instantiate_agent(agent_key)
                 if agent is None:
                     raise RuntimeError(f"Agent '{agent_key}' is not registered for orchestration.")
+
+                # Reset usage so each step's tokens/cost are isolated.
+                try:
+                    agent.reset_usage()
+                except Exception:
+                    pass
 
                 if is_composer:
                     # Final step — stream tokens directly to the client.  The
@@ -283,6 +294,14 @@ class StepGraph:
             duration_ms = int((time.perf_counter() - start_ts) * 1000)
             status = "error" if error_msg else "completed"
 
+            # Grab whatever tokens / cost the agent burned during this step.
+            step_usage: Dict[str, Any] = {}
+            if agent is not None:
+                try:
+                    step_usage = agent.consume_usage() or {}
+                except Exception:
+                    step_usage = {}
+
             # Persist the child run row.
             await self._record_child_run(
                 step_index=step_index,
@@ -293,6 +312,7 @@ class StepGraph:
                 error=error_msg,
                 duration_ms=duration_ms,
                 sources_count=len(step_sources),
+                usage=step_usage,
             )
 
             yield {
@@ -454,6 +474,9 @@ class StepGraph:
             return
         try:
             from backend.db.mongodb.repositories.agent_run_repository import agent_run_repository
+            tokens_in = self._parent_tokens_in or None
+            tokens_out = self._parent_tokens_out or None
+            cost = round(self._parent_cost, 6) or None
             if error:
                 await agent_run_repository.fail_run(self.parent_run_id, error)
             else:
@@ -464,6 +487,9 @@ class StepGraph:
                         "sources_count": len(self.all_sources),
                         "steps_run": len(self.steps),
                     },
+                    tokens_input=tokens_in,
+                    tokens_output=tokens_out,
+                    cost_usd=cost,
                 )
         except Exception as e:  # noqa: BLE001
             logger.warning("step_graph_close_parent_failed", error=str(e))
@@ -479,6 +505,7 @@ class StepGraph:
         error: Optional[str],
         duration_ms: int,
         sources_count: int,
+        usage: Optional[Dict[str, Any]] = None,
     ) -> None:
         try:
             from backend.db.mongodb.repositories.agent_run_repository import agent_run_repository
@@ -505,19 +532,44 @@ class StepGraph:
                 step_index=step_index,
                 trigger=AgentRunTrigger.STEP_GRAPH,
                 input={**input_payload, "purpose": purpose},
+                model_used=(usage or {}).get("model_used"),
+                provider=(usage or {}).get("provider"),
             )
             run = await agent_run_repository.start_run(payload)
             run_id = str(getattr(run, "id", "") or "")
             if not run_id:
                 return
+
+            u = usage or {}
+            # Accumulate this step's spend onto the parent so the parent
+            # run carries the totals across the whole plan.
+            self._parent_tokens_in += int(u.get("prompt_tokens") or 0)
+            self._parent_tokens_out += int(u.get("completion_tokens") or 0)
+            self._parent_cost += float(u.get("cost_usd") or 0.0)
+
             if error:
-                await agent_run_repository.fail_run(run_id, error)
+                await agent_run_repository.fail_run(
+                    run_id,
+                    error,
+                    metadata_patch={
+                        "model_used": u.get("model_used"),
+                        "provider": u.get("provider"),
+                    } if u else None,
+                )
             else:
                 await agent_run_repository.complete_run(
                     run_id,
                     output={
                         "preview": _preview(output_text, limit=300),
                         "sources_count": sources_count,
+                    },
+                    tokens_input=int(u.get("prompt_tokens") or 0) or None,
+                    tokens_output=int(u.get("completion_tokens") or 0) or None,
+                    cost_usd=float(u.get("cost_usd") or 0.0) or None,
+                    metadata_patch={
+                        "model_used": u.get("model_used"),
+                        "provider": u.get("provider"),
+                        "llm_calls": u.get("calls", 0),
                     },
                 )
         except Exception as e:  # noqa: BLE001

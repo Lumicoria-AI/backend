@@ -3,12 +3,33 @@ from abc import ABC, abstractmethod
 import os
 # Import the provider-agnostic LLM interface
 from backend.ai_models import get_llm_client, LLMClient, LLMConfig, LLMResponse
+from backend.ai_models.pricing import compute_cost
 from backend.core.config import settings as app_settings
 import structlog
 import asyncio
 
 # Configure logger
 logger = structlog.get_logger(__name__)
+
+
+# ── Usage accumulator helper ────────────────────────────────────────────
+#
+# Every BaseAgent carries a `last_usage` dict that auto-accumulates
+# tokens + cost across LLM calls.  The task_executor / step_graph call
+# `agent.reset_usage()` before invoking the agent, then
+# `agent.consume_usage()` after to grab whatever ran in that single
+# invocation and stamp it onto the AgentRun row.
+def _empty_usage() -> Dict[str, Any]:
+    return {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cost_usd": 0.0,
+        "model_used": None,
+        "provider": None,
+        "calls": 0,
+    }
+
 
 class BaseAgent(ABC):
     def __init__(self, config: Dict[str, Any]):
@@ -25,7 +46,97 @@ class BaseAgent(ABC):
         self.llm_client: Optional[LLMClient] = None
         # Keep backward-compat alias
         self.perplexity_client = None
+        # Per-invocation usage — populated automatically by the wrapped LLM
+        # client.  Callers can `reset_usage()` and `consume_usage()` to
+        # bracket exactly one agent invocation.
+        self.last_usage: Dict[str, Any] = _empty_usage()
         self.initialize_models()
+
+    # ── Usage tracking ────────────────────────────────────────────────
+    def reset_usage(self) -> None:
+        """Clear the usage accumulator.  Call before running the agent."""
+        self.last_usage = _empty_usage()
+
+    def consume_usage(self) -> Dict[str, Any]:
+        """Return the accumulator and reset it in one step."""
+        u = self.last_usage
+        self.last_usage = _empty_usage()
+        return u
+
+    def _record_llm_response(self, response: Any) -> None:
+        """Accumulate token + cost data from one LLMResponse.
+
+        Auto-invoked by the wrapped llm_client.generate() — agents never
+        have to call this directly.  Safe to call with anything: defensive
+        against missing fields so older / mocked clients don't crash it.
+        """
+        try:
+            usage = getattr(response, "usage", None)
+            prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+            completion = int(getattr(usage, "completion_tokens", 0) or 0)
+            total = int(getattr(usage, "total_tokens", 0) or (prompt + completion))
+            model = getattr(response, "model", None) or self.get_model_name()
+            provider = getattr(response, "provider", None)
+            cost = compute_cost(
+                model=model,
+                prompt_tokens=prompt,
+                completion_tokens=completion,
+            )
+            self.last_usage["prompt_tokens"] += prompt
+            self.last_usage["completion_tokens"] += completion
+            self.last_usage["total_tokens"] += total
+            self.last_usage["cost_usd"] = round(self.last_usage["cost_usd"] + cost, 6)
+            self.last_usage["calls"] += 1
+            # First-seen model/provider wins; subsequent same-agent calls
+            # tend to be on the same SKU.
+            if not self.last_usage.get("model_used") and model:
+                self.last_usage["model_used"] = model
+            if not self.last_usage.get("provider") and provider:
+                self.last_usage["provider"] = provider
+        except Exception as e:  # noqa: BLE001
+            logger.debug("usage_record_failed", error=str(e))
+
+    def _wrap_llm_client_with_usage(self, client: Any) -> Any:
+        """Monkey-patch `client.generate()` so every call auto-records
+        token + cost data into `self.last_usage`.  Streaming calls are
+        wrapped the same way — usage is read from the final chunk when
+        the provider includes it.
+
+        Idempotent: if the client is already wrapped, returns it as-is.
+        """
+        if client is None or getattr(client, "_lumi_usage_wrapped", False):
+            return client
+
+        original_generate = client.generate
+
+        async def _wrapped_generate(*args, **kwargs):
+            response = await original_generate(*args, **kwargs)
+            try:
+                self._record_llm_response(response)
+            except Exception:
+                pass
+            return response
+
+        client.generate = _wrapped_generate
+
+        # Wrap streaming too — last chunk's `.usage` (when present)
+        # is fed through the accumulator.
+        if hasattr(client, "stream"):
+            original_stream = client.stream
+
+            async def _wrapped_stream(*args, **kwargs):
+                async for chunk in original_stream(*args, **kwargs):
+                    if getattr(chunk, "usage", None) is not None:
+                        try:
+                            self._record_llm_response(chunk)
+                        except Exception:
+                            pass
+                    yield chunk
+
+            client.stream = _wrapped_stream
+
+        client._lumi_usage_wrapped = True
+        return client
 
     def initialize_models(self):
         """Initialize the LLM client via the provider-agnostic abstraction."""
@@ -33,12 +144,13 @@ class BaseAgent(ABC):
             # Determine which provider to use for this agent
             # Priority: agent config > model name mapping > global default
             provider = self._resolve_provider()
-            
-            self.llm_client = get_llm_client(provider=provider)
+
+            raw_client = get_llm_client(provider=provider)
+            self.llm_client = self._wrap_llm_client_with_usage(raw_client)
             # Backward-compat alias so existing agent code that uses self.perplexity_client
             # continues to work via the abstraction layer
             self.perplexity_client = self.llm_client
-            
+
         except Exception as e:
             # Don't re-raise — let the agent register without a client.
             # _call_model_async already handles None llm_client gracefully.
@@ -162,7 +274,8 @@ class BaseAgent(ABC):
         if not self.llm_client:
             try:
                 provider = self._resolve_provider()
-                self.llm_client = get_llm_client(provider=provider)
+                raw_client = get_llm_client(provider=provider)
+                self.llm_client = self._wrap_llm_client_with_usage(raw_client)
                 self.perplexity_client = self.llm_client
                 logger.info("LLM client lazily initialized on first call")
             except Exception as e:

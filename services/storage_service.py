@@ -254,11 +254,16 @@ class DualWriteStorageService:
 
         self._initialized = True
 
-        # Set public-read policy on blog/ prefix so images are permanently accessible
-        try:
-            await asyncio.to_thread(self._primary.set_public_read_policy, "blog/")
-        except Exception as e:
-            logger.warning("Failed to set blog/ public-read policy", error=str(e))
+        # Set public-read policy on prefixes whose objects must be hot-linkable
+        # from the browser without a presigned URL or expiry.
+        #
+        #   blog/    — post hero images + inline images
+        #   avatars/ — user profile pictures (rendered everywhere)
+        for prefix in ("blog/", "avatars/"):
+            try:
+                await asyncio.to_thread(self._primary.set_public_read_policy, prefix)
+            except Exception as e:
+                logger.warning(f"Failed to set {prefix} public-read policy", error=str(e))
 
         # Set CORS policy so browsers can fetch presigned URLs (pdf.js, etc.)
         try:

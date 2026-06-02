@@ -292,40 +292,70 @@ class UserRepository(BaseRepository[UserInDB]):
         )
         
     async def upload_avatar(self, user_id: str, file: UploadFile) -> str:
-        """Upload user avatar and return the URL.
-        
-        Args:
-            user_id: The ID of the user
-            file: The uploaded file
-            
-        Returns:
-            The URL of the uploaded avatar
+        """Upload user avatar to MinIO/R2 and return a permanent public URL.
+
+        Object storage layout:
+            avatars/{user_id}_{uuid}{ext}   (public-read prefix, no presign needed)
+
+        We dual-write to MinIO (primary) + R2 (best-effort backup) via
+        `storage_service`, then return the canonical public URL — the same
+        pattern blog post images already use, so URLs are durable and don't
+        load through the FastAPI process at all.
+
+        Local-disk fallback: only used when storage_service isn't initialized
+        (dev environments without MinIO running).  Production should never
+        hit this path.
         """
-        # Create uploads directory if it doesn't exist 
+        contents = await file.read()
+        file_ext = os.path.splitext(file.filename or "")[1].lower() or ".png"
+        # Sanitise extension to a known image type so the Content-Type header
+        # is correct and the browser will render the bytes inline.
+        allowed = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+        if file_ext not in allowed:
+            file_ext = ".png"
+        unique_name = f"{user_id}_{uuid.uuid4().hex}{file_ext}"
+        key = f"avatars/{unique_name}"
+        content_type = file.content_type or {
+            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".webp": "image/webp", ".gif": "image/gif",
+        }.get(file_ext, "application/octet-stream")
+
+        # Primary path — storage_service (MinIO + R2 dual-write, public URL)
+        try:
+            from backend.services.storage_service import storage_service
+            if getattr(storage_service, "is_initialized", False):
+                await storage_service.upload_file(
+                    file_content=contents,
+                    key=key,
+                    content_type=content_type,
+                )
+                avatar_url = storage_service.get_public_url(key)
+                logger.info(
+                    "Avatar uploaded to object storage",
+                    user_id=user_id, key=key, url=avatar_url,
+                    file_size=len(contents), content_type=content_type,
+                )
+                return avatar_url
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Avatar object-storage upload failed — falling back to local disk",
+                user_id=user_id, error=str(e),
+            )
+
+        # Fallback — local disk (dev without MinIO).  Frontend's
+        # resolveAvatarUrl() rewrites this to the backend origin so it still
+        # renders during development.
         upload_dir = os.path.join(settings.UPLOAD_DIR, "avatars")
         os.makedirs(upload_dir, exist_ok=True)
-        
-        # Generate unique filename
-        file_ext = os.path.splitext(file.filename)[1]
-        unique_filename = f"{user_id}_{uuid.uuid4()}{file_ext}"
-        file_path = os.path.join(upload_dir, unique_filename)
-        
-        # Save file
-        contents = await file.read()
+        file_path = os.path.join(upload_dir, unique_name)
         with open(file_path, "wb") as f:
             f.write(contents)
-        
-        # Generate URL for the avatar - This path will be served by the static files middleware
-        # Ensure the URL starts with / to make it relative to the server root
-        avatar_url = f"/uploads/avatars/{unique_filename}"
-        
-        logger.info("Avatar uploaded", 
-                   user_id=user_id, 
-                   file_path=file_path, 
-                   url=avatar_url, 
-                   file_size=len(contents),
-                   content_type=file.content_type)
-                   
+        avatar_url = f"/uploads/avatars/{unique_name}"
+        logger.info(
+            "Avatar saved to local disk (storage_service unavailable)",
+            user_id=user_id, file_path=file_path, url=avatar_url,
+            file_size=len(contents), content_type=content_type,
+        )
         return avatar_url
 
 # Create a singleton instance (remains None initially, managed by dependency)

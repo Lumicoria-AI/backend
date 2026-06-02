@@ -162,6 +162,12 @@ async def execute_task(task: Any) -> Dict[str, Any]:
         )
         return {"status": "error", "reason": "agent_not_found", "agent": agent_key}
 
+    # Reset usage so we capture only the tokens spent during THIS task run.
+    try:
+        agent.reset_usage()
+    except Exception:
+        pass
+
     query = (title + ("\n\n" + description if description else "")).strip() or "Draft an answer for this task."
 
     # Open an AgentRun row so analytics can track this invocation.
@@ -252,15 +258,40 @@ async def execute_task(task: Any) -> Dict[str, Any]:
         proposal=proposal,
     )
 
+    # Read what the agent's wrapped LLM client recorded during this run
+    # so we can stamp tokens + cost onto the AgentRun row.
+    try:
+        usage = agent.consume_usage()
+    except Exception:
+        usage = {}
+
     # Close the run.
     try:
         if run_id:
             if error_message:
-                await agent_run_repository.fail_run(run_id, error_message)
+                await agent_run_repository.fail_run(
+                    run_id,
+                    error_message,
+                    metadata_patch={
+                        "model_used": usage.get("model_used"),
+                        "provider": usage.get("provider"),
+                    } if usage else None,
+                )
             else:
                 await agent_run_repository.complete_run(
                     run_id,
-                    output={"content_preview": (output_text or "")[:600], "sources_count": len(sources)},
+                    output={
+                        "content_preview": (output_text or "")[:600],
+                        "sources_count": len(sources),
+                    },
+                    tokens_input=int(usage.get("prompt_tokens") or 0) or None,
+                    tokens_output=int(usage.get("completion_tokens") or 0) or None,
+                    cost_usd=float(usage.get("cost_usd") or 0.0) or None,
+                    metadata_patch={
+                        "model_used": usage.get("model_used"),
+                        "provider": usage.get("provider"),
+                        "llm_calls": usage.get("calls", 0),
+                    },
                 )
     except Exception:  # noqa: BLE001
         pass
