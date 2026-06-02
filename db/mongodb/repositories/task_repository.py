@@ -629,6 +629,94 @@ class TaskRepository(BaseRepository[Task]):
         result = await collection.delete_one(query)
         return result.deleted_count > 0
 
+    # ── Phase 6: agent proposal helpers ──────────────────────────────────
+    async def find_tasks_for_executor(
+        self,
+        *,
+        limit: int = 25,
+        organization_id: Optional[str] = None,
+    ) -> List[Task]:
+        """Return tasks whose `assigned_to_agent` is set AND whose proposal
+        is either missing (never run) or in the REVISION state (human
+        asked for a redo).  Used by the autonomous task executor.
+        """
+        collection = await self.collection
+        query: Dict[str, Any] = {
+            "assigned_to_agent": {"$exists": True, "$ne": None, "$nin": [""]},
+            "status": {"$nin": [TaskStatus.COMPLETED.value if hasattr(TaskStatus.COMPLETED, "value") else "completed", "cancelled"]},
+            "$or": [
+                {"agent_proposal": {"$exists": False}},
+                {"agent_proposal": None},
+                {"agent_proposal.status": "revision"},
+            ],
+        }
+        if organization_id:
+            query["organization_id"] = self._coerce_oid(organization_id)
+
+        cursor = collection.find(query).sort("created_at", ASCENDING).limit(limit)
+        docs = await cursor.to_list(length=limit)
+        out: List[Task] = []
+        for d in docs:
+            try:
+                out.append(Task(**d))
+            except Exception:
+                continue
+        return out
+
+    async def set_agent_proposal(
+        self,
+        task_id: str,
+        organization_id: Optional[str],
+        proposal: Dict[str, Any],
+    ) -> Optional[Task]:
+        """Write the full `agent_proposal` block atomically.  Used by the
+        executor when it stores a new draft or transitions the status.
+        """
+        oid = self._coerce_oid(task_id)
+        if not isinstance(oid, ObjectId):
+            return None
+        collection = await self.collection
+        query: Dict[str, Any] = {"_id": oid}
+        if organization_id:
+            query["organization_id"] = self._coerce_oid(organization_id)
+
+        proposal = dict(proposal or {})
+        proposal.setdefault("updated_at", datetime.utcnow())
+        result = await collection.find_one_and_update(
+            query,
+            {"$set": {"agent_proposal": proposal, "updated_at": datetime.utcnow()}},
+            return_document=True,
+        )
+        return Task(**result) if result else None
+
+    async def list_proposals_awaiting_review(
+        self,
+        organization_id: str,
+        *,
+        user_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Task]:
+        """Used by the bell + the /tasks proposals filter."""
+        collection = await self.collection
+        query: Dict[str, Any] = {
+            "organization_id": self._coerce_oid(organization_id),
+            "agent_proposal.status": "pending_review",
+        }
+        if user_id:
+            query["$or"] = [
+                {"assigned_to": self._coerce_oid(user_id)},
+                {"created_by": self._coerce_oid(user_id)},
+            ]
+        cursor = collection.find(query).sort("agent_proposal.updated_at", DESCENDING).limit(limit)
+        docs = await cursor.to_list(length=limit)
+        out: List[Task] = []
+        for d in docs:
+            try:
+                out.append(Task(**d))
+            except Exception:
+                continue
+        return out
+
     async def get_task_analytics(
         self,
         organization_id: str,

@@ -200,3 +200,36 @@ class BaseAgent(ABC):
         except Exception as e:
             logger.error(f"Error calling LLM: {str(e)}")
             return f"Error: {str(e)}"
+
+    # ── Phase 6: Context summary for autonomous task execution ──
+    async def context_summary(
+        self,
+        query: str,
+        *,
+        user_id: Optional[str] = None,
+        organization_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Return the agent's best-effort context for a task query.
+
+        The autonomous task executor calls this *before* `process_async`
+        so the agent has a chance to assemble its own grounding (uploaded
+        documents, prior meeting notes, knowledge graph hits, etc.).
+
+        Default implementation returns an empty snippet set + a
+        suggested prompt that simply restates the query.  Specialised
+        agents (RAG, Legal, Meeting) override this to pull real context.
+
+        Returns shape:
+            {
+              "context_snippets": List[str],
+              "sources": List[{"label": str, "url": str?, "metadata": dict}],
+              "suggested_prompt": str,
+            }
+        """
+        return {
+            "context_snippets": [],
+            "sources": [],
+            "suggested_prompt": query,
+        }

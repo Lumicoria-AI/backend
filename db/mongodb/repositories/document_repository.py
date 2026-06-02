@@ -3,7 +3,7 @@ from pymongo import ASCENDING, DESCENDING
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from bson import ObjectId
 from bson.errors import InvalidId
-from datetime import datetime
+from datetime import datetime, timedelta
 from backend.db.mongodb.base_repository import BaseRepository
 from backend.db.mongodb.models.document import (
     Document,
@@ -515,12 +515,44 @@ class DocumentRepository(BaseRepository[Document]):
                     except (ValueError, TypeError):
                         task_data["metadata"]["raw_deadline"] = task["deadline"]
 
+                # Final guarantee — every task that lands in Mongo MUST have a
+                # due_date.  If the LLM and the legacy paths above all failed,
+                # backfill with the +5 days default (cap +7) so reminders,
+                # calendar mirroring, and overdue logic always have something
+                # to work with.
+                if not task_data.get("due_date"):
+                    task_data["due_date"] = datetime.utcnow().replace(microsecond=0) + timedelta(days=5)
+                    task_data["metadata"]["inferred_due_date"] = True
+                    task_data["metadata"]["due_date_backfilled"] = True
+                else:
+                    # Cap any rogue date past the 1-week ceiling.
+                    max_cap = datetime.utcnow().replace(microsecond=0) + timedelta(days=7)
+                    if isinstance(task_data["due_date"], datetime) and task_data["due_date"] > max_cap:
+                        task_data["due_date"] = max_cap
+                        task_data["metadata"]["inferred_due_date"] = True
+
                 if task.get("inferred_due_date"):
                     task_data["metadata"]["inferred_due_date"] = True
 
                 if "assignee" in task and task["assignee"]:
                     task_data["metadata"]["suggested_assignee"] = task["assignee"]
                     task_data["metadata"]["assigned_to_name"] = task["assignee"]
+
+                # Phase 6: surface the LLM-picked agent so the autonomous
+                # executor can pick the task up and draft a proposal.
+                _agent_key = task.get("assigned_to_agent")
+                if isinstance(_agent_key, str) and _agent_key.strip():
+                    try:
+                        from backend.agents.router import AGENT_REGISTRY as _AGENT_REGISTRY
+                        if _agent_key in _AGENT_REGISTRY:
+                            task_data["assigned_to_agent"] = _agent_key
+                            task_data["assignee_kind"] = (
+                                "user_and_agent"
+                                if task.get("assignee")
+                                else "agent"
+                            )
+                    except Exception:
+                        pass
 
                 # Save to MongoDB via task_repository
                 from backend.models.mongodb_models import TaskCreate as TaskCreateModel
@@ -534,6 +566,27 @@ class DocumentRepository(BaseRepository[Document]):
                     organization_id=str(organization_id),
                 )
                 created_tasks.append(saved_task)
+
+                # Phase 6: if the LLM picked an agent for this task, fire the
+                # autonomous executor immediately so the user doesn't wait for
+                # the next 3-minute beat tick.  Fire-and-forget — Celery returns
+                # the AsyncResult; we ignore it.  When CELERY_TASK_ALWAYS_EAGER
+                # is on (dev), the executor runs synchronously inline.
+                if task_data.get("assigned_to_agent"):
+                    try:
+                        from backend.tasks.task_executor_tasks import run_single_agent_proposal
+                        run_single_agent_proposal.delay(
+                            str(saved_task.id),
+                            str(organization_id),
+                        )
+                    except Exception as exec_err:  # noqa: BLE001
+                        # Never let the executor kickoff failure block task creation.
+                        logger.warning(
+                            "auto_agent_execution_kickoff_failed",
+                            task_id=str(saved_task.id),
+                            agent_key=task_data.get("assigned_to_agent"),
+                            error=str(exec_err),
+                        )
 
             return created_tasks
 

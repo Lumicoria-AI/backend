@@ -76,7 +76,8 @@ celery_app = Celery(
     include=[
         "backend.tasks.document_tasks",
         "backend.tasks.wellbeing_tasks",
-        "backend.tasks.task_reminder_tasks",  # Phase 4
+        "backend.tasks.task_reminder_tasks",   # Phase 4
+        "backend.tasks.task_executor_tasks",   # Phase 6
     ],
 )
 
@@ -151,5 +152,14 @@ celery_app.conf.beat_schedule = {
     "tasks-fanout-weekly-digest": {
         "task": "tasks.fanout_weekly_digest",
         "schedule": _weekly_fri_sat_9am(),
+    },
+
+    # ── Phase 6: autonomous task executor ────────────────────────────
+    # Every 3 minutes the executor scans for tasks with an assigned
+    # agent and either no proposal or a 'revision' proposal, runs the
+    # agent, persists `agent_proposal`, and pings the owner.
+    "tasks-run-pending-agent-proposals": {
+        "task": "tasks.run_pending_agent_proposals",
+        "schedule": 180.0,
     },
 }

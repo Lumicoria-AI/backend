@@ -324,3 +324,49 @@ class RAGAgent(BaseAgent):
         except Exception as e:
             logger.error(f"Error querying RAG agent: {str(e)}")
             return {"error": f"Information retrieval failed: {str(e)}"}
+
+    # ── Phase 6: pull real document context for autonomous tasks ──
+    async def context_summary(
+        self,
+        query: str,
+        *,
+        user_id: Optional[str] = None,
+        organization_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Retrieve the user's most relevant uploaded-document chunks
+        for this query and return them as snippets + structured sources.
+        """
+        try:
+            if not user_id:
+                return {"context_snippets": [], "sources": [], "suggested_prompt": query}
+
+            context_result = await context_service.get_context_for_query(
+                query=query,
+                user_id=user_id,
+                organization_id=organization_id,
+                k=min(self.max_context_chunks, 6),
+            )
+            chunks = context_result.get("context", []) or []
+            snippets: List[str] = []
+            for c in chunks:
+                text = (c.get("text") or c.get("content") or "").strip()
+                if text:
+                    snippets.append(text[:600])
+
+            sources = self._extract_sources(chunks)
+
+            suggested = (
+                "Using the snippets below from the user's documents, "
+                f"address this task: {query}\n\n"
+                + "\n---\n".join(f"[{i+1}] {s}" for i, s in enumerate(snippets))
+            )
+            return {
+                "context_snippets": snippets,
+                "sources": sources,
+                "suggested_prompt": suggested,
+            }
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"RAG context_summary failed: {e}")
+            return {"context_snippets": [], "sources": [], "suggested_prompt": query}

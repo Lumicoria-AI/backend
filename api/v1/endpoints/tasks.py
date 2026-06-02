@@ -128,6 +128,19 @@ async def create_task(
         except Exception:  # pragma: no cover — observability handled by service
             pass
 
+        # ── Phase 6: autonomous kickoff — if the new task has an agent
+        # assigned, fire the executor right away so the user doesn't wait
+        # for the 3-min beat tick.  Fire-and-forget; never blocks the POST.
+        try:
+            if getattr(task, "assigned_to_agent", None):
+                from backend.tasks.task_executor_tasks import run_single_agent_proposal
+                run_single_agent_proposal.delay(
+                    str(task.id),
+                    _get_org_id(current_user),
+                )
+        except Exception:
+            pass
+
         # Phase 5: serialise ObjectIds before returning so FastAPI's encoder
         # doesn't choke on calendar_event_id / status_history.changed_by etc.
         t_dict = task.model_dump() if hasattr(task, "model_dump") else task.dict()
@@ -215,6 +228,19 @@ async def update_task(
         related_resource_type="TASK",
         related_resource_id=task_id,
     )
+
+    # ── Phase 6: autonomous executor kickoff on agent (re)assignment ──
+    # Fires when the PUT changes assigned_to_agent (assigning, switching, or
+    # re-running the same one) so the user doesn't wait for the 3-min beat.
+    try:
+        patched_fields = set(task_in.dict(exclude_unset=True).keys())
+        new_agent = task_in.dict(exclude_unset=True).get("assigned_to_agent") if "assigned_to_agent" in patched_fields else None
+        prior_agent = getattr(existing_task, "assigned_to_agent", None)
+        if new_agent and new_agent != prior_agent:
+            from backend.tasks.task_executor_tasks import run_single_agent_proposal
+            run_single_agent_proposal.delay(task_id, _get_org_id(current_user))
+    except Exception:
+        pass
 
     # ── Phase 5: notify the task creator when someone else updates status ──
     try:
@@ -435,7 +461,17 @@ async def get_task_summary(
 class AssignTaskRequest(BaseModel):
     user_id: Optional[str] = None
     email: Optional[str] = None
-    role: Optional[str] = "member"  # "admin" | "member" | "viewer"
+    agent_key: Optional[str] = None  # Phase 6: assign to one of the 21 agents
+    role: Optional[str] = "member"   # "admin" | "member" | "viewer"
+
+
+# ── Phase 6 review payloads ─────────────────────────────────────────────
+class ProposalReviseRequest(BaseModel):
+    notes: str  # Free-form revision notes the human types in.
+
+
+class ProposalRejectRequest(BaseModel):
+    reason: Optional[str] = None
 
 
 @router.post("/{task_id}/assign", response_model=None)
@@ -552,11 +588,254 @@ async def assign_task(
         )
         return result
 
+    if payload.agent_key:
+        # Phase 6: assign to one of the 21 platform agents.  Validate
+        # against the canonical registry so we never persist a typo.
+        try:
+            from backend.agents.router import AGENT_REGISTRY
+        except Exception:
+            raise HTTPException(status_code=500, detail="Agent registry unavailable")
+        if payload.agent_key not in AGENT_REGISTRY:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown agent '{payload.agent_key}'. Valid keys: {', '.join(AGENT_REGISTRY.keys())}",
+            )
+
+        # Keep an existing human assignee when present — otherwise this
+        # becomes a pure agent task.
+        existing_user = getattr(task, "assigned_to", None)
+        kind = "user_and_agent" if existing_user else "agent"
+
+        await task_repository.update_task(
+            task_id=task_id,
+            organization_id=org_id,
+            update_data={
+                "assigned_to_agent": payload.agent_key,
+                "assignee_kind": kind,
+                # Clear any stale proposal so the executor picks the task up again.
+                "agent_proposal": None,
+            },
+            changed_by=str(current_user.id),
+            changed_by_name=getattr(current_user, "full_name", None),
+        )
+        await log_activity(
+            user_id=str(current_user.id),
+            organization_id=org_id,
+            activity_type="task.assigned_to_agent",
+            details={"task_id": task_id, "agent_key": payload.agent_key},
+            related_resource_type="TASK",
+            related_resource_id=task_id,
+        )
+
+        # Kick off an immediate draft so the user sees results soon.
+        try:
+            from backend.tasks.task_executor_tasks import run_single_agent_proposal
+            run_single_agent_proposal.delay(task_id, org_id)
+        except Exception:
+            pass
+
+        return {"assigned": True, "via": "agent", "agent_key": payload.agent_key}
+
     raise HTTPException(
         status_code=400,
-        detail="Provide either `user_id` or `email` to assign this task.",
+        detail="Provide `user_id`, `email`, or `agent_key` to assign this task.",
     )
 
+
+# ── Phase 6: agent proposal review endpoints ──────────────────────────────
+
+
+@router.post("/{task_id}/proposal/approve")
+async def approve_proposal(
+    task_id: str,
+    current_user: User = Depends(get_current_active_user),
+) -> Dict[str, Any]:
+    """Mark the agent proposal approved AND complete the task in one shot."""
+    org_id = _get_org_id(current_user)
+    task = await task_repository.get_task_by_id(task_id, organization_id=org_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    proposal = getattr(task, "agent_proposal", None)
+    if not proposal:
+        raise HTTPException(status_code=400, detail="No agent proposal to approve")
+
+    if isinstance(proposal, dict):
+        prop_dict = dict(proposal)
+    else:
+        try:
+            prop_dict = proposal.dict()
+        except Exception:
+            prop_dict = {}
+
+    from bson import ObjectId as _OID
+    prop_dict["status"] = "approved"
+    prop_dict["decision"] = "approved"
+    prop_dict["reviewed_at"] = datetime.utcnow()
+    prop_dict["reviewed_by"] = _OID(str(current_user.id)) if _OID.is_valid(str(current_user.id)) else None
+    prop_dict["updated_at"] = datetime.utcnow()
+
+    await task_repository.set_agent_proposal(
+        task_id=task_id,
+        organization_id=org_id,
+        proposal=prop_dict,
+    )
+
+    updated = await task_repository.update_task(
+        task_id=task_id,
+        organization_id=org_id,
+        update_data={"status": TaskStatus.COMPLETED.value if hasattr(TaskStatus.COMPLETED, "value") else "completed"},
+        changed_by=str(current_user.id),
+        changed_by_name=getattr(current_user, "full_name", None),
+    )
+
+    await log_activity(
+        user_id=str(current_user.id),
+        organization_id=org_id,
+        activity_type="task.proposal_approved",
+        details={"task_id": task_id, "agent_key": getattr(task, "assigned_to_agent", None)},
+        related_resource_type="TASK",
+        related_resource_id=task_id,
+    )
+
+    return {"approved": True, "task_id": task_id, "status": "completed"}
+
+
+@router.post("/{task_id}/proposal/revise")
+async def revise_proposal(
+    task_id: str,
+    payload: ProposalReviseRequest,
+    current_user: User = Depends(get_current_active_user),
+) -> Dict[str, Any]:
+    """Re-run the agent with human notes appended to the brief."""
+    org_id = _get_org_id(current_user)
+    task = await task_repository.get_task_by_id(task_id, organization_id=org_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not (payload.notes or "").strip():
+        raise HTTPException(status_code=400, detail="Revision notes cannot be empty")
+
+    # Run inline so the response carries the new draft when fast,
+    # but the executor still works asynchronously for slow agents.
+    from backend.services.task_executor import re_run_with_revision_notes
+    result = await re_run_with_revision_notes(
+        task_id=task_id,
+        organization_id=org_id,
+        notes=payload.notes,
+    )
+
+    await log_activity(
+        user_id=str(current_user.id),
+        organization_id=org_id,
+        activity_type="task.proposal_revision_requested",
+        details={
+            "task_id": task_id,
+            "agent_key": getattr(task, "assigned_to_agent", None),
+            "notes_preview": payload.notes[:200],
+        },
+        related_resource_type="TASK",
+        related_resource_id=task_id,
+    )
+
+    return {"revised": True, "task_id": task_id, "result": result}
+
+
+@router.post("/{task_id}/proposal/reject")
+async def reject_proposal(
+    task_id: str,
+    payload: ProposalRejectRequest,
+    current_user: User = Depends(get_current_active_user),
+) -> Dict[str, Any]:
+    """Reject the proposal: clears the agent assignment so the human owns it."""
+    org_id = _get_org_id(current_user)
+    task = await task_repository.get_task_by_id(task_id, organization_id=org_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    from bson import ObjectId as _OID
+    prop_dict = {
+        "status": "rejected",
+        "decision": "rejected",
+        "revision_notes": (payload.reason or "")[:1000],
+        "reviewed_at": datetime.utcnow(),
+        "reviewed_by": _OID(str(current_user.id)) if _OID.is_valid(str(current_user.id)) else None,
+        "updated_at": datetime.utcnow(),
+    }
+    # Preserve the original content + sources for audit.
+    existing = getattr(task, "agent_proposal", None)
+    if existing:
+        existing_dict = existing if isinstance(existing, dict) else (existing.dict() if hasattr(existing, "dict") else {})
+        prop_dict["content"] = existing_dict.get("content")
+        prop_dict["sources"] = existing_dict.get("sources", [])
+
+    await task_repository.set_agent_proposal(
+        task_id=task_id,
+        organization_id=org_id,
+        proposal=prop_dict,
+    )
+
+    # Demote assignee_kind back to user-only so it doesn't get re-drafted.
+    has_user = bool(getattr(task, "assigned_to", None))
+    await task_repository.update_task(
+        task_id=task_id,
+        organization_id=org_id,
+        update_data={
+            "assignee_kind": "user" if has_user else None,
+        },
+        changed_by=str(current_user.id),
+        changed_by_name=getattr(current_user, "full_name", None),
+    )
+
+    await log_activity(
+        user_id=str(current_user.id),
+        organization_id=org_id,
+        activity_type="task.proposal_rejected",
+        details={"task_id": task_id, "reason_preview": (payload.reason or "")[:200]},
+        related_resource_type="TASK",
+        related_resource_id=task_id,
+    )
+
+    return {"rejected": True, "task_id": task_id}
+
+
+@router.post("/{task_id}/proposal/run")
+async def run_proposal_now(
+    task_id: str,
+    current_user: User = Depends(get_current_active_user),
+) -> Dict[str, Any]:
+    """Force an immediate draft for a task that already has an agent assigned."""
+    org_id = _get_org_id(current_user)
+    task = await task_repository.get_task_by_id(task_id, organization_id=org_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if not getattr(task, "assigned_to_agent", None):
+        raise HTTPException(status_code=400, detail="Task has no agent assigned")
+
+    from backend.services.task_executor import execute_task
+    result = await execute_task(task)
+    return {"started": True, "task_id": task_id, "result": result}
+
+
+@router.get("/proposals/pending", response_model=None)
+async def list_pending_proposals(
+    limit: int = Query(20, ge=1, le=100),
+    current_user: User = Depends(get_current_active_user),
+) -> Dict[str, Any]:
+    """List tasks with a pending_review agent proposal (scoped to caller)."""
+    org_id = _get_org_id(current_user)
+    tasks = await task_repository.list_proposals_awaiting_review(
+        organization_id=org_id,
+        user_id=str(current_user.id),
+        limit=limit,
+    )
+    items: List[Dict[str, Any]] = []
+    for t in tasks:
+        try:
+            d = t.dict()
+        except Exception:
+            d = getattr(t, "model_dump", lambda: {})()
+        items.append(_stringify_objectids(d))
+    return {"count": len(items), "items": items}
 
 
 # ── Phase 4: signed-token "Mark complete / Mark started" from emails ──────
@@ -759,6 +1038,125 @@ async def task_action_from_email(
             headline="Snoozed by a day",
             body=f"Due date now {new_due.strftime('%a, %b %d')}.",
             accent="#F59E0B",
+        )
+
+    # ── Phase 6: one-tap proposal actions from push / email ───────────────
+    if action == TaskAction.APPROVE_PROPOSAL.value:
+        proposal = getattr(task, "agent_proposal", None)
+        if not proposal:
+            return _action_result_page(
+                title="No proposal",
+                headline="There's no agent proposal to approve",
+                body="Open Lumicoria to review the task instead.",
+                accent="#EF4444",
+            )
+        existing_status = (
+            proposal.get("status") if isinstance(proposal, dict)
+            else getattr(proposal, "status", None)
+        )
+        if existing_status == "approved":
+            return _action_result_page(
+                title="Already approved",
+                headline="Already approved",
+                body="This proposal was approved earlier. Nothing to do.",
+                accent="#10B981",
+            )
+
+        if isinstance(proposal, dict):
+            prop_dict = dict(proposal)
+        else:
+            try:
+                prop_dict = proposal.dict()
+            except Exception:
+                prop_dict = {}
+        from bson import ObjectId as _OID
+        prop_dict["status"] = "approved"
+        prop_dict["decision"] = "approved"
+        prop_dict["reviewed_at"] = datetime.utcnow()
+        prop_dict["reviewed_by"] = _OID(user_id) if _OID.is_valid(user_id) else None
+        prop_dict["updated_at"] = datetime.utcnow()
+
+        await task_repository.set_agent_proposal(
+            task_id=task_id,
+            organization_id=org_id,
+            proposal=prop_dict,
+        )
+        await task_repository.update_task(
+            task_id=task_id,
+            organization_id=org_id,
+            update_data={
+                "status": TaskStatus.COMPLETED.value,
+                "completed_at": datetime.utcnow(),
+                "progress": 100,
+            },
+        )
+        try:
+            await calendar_service.mark_event_completed_for_task(task_id)
+        except Exception:
+            pass
+        await log_activity(
+            user_id=user_id,
+            organization_id=org_id,
+            activity_type="task.proposal_approved_from_push",
+            details={"task_id": task_id, "agent_key": getattr(task, "assigned_to_agent", None)},
+            related_resource_type="TASK",
+            related_resource_id=task_id,
+        )
+        return _action_result_page(
+            title="Approved",
+            headline="Proposal approved",
+            body=f"“{getattr(task, 'title', 'Task')}” is complete. The agent's draft has been recorded.",
+            accent="#10B981",
+        )
+
+    if action == TaskAction.REJECT_PROPOSAL.value:
+        proposal = getattr(task, "agent_proposal", None)
+        if not proposal:
+            return _action_result_page(
+                title="No proposal",
+                headline="There's no agent proposal to reject",
+                body="Open Lumicoria to manage the task instead.",
+                accent="#EF4444",
+            )
+        if isinstance(proposal, dict):
+            prop_dict = dict(proposal)
+        else:
+            try:
+                prop_dict = proposal.dict()
+            except Exception:
+                prop_dict = {}
+        from bson import ObjectId as _OID
+        prop_dict["status"] = "rejected"
+        prop_dict["decision"] = "rejected"
+        prop_dict["reviewed_at"] = datetime.utcnow()
+        prop_dict["reviewed_by"] = _OID(user_id) if _OID.is_valid(user_id) else None
+        prop_dict["updated_at"] = datetime.utcnow()
+        await task_repository.set_agent_proposal(
+            task_id=task_id,
+            organization_id=org_id,
+            proposal=prop_dict,
+        )
+        # Demote so the executor doesn't try again — the human owns it now.
+        await task_repository.update_task(
+            task_id=task_id,
+            organization_id=org_id,
+            update_data={
+                "assignee_kind": "user" if getattr(task, "assigned_to", None) else None,
+            },
+        )
+        await log_activity(
+            user_id=user_id,
+            organization_id=org_id,
+            activity_type="task.proposal_rejected_from_push",
+            details={"task_id": task_id},
+            related_resource_type="TASK",
+            related_resource_id=task_id,
+        )
+        return _action_result_page(
+            title="Rejected",
+            headline="Proposal rejected",
+            body="You can take this task over in Lumicoria when you're ready.",
+            accent="#EF4444",
         )
 
     return _action_result_page(

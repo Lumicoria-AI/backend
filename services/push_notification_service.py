@@ -86,11 +86,13 @@ class PushNotificationService:
         body: str,
         data: Optional[Dict[str, Any]] = None,
         image_url: Optional[str] = None,
-        priority: str = "high"
+        priority: str = "high",
+        actions: Optional[List[Dict[str, str]]] = None,
+        click_action: Optional[str] = None,
     ) -> bool:
         """
         Send a push notification to a specific device.
-        
+
         Args:
             device_token: FCM device registration token
             title: Notification title
@@ -98,57 +100,112 @@ class PushNotificationService:
             data: Optional data payload (for app handling)
             image_url: Optional image URL for rich notifications
             priority: Message priority ("high" or "normal")
-        
+            actions: Optional list of {"action": str, "title": str, "url"?: str}
+                dicts.  Each becomes a button on the OS notification (web /
+                Android).  The service worker reads `event.action` to route
+                clicks; the optional `url` is mirrored into the data payload
+                so the SW can navigate or fetch it.
+            click_action: Optional URL to open when the notification itself is
+                tapped (everywhere outside the action buttons).
+
         Returns:
             True if sent successfully, False otherwise
         """
         if not self._ensure_initialized():
             logger.warning("push_notification_skipped_no_firebase")
             return False
-        
+
         try:
             from firebase_admin import messaging
-            
+
             # Build notification
             notification = messaging.Notification(
                 title=title,
                 body=body,
                 image=image_url
             )
-            
+
+            # Normalise actions for the data payload.  FCM requires string
+            # values for `data`, so we JSON-encode the list and the SW
+            # deserialises it.
+            actions_clean: List[Dict[str, str]] = []
+            for a in (actions or []):
+                if not isinstance(a, dict):
+                    continue
+                action_id = str(a.get("action") or "").strip()
+                a_title = str(a.get("title") or "").strip()
+                if not action_id or not a_title:
+                    continue
+                entry: Dict[str, str] = {"action": action_id, "title": a_title}
+                if a.get("url"):
+                    entry["url"] = str(a["url"])
+                actions_clean.append(entry)
+
+            # Merge action metadata + click_action into the data payload so the
+            # SW has everything it needs without re-fetching.
+            merged_data: Dict[str, Any] = dict(data or {})
+            if click_action:
+                merged_data["click_action"] = click_action
+            if actions_clean:
+                merged_data["actions"] = json.dumps(actions_clean)
+
+            # Web push needs explicit `actions` on the WebpushNotification,
+            # and a `fcm_options.link` to make the notification body itself
+            # clickable to a URL.
+            webpush_notification_kwargs: Dict[str, Any] = {
+                "icon": "/lumicoria-logo-white.png",
+                "badge": "/icon-192.png",
+            }
+            if actions_clean:
+                # FCM's WebpushNotification.actions takes a list of dicts
+                # with `action` and `title` (and optional `icon`).
+                webpush_notification_kwargs["actions"] = [
+                    {"action": a["action"], "title": a["title"]}
+                    for a in actions_clean
+                ]
+            webpush_fcm_opts = None
+            if click_action:
+                try:
+                    webpush_fcm_opts = messaging.WebpushFCMOptions(link=click_action)
+                except Exception:
+                    webpush_fcm_opts = None
+
             # Build message
             message = messaging.Message(
                 notification=notification,
                 token=device_token,
-                data={k: str(v) for k, v in (data or {}).items()},  # FCM requires string values
+                data={k: str(v) for k, v in merged_data.items()},  # FCM requires string values
                 android=messaging.AndroidConfig(
                     priority=priority,
                     notification=messaging.AndroidNotification(
                         icon="notification_icon",
-                        color="#4A90E2"
+                        color="#4A90E2",
+                        click_action=click_action or None,
                     )
                 ),
                 apns=messaging.APNSConfig(
                     payload=messaging.APNSPayload(
                         aps=messaging.Aps(
                             badge=1,
-                            sound="default"
+                            sound="default",
+                            # iOS surfaces actions via a registered category
+                            # set up by the client app; we still pass the
+                            # action id in the data payload above.
+                            category=("LUMICORIA_PROPOSAL" if actions_clean else None),
                         )
                     )
                 ),
                 webpush=messaging.WebpushConfig(
-                    notification=messaging.WebpushNotification(
-                        icon="/icons/notification-icon.png",
-                        badge="/icons/notification-badge.png"
-                    )
+                    notification=messaging.WebpushNotification(**webpush_notification_kwargs),
+                    fcm_options=webpush_fcm_opts,
                 )
             )
-            
+
             # Send message
             response = messaging.send(message)
             logger.info("push_notification_sent", message_id=response)
             return True
-            
+
         except Exception as e:
             error_msg = str(e)
             
@@ -166,7 +223,9 @@ class PushNotificationService:
         user_id: str,
         title: str,
         body: str,
-        data: Optional[Dict[str, Any]] = None
+        data: Optional[Dict[str, Any]] = None,
+        actions: Optional[List[Dict[str, str]]] = None,
+        click_action: Optional[str] = None,
     ) -> bool:
         """
         Send a push notification to all devices for a user.
@@ -201,7 +260,9 @@ class PushNotificationService:
                     device_token=token_doc.token,
                     title=title,
                     body=body,
-                    data=data
+                    data=data,
+                    actions=actions,
+                    click_action=click_action,
                 )
                 if success:
                     success_count += 1

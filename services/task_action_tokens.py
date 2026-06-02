@@ -37,6 +37,9 @@ class TaskAction(str, Enum):
     COMPLETE = "complete"
     START = "start"
     SNOOZE = "snooze"
+    # Phase 6 — one-tap actions on the agent-proposal push notification.
+    APPROVE_PROPOSAL = "approve_proposal"
+    REJECT_PROPOSAL = "reject_proposal"
 
 
 class TaskActionTokenError(Exception):

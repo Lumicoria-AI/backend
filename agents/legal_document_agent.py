@@ -988,4 +988,60 @@ Rules:
         return [i["recommendation"] for i in (issues or []) if i.get("recommendation")][:8]
 
     def _extract_key_points(self, summary: Dict[str, Any]) -> List[str]:
-        return summary.get("key_points") or [] 
+        return summary.get("key_points") or []
+
+    # ── Phase 6: pull contract / legal-document context for autonomous tasks ──
+    async def context_summary(
+        self,
+        query: str,
+        *,
+        user_id: Optional[str] = None,
+        organization_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Retrieve the user's most relevant *legal* document chunks.
+
+        Reuses the RAG context service but tags the suggested prompt with
+        explicit legal framing so the executor's `process_async` call
+        receives the contract / clause language verbatim.
+        """
+        try:
+            from ..services.context_service import context_service
+            if not user_id:
+                return {"context_snippets": [], "sources": [], "suggested_prompt": query}
+            ctx = await context_service.get_context_for_query(
+                query=f"{query} contract clause obligation",
+                user_id=user_id,
+                organization_id=organization_id,
+                k=6,
+            )
+            chunks = ctx.get("context", []) or []
+            snippets: List[str] = []
+            sources: List[Dict[str, Any]] = []
+            for i, c in enumerate(chunks):
+                text = (c.get("text") or c.get("content") or "").strip()
+                if text:
+                    snippets.append(text[:700])
+                meta = c.get("metadata", {}) or {}
+                sources.append({
+                    "index": i + 1,
+                    "title": meta.get("title", "Legal document"),
+                    "type": c.get("source", "legal"),
+                    "document_id": meta.get("document_id"),
+                    "page_number": meta.get("page_number"),
+                    "chunk_text": text[:200],
+                })
+            suggested = (
+                "You are reviewing the user's legal documents. Using the snippets below, "
+                f"address this task with the precision of a contract reviewer: {query}\n\n"
+                + "\n---\n".join(f"[{i+1}] {s}" for i, s in enumerate(snippets))
+            )
+            return {
+                "context_snippets": snippets,
+                "sources": sources,
+                "suggested_prompt": suggested,
+            }
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Legal context_summary failed: {e}")
+            return {"context_snippets": [], "sources": [], "suggested_prompt": query} 

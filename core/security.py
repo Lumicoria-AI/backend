@@ -25,14 +25,26 @@ logger = structlog.get_logger()
 security = HTTPBearer()
 
 # ---------------------------------------------------------------------------
-# Firebase Admin — initialise once at import
+# Firebase Admin — initialise once per process (idempotent)
 # ---------------------------------------------------------------------------
+# Celery workers import this module after the push_notification_service has
+# already called `initialize_app()`, which used to raise
+# "The default Firebase app already exists" and crash the task.  Guard by
+# checking for an existing default app first — same pattern used in
+# push_notification_service._initialize_firebase.
 try:
-    cred = credentials.Certificate(settings.FIREBASE_CREDENTIALS_PATH)
-    firebase_admin.initialize_app(cred)
-except Exception as e:
-    logger.error("Failed to initialize Firebase", error=str(e))
-    raise
+    firebase_admin.get_app()  # raises ValueError when no default app exists
+except ValueError:
+    try:
+        cred = credentials.Certificate(settings.FIREBASE_CREDENTIALS_PATH)
+        firebase_admin.initialize_app(cred)
+    except Exception as e:
+        logger.error("Failed to initialize Firebase", error=str(e))
+        raise
+except Exception as e:  # noqa: BLE001
+    # Any other unexpected error during the existence check — log and move on,
+    # so an auth-side issue can't take down task workers.
+    logger.warning("firebase_get_app_unexpected_error", error=str(e))
 
 pwd_context = CryptContext(schemes=["argon2", "bcrypt"], deprecated="auto")
 ALGORITHM = settings.ALGORITHM

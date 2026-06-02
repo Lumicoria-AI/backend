@@ -105,6 +105,17 @@ class DocumentAgent(BaseAgent):
             week_from_now_iso = (now_utc + timedelta(days=7)).replace(microsecond=0).isoformat() + "Z"
             five_days_iso = (now_utc + timedelta(days=5)).replace(microsecond=0).isoformat() + "Z"
 
+            # Phase 6: pull the agent capability registry so the LLM can
+            # optionally assign each task to one of the 21 specialised agents.
+            # One source of truth — backend/agents/router.py.
+            try:
+                from backend.agents.router import AGENT_REGISTRY as _AGENT_REGISTRY
+                agent_lines = "\n".join(
+                    f'    - "{k}": {v}' for k, v in _AGENT_REGISTRY.items()
+                )
+            except Exception:
+                agent_lines = "    (agent registry unavailable)"
+
             task_prompt = (
                 "You are extracting actionable tasks from a document for a user's "
                 "task manager.  Return ONLY a JSON array (no prose, no markdown).\n\n"
@@ -119,15 +130,31 @@ class DocumentAgent(BaseAgent):
                 '  "due_date": ISO-8601 UTC datetime string OR null,\n'
                 '  "deadline": exact phrase from the document if any (or null),\n'
                 '  "inferred_due_date": true if due_date was NOT explicitly stated,\n'
-                '  "assignee": person responsible if mentioned (or null)\n\n'
-                "Rules for due_date:\n"
+                '  "assignee": person responsible if mentioned (or null),\n'
+                '  "assigned_to_agent": one of the agent keys below OR null\n\n'
+                "Available Lumicoria agents (key: capability):\n"
+                f"{agent_lines}\n\n"
+                "Rules for assigned_to_agent:\n"
+                "  • Pick the single agent whose capability best fits the task action.\n"
+                "  • If the task is a meeting / scheduling / action-item rollup, choose 'meeting'.\n"
+                "  • If the task is contract / clause / legal review, choose 'legal_document'.\n"
+                "  • If the task is summarise / extract from an uploaded doc, choose 'rag' or 'document'.\n"
+                "  • If the task is research / fact-finding, choose 'research'.\n"
+                "  • If the task is draft / write / brainstorm content, choose 'creative'.\n"
+                "  • If the task is translate, choose 'translation'.\n"
+                "  • If the task is data / CSV / analytics, choose 'data_analysis'.\n"
+                "  • If the task requires only human judgment (calling a person, paying a bill, signing), set null.\n"
+                "  • Set null when no agent clearly fits — DO NOT guess.\n\n"
+                "Rules for due_date (MANDATORY — NEVER return null):\n"
+                "  • Every task MUST have a non-null due_date in ISO-8601 UTC.\n"
                 "  • If the document gives an absolute date, parse it into ISO-8601 UTC.\n"
                 "  • If language signals urgency (urgent, ASAP, today) → within 24 hours.\n"
                 "  • If language says 'this week' / 'by EOW' → end of the current week.\n"
                 "  • If language says 'next week' → 7 days from now.\n"
-                "  • If no signal, use the default above (5 days from now).\n"
-                f"  • due_date MUST NOT exceed {week_from_now_iso}.\n"
-                "  • Set inferred_due_date=true unless an exact date appeared in the text.\n\n"
+                f"  • If NO date signal exists, set due_date to exactly {five_days_iso} (5 days from now).\n"
+                f"  • due_date MUST NOT exceed {week_from_now_iso} (1-week cap).\n"
+                "  • Set inferred_due_date=true unless an exact date appeared in the text.\n"
+                "  • Returning null / empty / missing due_date is INVALID and the task will be rejected.\n\n"
                 "Rules for priority:\n"
                 "  • 'critical': blocks the business, security, regulatory, immediate.\n"
                 "  • 'high': named owner + tight deadline.\n"
@@ -205,6 +232,20 @@ class DocumentAgent(BaseAgent):
         if priority not in {"low", "medium", "high", "critical"}:
             priority = "medium"
 
+        # Phase 6: validate `assigned_to_agent` against the registry; drop
+        # anything the LLM hallucinated.
+        suggested_agent = raw.get("assigned_to_agent")
+        if isinstance(suggested_agent, str):
+            suggested_agent = suggested_agent.strip().lower() or None
+            try:
+                from backend.agents.router import AGENT_REGISTRY as _AGENT_REGISTRY
+                if suggested_agent not in _AGENT_REGISTRY:
+                    suggested_agent = None
+            except Exception:
+                suggested_agent = None
+        else:
+            suggested_agent = None
+
         normalized: Dict[str, Any] = {
             "title": str(raw.get("title") or "Untitled task").strip()[:280],
             "description": str(raw.get("description") or "").strip(),
@@ -214,6 +255,7 @@ class DocumentAgent(BaseAgent):
             "due_date": parsed_due.isoformat() + "Z",
             "inferred_due_date": inferred,
             "assignee": raw.get("assignee") if isinstance(raw.get("assignee"), str) else None,
+            "assigned_to_agent": suggested_agent,
         }
         return normalized
 

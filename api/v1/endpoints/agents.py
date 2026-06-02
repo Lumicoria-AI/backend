@@ -145,6 +145,77 @@ async def list_agents(current_user: User = Depends(get_current_active_user)) -> 
             detail="Error listing agents"
         )
 
+# ── Phase 6: 21-agent registry endpoints ─────────────────────────────────
+
+
+@router.get("/registry", response_model=List[Dict[str, str]])
+async def list_agent_registry(
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """Return the canonical Lumicoria agent registry (21 capability keys).
+
+    Used by the AssigneePopover to render the agent picker.  This is the
+    same source of truth as `agents/router.py:AGENT_REGISTRY`.
+    """
+    try:
+        from backend.agents.router import AGENT_REGISTRY
+    except Exception:
+        return []
+    return [
+        {"key": key, "name": key.replace("_", " ").title(), "description": desc}
+        for key, desc in AGENT_REGISTRY.items()
+    ]
+
+
+@router.post("/registry/{agent_key}/context_summary", response_model=Dict[str, Any])
+async def agent_context_summary(
+    agent_key: str,
+    request: Request,
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """Return the agent's context snippets / sources / suggested prompt
+    for a query.  Used by the Phase 6 executor + the Tasks UI for live
+    preview before assigning a task to an agent.
+    """
+    try:
+        from backend.agents.router import AGENT_REGISTRY
+    except Exception:
+        raise HTTPException(status_code=500, detail="Agent registry unavailable")
+
+    if agent_key not in AGENT_REGISTRY:
+        raise HTTPException(status_code=404, detail=f"Unknown agent '{agent_key}'")
+
+    body = await request.json()
+    query = (body.get("query") or "").strip()
+    task_id = body.get("task_id")
+    if not query:
+        raise HTTPException(status_code=400, detail="`query` is required")
+
+    from backend.services.task_executor import instantiate_agent
+    agent = instantiate_agent(agent_key)
+    if agent is None:
+        raise HTTPException(status_code=500, detail=f"Agent '{agent_key}' is registered but could not be instantiated")
+
+    try:
+        result = await agent.context_summary(
+            query=query,
+            user_id=str(current_user.id),
+            organization_id=getattr(current_user, "organization_id", None),
+            task_id=task_id,
+        )
+    except Exception as e:
+        logger.warning(f"agent_context_summary endpoint failed: {e}")
+        result = {"context_snippets": [], "sources": [], "suggested_prompt": query}
+
+    # Normalise the shape for the frontend.
+    return {
+        "agent_key": agent_key,
+        "context_snippets": list(result.get("context_snippets") or [])[:8],
+        "sources": list(result.get("sources") or [])[:8],
+        "suggested_prompt": result.get("suggested_prompt") or query,
+    }
+
+
 @router.get("/{agent_id}", response_model=dict)
 async def get_agent(
     agent_id: str,
