@@ -104,6 +104,7 @@ class AgentRunRepository:
         tokens_input: Optional[int] = None,
         tokens_output: Optional[int] = None,
         cost_usd: Optional[float] = None,
+        credits_used: Optional[int] = None,
         metadata_patch: Optional[Dict[str, Any]] = None,
     ) -> Optional[AgentRun]:
         """Close a run as COMPLETED.  Auto-computes duration_ms."""
@@ -133,6 +134,8 @@ class AgentRunRepository:
             patch["tokens_output"] = tokens_output
         if cost_usd is not None:
             patch["cost_usd"] = cost_usd
+        if credits_used is not None:
+            patch["credits_used"] = credits_used
 
         update: Dict[str, Any] = {"$set": patch}
         if metadata_patch:
@@ -293,6 +296,7 @@ class AgentRunRepository:
                     "tokens_in": {"$sum": {"$ifNull": ["$tokens_input", 0]}},
                     "tokens_out": {"$sum": {"$ifNull": ["$tokens_output", 0]}},
                     "cost": {"$sum": {"$ifNull": ["$cost_usd", 0]}},
+                    "credits": {"$sum": {"$ifNull": ["$credits_used", 0]}},
                 }
             },
             {"$sort": {"runs": -1}},
@@ -331,6 +335,7 @@ class AgentRunRepository:
                     "tokens_input": r["tokens_in"],
                     "tokens_output": r["tokens_out"],
                     "cost_usd": round(float(r["cost"] or 0), 4),
+                    "credits_used": int(r.get("credits") or 0),
                 }
                 for r in agent_rows
             ],

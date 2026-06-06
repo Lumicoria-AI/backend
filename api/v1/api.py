@@ -43,6 +43,18 @@ from backend.api.v1.endpoints import (
     invites,   # Phase 5: invite module
     organizations,  # Phase 8: Organizations REST API
     analytics,      # Phase 9: Dashboard analytics
+    teams,          # Phase A1: Workspace > Teams REST API
+    projects_v2,    # Phase A2: org-scoped Projects v2
+    org_billing,    # Phase A3: per-seat org billing
+    comments,       # Phase A4: cross-resource comments
+    tasks_extended, # Phase A4: tasks bulk + watchers + dependencies + saved-views
+    agents_v2,      # Phase B: agents collaboration surface (metrics, lineage, schedules, handoffs)
+    analytics_v2,   # Phase D: per-level analytics + audit export
+    reminders,           # Phase C: cross-resource reminders
+    automations,         # Phase C: rules engine REST surface
+    notification_rules,  # Phase C: per-user notification prefs + quiet hours
+    enterprise,          # Phase E: API tokens + webhooks + SSO + domains + session policy
+    scim,                # Phase E: SCIM 2.0 user/group provisioning
 )
 from backend.api.routers.research_mentor import router as research_mentor_router
 from backend.api.routers.ethics_bias_router import router as ethics_bias_router
@@ -106,6 +118,90 @@ api_router.include_router(invites.router, prefix="/invites", tags=["invites"])
 
 # Organization endpoints (Phase 8 — settings + members + invites)
 api_router.include_router(organizations.router, prefix="/organizations", tags=["organizations"])
+
+# Teams (Phase A1 — Workspace > Teams)
+api_router.include_router(
+    teams.router,
+    prefix="/organizations/{org_id}/teams",
+    tags=["teams"],
+)
+
+# Projects v2 (Phase A2 — org-scoped projects with normalised tasks)
+api_router.include_router(
+    projects_v2.router,
+    prefix="/organizations/{org_id}/projects",
+    tags=["projects-v2"],
+)
+
+# Org-scoped per-seat billing (Phase A3)
+api_router.include_router(
+    org_billing.router,
+    prefix="/org-billing",
+    tags=["org-billing"],
+)
+
+# Cross-resource comments (Phase A4 / C)
+api_router.include_router(
+    comments.router,
+    prefix="/comments",
+    tags=["comments"],
+)
+
+# Tasks extended surface (Phase A4)
+api_router.include_router(
+    tasks_extended.router,
+    prefix="/tasks-extended",
+    tags=["tasks-extended"],
+)
+
+# Agents v2 collaboration surface (Phase B)
+api_router.include_router(
+    agents_v2.router,
+    prefix="/agents-v2",
+    tags=["agents-v2"],
+)
+
+# Analytics v2 — per-level dashboards (Phase D)
+api_router.include_router(
+    analytics_v2.router,
+    prefix="/analytics-v2",
+    tags=["analytics-v2"],
+)
+
+# Reminders (Phase C)
+api_router.include_router(
+    reminders.router,
+    prefix="/reminders",
+    tags=["reminders"],
+)
+
+# Automations / rules engine (Phase C)
+api_router.include_router(
+    automations.router,
+    prefix="/automations",
+    tags=["automations"],
+)
+
+# Notification rules + preferences (Phase C)
+api_router.include_router(
+    notification_rules.router,
+    prefix="/notification-rules",
+    tags=["notification-rules"],
+)
+
+# Enterprise governance (Phase E)
+api_router.include_router(
+    enterprise.router,
+    prefix="/enterprise",
+    tags=["enterprise"],
+)
+
+# SCIM 2.0 (Phase E)
+api_router.include_router(
+    scim.router,
+    prefix="/scim/v2",
+    tags=["scim"],
+)
 
 # Dashboard analytics (Phase 9 — single payload for the Dashboard surface)
 api_router.include_router(analytics.router, prefix="/analytics", tags=["analytics"])

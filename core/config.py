@@ -365,6 +365,57 @@ class Settings(BaseSettings):
         description="HTTP timeout in seconds for Mistral API calls.",
     )
 
+    # ── Model Pricing & Credits ─────────────────────────────────────────
+    # Three-tier resolver: env override > OpenRouter live cache > static
+    # table in backend/ai_models/pricing.py.  Users never see USD costs;
+    # they see credits + tokens.  Credits are an internal abstraction so
+    # we control margin between what users consume and what the LLM
+    # providers actually charge us.
+    MODEL_PRICING_OVERRIDES_JSON: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional JSON map overriding per-model prices, e.g. "
+            '{"gpt-4o": {"input": 0.005, "output": 0.015}, ...}. '
+            "Wins over OpenRouter + static table. Useful for negotiated "
+            "enterprise contracts."
+        ),
+    )
+    CREDIT_USD_RATE: float = Field(
+        default=0.0003,
+        description=(
+            "USD a user-facing credit represents.  1 credit ≈ this many "
+            "dollars of underlying provider spend BEFORE margin.  Combined "
+            "with CREDIT_MARGIN_MULTIPLIER below, this controls how many "
+            "credits a given cost_usd resolves to: "
+            "credits = ceil(cost_usd * margin / rate)."
+        ),
+    )
+    CREDIT_MARGIN_MULTIPLIER: float = Field(
+        default=3.0,
+        description=(
+            "Margin multiplier — 3.0 means a $1 provider call charges the "
+            "user 3 credits worth of their plan budget.  Adjust to control "
+            "gross margin on the per-plan credit allocation."
+        ),
+    )
+    OPENROUTER_PRICING_ENABLED: bool = Field(
+        default=True,
+        description=(
+            "When True, the app fetches OpenRouter's /api/v1/models pricing "
+            "feed at boot, caches it in Redis for 24 h, and consults it "
+            "before falling back to the static table.  Set False to use "
+            "only static + env overrides (zero external network calls)."
+        ),
+    )
+    OPENROUTER_PRICING_TTL_HOURS: int = Field(
+        default=24,
+        description="How long to cache the OpenRouter pricing feed in Redis.",
+    )
+    OPENROUTER_PRICING_URL: str = Field(
+        default="https://openrouter.ai/api/v1/models",
+        description="OpenRouter pricing endpoint — public, no auth required.",
+    )
+
     # ── Stripe Billing ──────────────────────────────────────────────────
     STRIPE_SECRET_KEY: str = Field(
         default="",
@@ -403,6 +454,31 @@ class Settings(BaseSettings):
     STRIPE_PRICE_ENTERPRISE: str = Field(
         default="",
         description="Stripe Price ID for Enterprise plan.",
+    )
+    # ── Org-scoped (per-seat) team plans ──
+    STRIPE_PRICE_TEAM_MONTHLY: str = Field(
+        default="",
+        description="Stripe Price ID for the Team plan (per-seat monthly).",
+    )
+    STRIPE_PRICE_TEAM_YEARLY: str = Field(
+        default="",
+        description="Stripe Price ID for the Team plan (per-seat yearly, 15% discount).",
+    )
+    STRIPE_PRICE_BUSINESS_MONTHLY: str = Field(
+        default="",
+        description="Stripe Price ID for the Business plan (per-seat monthly).",
+    )
+    STRIPE_PRICE_BUSINESS_YEARLY: str = Field(
+        default="",
+        description="Stripe Price ID for the Business plan (per-seat yearly, 15% discount).",
+    )
+    STRIPE_PRICE_ENTERPRISE_MONTHLY: str = Field(
+        default="",
+        description="Stripe Price ID for the Enterprise plan (per-seat monthly).",
+    )
+    STRIPE_PRICE_ENTERPRISE_YEARLY: str = Field(
+        default="",
+        description="Stripe Price ID for the Enterprise plan (per-seat yearly).",
     )
     STRIPE_SUCCESS_URL: str = Field(
         default="http://localhost:3000/dashboard?billing=success",
@@ -571,7 +647,7 @@ class Settings(BaseSettings):
     SALESFORCE_CLIENT_SECRET: Optional[str] = None
 
     # Frontend URL for OAuth redirect URI construction
-    FRONTEND_URL: str = "http://localhost:3000"
+    FRONTEND_URL: str = "http://localhost:8080"
 
     # Public-facing base URL used in customer-facing emails / share links
     # (support portal, ticket status URLs, magic links, etc.).

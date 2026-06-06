@@ -189,6 +189,31 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("service_connection_failed", service="MinIO (S3)", error=str(e))
 
+        # ── Model pricing cache (Phase 9 cost/credits tracking) ──
+        # Loads env overrides + Mongo overrides + OpenRouter live feed,
+        # caches the OpenRouter map in Redis for 24h.  All failures
+        # degrade silently to the static fallback table — every agent
+        # run still computes a cost number.
+        try:
+            from backend.ai_models.pricing import warm_pricing_cache
+            snapshot = await warm_pricing_cache()
+            logger.info(
+                "service_initialized",
+                service="ModelPricing",
+                status="ok",
+                **snapshot,
+            )
+        except Exception as e:
+            logger.warning("service_init_failed", service="ModelPricing", error=str(e))
+
+        # ── Automation engine (Phase C) ──────────────────────────
+        try:
+            from backend.services.automation_engine import install as install_automation_engine
+            install_automation_engine()
+            logger.info("service_initialized", service="AutomationEngine", status="ok")
+        except Exception as e:
+            logger.warning("service_init_failed", service="AutomationEngine", error=str(e))
+
         # ── RAG & Document Processing ────────────────────────────
         logger.info("─" * 40)
         logger.info("initializing_rag_pipeline")

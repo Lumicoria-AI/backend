@@ -277,6 +277,12 @@ async def _agents_panel(organization_id: str, time_range: str) -> Dict[str, Any]
         ]
     ).to_list(length=None)
 
+    # Workspace-wide totals — what the dashboard headline numbers use.
+    total_credits = sum(int(e.get("credits_used") or 0) for e in by_agent)
+    total_tokens_in = sum(int(e.get("tokens_input") or 0) for e in by_agent)
+    total_tokens_out = sum(int(e.get("tokens_output") or 0) for e in by_agent)
+    total_cost = round(sum(float(e.get("cost_usd") or 0.0) for e in by_agent), 4)
+
     return {
         "time_range": raw.get("time_range"),
         "since": raw.get("since"),
@@ -285,6 +291,13 @@ async def _agents_panel(organization_id: str, time_range: str) -> Dict[str, Any]
         "errors": raw.get("errors", 0),
         "success_rate": round(raw.get("success_rate", 0.0), 4),
         "by_status": raw.get("by_status", {}),
+        # User-facing usage totals.  `credits_used`, `tokens_input`,
+        # `tokens_output` are safe to display to anyone.  `cost_usd` is
+        # internal — surface it only on admin / billing surfaces.
+        "credits_used": total_credits,
+        "tokens_input": total_tokens_in,
+        "tokens_output": total_tokens_out,
+        "cost_usd_internal": total_cost,
         "leaderboard": [
             {
                 "agent_key": e.get("agent_key", "unknown"),
@@ -298,7 +311,9 @@ async def _agents_panel(organization_id: str, time_range: str) -> Dict[str, Any]
                 "p95_ms": e.get("p95_ms"),
                 "tokens_input": e.get("tokens_input", 0),
                 "tokens_output": e.get("tokens_output", 0),
-                "cost_usd": e.get("cost_usd", 0.0),
+                "credits_used": int(e.get("credits_used") or 0),
+                # INTERNAL — do NOT render to non-admin users.
+                "cost_usd_internal": e.get("cost_usd", 0.0),
             }
             for e in by_agent
         ],

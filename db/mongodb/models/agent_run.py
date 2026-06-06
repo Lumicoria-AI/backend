@@ -63,7 +63,8 @@ class AgentRun(BaseModel):
     provider: Optional[str] = None              # openai | anthropic | gemini | etc.
     tokens_input: Optional[int] = None
     tokens_output: Optional[int] = None
-    cost_usd: Optional[float] = None
+    cost_usd: Optional[float] = None            # INTERNAL — actual provider spend
+    credits_used: Optional[int] = None          # USER-FACING — derived from cost_usd via pricing.compute_credits
     confidence: Optional[float] = None          # router confidence when applicable
 
     # Timestamps

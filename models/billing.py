@@ -16,10 +16,16 @@ from enum import Enum
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SubscriptionPlan(str, Enum):
-    """Available subscription plans — mapped 1:1 to Stripe Price IDs."""
+    """Available subscription plans — mapped 1:1 to Stripe Price IDs.
+
+    Individual plans (user-scoped): FREE, STARTER, PROFESSIONAL.
+    Team plans (org-scoped):        TEAM, BUSINESS, ENTERPRISE.
+    """
     FREE = "free"
     STARTER = "starter"
     PROFESSIONAL = "professional"
+    TEAM = "team"
+    BUSINESS = "business"
     ENTERPRISE = "enterprise"
 
 
@@ -103,6 +109,55 @@ PLAN_LIMITS: Dict[str, Dict[str, Any]] = {
         "priority_support": True,
         "api_access": True,
         "custom_agent_templates": True,
+        "teams_enabled": True,
+        "sso_enabled": True,
+        "scim_enabled": True,
+        "strict_mode_enabled": True,
+        "data_residency": True,
+        "audit_export_enabled": True,
+    },
+    # ── Team plans (org-scoped, per-seat) ──
+    SubscriptionPlan.TEAM: {
+        "display_name": "Team",
+        "price_monthly_per_seat": 39,
+        "annual_discount_pct": 15,
+        "max_agents": 25,
+        "max_agent_runs_per_month": 15_000,
+        "max_documents_per_month": 3_000,
+        "max_file_upload_mb": 50,
+        "max_knowledge_base_queries": 5_000,
+        "allowed_models": ["default", "perplexity", "gemini", "openai", "anthropic", "mistral"],
+        "advanced_features": True,
+        "priority_support": False,
+        "api_access": True,
+        "custom_agent_templates": True,
+        "teams_enabled": True,
+        "sso_enabled": False,
+        "scim_enabled": False,
+        "strict_mode_enabled": False,
+        "data_residency": False,
+        "audit_export_enabled": False,
+    },
+    SubscriptionPlan.BUSINESS: {
+        "display_name": "Business",
+        "price_monthly_per_seat": 79,
+        "annual_discount_pct": 15,
+        "max_agents": 100,
+        "max_agent_runs_per_month": 75_000,
+        "max_documents_per_month": 15_000,
+        "max_file_upload_mb": 100,
+        "max_knowledge_base_queries": 25_000,
+        "allowed_models": ["default", "perplexity", "gemini", "openai", "anthropic", "mistral"],
+        "advanced_features": True,
+        "priority_support": True,
+        "api_access": True,
+        "custom_agent_templates": True,
+        "teams_enabled": True,
+        "sso_enabled": True,
+        "scim_enabled": False,
+        "strict_mode_enabled": True,
+        "data_residency": False,
+        "audit_export_enabled": True,
     },
 }
 
@@ -138,6 +193,51 @@ class SubscriptionInDB(BaseModel):
     # Metadata
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class OrgSubscriptionInDB(BaseModel):
+    """Org-scoped subscription (parallel to user-scoped `SubscriptionInDB`).
+
+    Used for Team / Business / Enterprise plans where billing follows the
+    organisation rather than a single user.  The user-scoped subscriptions
+    remain in place for individual plans.
+    """
+    organization_id: str
+    stripe_customer_id: Optional[str] = None
+    stripe_subscription_id: Optional[str] = None
+    stripe_price_id: Optional[str] = None
+    plan: SubscriptionPlan = SubscriptionPlan.TEAM
+    status: SubscriptionStatus = SubscriptionStatus.ACTIVE
+    cadence: str = "monthly"             # "monthly" | "annual"
+    seats_purchased: int = 1
+    seats_used: int = 1
+    billing_email: Optional[str] = None
+    tax_id: Optional[str] = None
+    po_number: Optional[str] = None
+    cancel_at_period_end: bool = False
+    current_period_start: Optional[datetime] = None
+    current_period_end: Optional[datetime] = None
+    trial_start: Optional[datetime] = None
+    trial_end: Optional[datetime] = None
+    canceled_at: Optional[datetime] = None
+    ended_at: Optional[datetime] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SeatAssignmentInDB(BaseModel):
+    """One active seat assignment for a user inside an organisation."""
+    organization_id: str
+    user_id: str
+    assigned_at: datetime = Field(default_factory=datetime.utcnow)
+    assigned_by: Optional[str] = None
+    removed_at: Optional[datetime] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(from_attributes=True)
 

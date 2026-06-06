@@ -259,11 +259,17 @@ async def execute_task(task: Any) -> Dict[str, Any]:
     )
 
     # Read what the agent's wrapped LLM client recorded during this run
-    # so we can stamp tokens + cost onto the AgentRun row.
+    # so we can stamp tokens + cost + credits onto the AgentRun row.
     try:
         usage = agent.consume_usage()
     except Exception:
         usage = {}
+
+    # Convert internal USD cost into user-facing credits.  Users see
+    # credits; we keep cost_usd as the internal margin reference.
+    from backend.ai_models.pricing import compute_credits
+    cost_amount = float(usage.get("cost_usd") or 0.0)
+    credits = compute_credits(cost_amount)
 
     # Close the run.
     try:
@@ -286,7 +292,8 @@ async def execute_task(task: Any) -> Dict[str, Any]:
                     },
                     tokens_input=int(usage.get("prompt_tokens") or 0) or None,
                     tokens_output=int(usage.get("completion_tokens") or 0) or None,
-                    cost_usd=float(usage.get("cost_usd") or 0.0) or None,
+                    cost_usd=cost_amount or None,
+                    credits_used=credits or None,
                     metadata_patch={
                         "model_used": usage.get("model_used"),
                         "provider": usage.get("provider"),

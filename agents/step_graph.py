@@ -114,11 +114,12 @@ class StepGraph:
         self.all_sources: List[Dict[str, Any]] = []
         self.context_used: int = 0
         self.parent_run_id: Optional[str] = None
-        # Aggregate token / cost totals across all steps — stamped onto
-        # the parent run when the plan closes.
+        # Aggregate token / cost / credits totals across all steps —
+        # stamped onto the parent run when the plan closes.
         self._parent_tokens_in: int = 0
         self._parent_tokens_out: int = 0
         self._parent_cost: float = 0.0
+        self._parent_credits: int = 0
 
     # ── public API ────────────────────────────────────────────────────
 
@@ -477,6 +478,7 @@ class StepGraph:
             tokens_in = self._parent_tokens_in or None
             tokens_out = self._parent_tokens_out or None
             cost = round(self._parent_cost, 6) or None
+            credits_total = self._parent_credits or None
             if error:
                 await agent_run_repository.fail_run(self.parent_run_id, error)
             else:
@@ -490,6 +492,7 @@ class StepGraph:
                     tokens_input=tokens_in,
                     tokens_output=tokens_out,
                     cost_usd=cost,
+                    credits_used=credits_total,
                 )
         except Exception as e:  # noqa: BLE001
             logger.warning("step_graph_close_parent_failed", error=str(e))
@@ -541,11 +544,18 @@ class StepGraph:
                 return
 
             u = usage or {}
+            # Compute user-facing credits for this step from its
+            # underlying provider cost.
+            from backend.ai_models.pricing import compute_credits
+            step_cost = float(u.get("cost_usd") or 0.0)
+            step_credits = compute_credits(step_cost)
+
             # Accumulate this step's spend onto the parent so the parent
             # run carries the totals across the whole plan.
             self._parent_tokens_in += int(u.get("prompt_tokens") or 0)
             self._parent_tokens_out += int(u.get("completion_tokens") or 0)
-            self._parent_cost += float(u.get("cost_usd") or 0.0)
+            self._parent_cost += step_cost
+            self._parent_credits += step_credits
 
             if error:
                 await agent_run_repository.fail_run(
@@ -565,7 +575,8 @@ class StepGraph:
                     },
                     tokens_input=int(u.get("prompt_tokens") or 0) or None,
                     tokens_output=int(u.get("completion_tokens") or 0) or None,
-                    cost_usd=float(u.get("cost_usd") or 0.0) or None,
+                    cost_usd=step_cost or None,
+                    credits_used=step_credits or None,
                     metadata_patch={
                         "model_used": u.get("model_used"),
                         "provider": u.get("provider"),
