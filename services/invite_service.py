@@ -322,13 +322,31 @@ class InviteService:
                     continue
                 accepted_ids.append(str(invite.id))
 
-                # 2. Add to org with the right role
+                # 2. Add to org with the right role.  Plan caps gate seat
+                #    consumption: a Team plan with 3 seats blocks the 4th invite.
                 org_id = str(invite.organization_id) if invite.organization_id else None
                 if org_id:
                     try:
                         from backend.db.mongodb.repositories.organization_repository import (
                             organization_repository,
                         )
+                        from backend.services.billing.plan_caps import (
+                            PlanCapExceeded,
+                            assert_can_add_seat,
+                        )
+                        try:
+                            await assert_can_add_seat(org_id)
+                        except PlanCapExceeded as cap_exc:
+                            logger.warning(
+                                "invite_accept: seat cap exceeded",
+                                invite_id=str(invite.id),
+                                detail=cap_exc.detail,
+                            )
+                            # Don't rollback the invite — the seat shortfall is
+                            # an admin problem.  Surface a structured error so
+                            # the caller can render the upsell.
+                            raise
+
                         role = invite.role.value if hasattr(invite.role, "value") else str(invite.role)
                         await organization_repository.add_member(
                             organization_id=org_id,
@@ -336,6 +354,16 @@ class InviteService:
                             is_admin=(role == InviteRole.ADMIN.value),
                         )
                         orgs_joined += 1
+                        # Mirror into seat_assignments so seats_used reflects reality.
+                        try:
+                            from backend.db.mongodb.repositories.org_subscription_repository import (
+                                seat_assignment_repository,
+                            )
+                            await seat_assignment_repository.assign(
+                                org_id, user_id, assigned_by=str(invite.invited_by) if invite.invited_by else None,
+                            )
+                        except Exception:
+                            pass
                     except Exception as e:
                         logger.warning("invite_accept: org add_member failed",
                                        invite_id=str(invite.id), error=str(e))

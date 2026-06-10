@@ -55,6 +55,13 @@ from backend.api.v1.endpoints import (
     notification_rules,  # Phase C: per-user notification prefs + quiet hours
     enterprise,          # Phase E: API tokens + webhooks + SSO + domains + session policy
     scim,                # Phase E: SCIM 2.0 user/group provisioning
+    workspace,                   # Phase A: workspace navigation surface
+    organizations_extended,      # Phase A: org profile/branding/limits/admins/tags/announcements
+    teams_extended,              # Phase A: team CSV import + integrations + reminders + analytics
+    projects_v2_extended,        # Phase A: project task views + templates + KB + analytics + sharing
+    invites_extended,            # Phase A: bulk + CSV + Google Workspace + shareable links
+    tasks_v2_extras,             # Phase A: subtasks + history + templates + snooze + imports
+    org_billing_extended,        # Phase A: credits + promos + contracts + BYOK + forecasts
 )
 from backend.api.routers.research_mentor import router as research_mentor_router
 from backend.api.routers.ethics_bias_router import router as ethics_bias_router
@@ -789,7 +796,53 @@ Error Response:
 {
   "detail": string | object[]
 }
-""" 
+"""
+
+# ────────────────────────────────────────────────────────────────────
+# Phase A — Workspace + extended surfaces
+# ────────────────────────────────────────────────────────────────────
+
+api_router.include_router(
+    workspace.router,
+    prefix="/workspaces",
+    tags=["workspace"],
+)
+
+api_router.include_router(
+    organizations_extended.router,
+    prefix="/organizations",
+    tags=["organizations-extended"],
+)
+
+api_router.include_router(
+    teams_extended.router,
+    prefix="/organizations/{org_id}/teams",
+    tags=["teams-extended"],
+)
+
+api_router.include_router(
+    projects_v2_extended.router,
+    prefix="/organizations/{org_id}/projects",
+    tags=["projects-v2-extended"],
+)
+
+api_router.include_router(
+    invites_extended.router,
+    prefix="/invites",
+    tags=["invites-extended"],
+)
+
+api_router.include_router(
+    tasks_v2_extras.router,
+    prefix="/tasks-v2",
+    tags=["tasks-v2-extras"],
+)
+
+api_router.include_router(
+    org_billing_extended.router,
+    prefix="/org-billing",
+    tags=["org-billing-extended"],
+)
 
 # Add response codes to all routers
 for route in api_router.routes:
