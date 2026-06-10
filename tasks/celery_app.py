@@ -78,6 +78,8 @@ celery_app = Celery(
         "backend.tasks.wellbeing_tasks",
         "backend.tasks.task_reminder_tasks",   # Phase 4
         "backend.tasks.task_executor_tasks",   # Phase 6
+        "backend.tasks.webhook_dispatcher",    # Phase E — egress worker
+        "backend.tasks.agent_metrics_tasks",   # Phase B — metrics materialiser
     ],
 )
 
@@ -161,5 +163,22 @@ celery_app.conf.beat_schedule = {
     "tasks-run-pending-agent-proposals": {
         "task": "tasks.run_pending_agent_proposals",
         "schedule": 180.0,
+    },
+
+    # ── Phase E: webhook delivery worker ─────────────────────────
+    # Drains pending webhook_deliveries.  Failed rows back off
+    # exponentially up to 8 attempts.
+    "webhooks-deliver-due": {
+        "task": "webhooks.deliver_due",
+        "schedule": 60.0,
+    },
+
+    # ── Phase B: agent metrics materialiser ──────────────────────
+    # Rebuilds `agent_metrics` from `agent_runs` so the workspace
+    # leaderboards + per-scope dashboards can read pre-aggregated
+    # rows instead of running an aggregation per request.
+    "agent-metrics-materialise": {
+        "task": "agent_metrics.materialise",
+        "schedule": 600.0,
     },
 }

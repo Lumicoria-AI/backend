@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 import structlog
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
 
 from backend.api.deps import get_current_active_user
@@ -342,27 +343,127 @@ async def sso_sp_metadata(org_id: str = Query(...)):
     return Response(content=xml, media_type="application/xml")
 
 
-@router.post("/sso/saml/acs", status_code=501)
+@router.post("/sso/saml/acs")
 async def sso_acs(
+    request: Request,
     org_id: str = Query(...),
-    SAMLResponse: Optional[str] = None,
 ):
     """SAML Assertion Consumer Service.
 
     Verifies the IdP's SAML response, extracts the NameID + attribute map,
-    and either logs the user in or creates a new account auto-joined to the
-    org.
-
-    Phase E first cut returns 501 with the inputs captured so IdP teams can
-    confirm metadata exchange ahead of the full python3-saml integration.
+    and either creates a new account auto-joined to the org (JIT-provision)
+    or logs the existing user in.  Issues a Lumicoria JWT on success.
     """
-    return {
-        "ok": False,
-        "stub": True,
-        "message": "SAML ACS is not yet wired in this build. Metadata exchange + IdP-side config still verifies via /sso/metadata.xml. Full handshake ships in the next pass.",
-        "org_id": org_id,
-        "received_saml_response_bytes": len(SAMLResponse or ""),
+    form = await request.form()
+    saml_b64 = form.get("SAMLResponse")
+    relay_state = form.get("RelayState")
+    if not saml_b64:
+        raise HTTPException(status_code=400, detail="SAMLResponse missing")
+
+    # 1. Load SSO config for this org.
+    cfg = await sso_repository.get(org_id)
+    if not cfg or not cfg.get("enabled"):
+        raise HTTPException(status_code=403, detail="SSO not enabled for this organization")
+    cert_pem = cfg.get("certificate")
+    if not cert_pem:
+        raise HTTPException(status_code=400, detail="SSO certificate not configured")
+
+    # 2. Verify + parse the assertion.
+    try:
+        from backend.services.saml_verifier import verify_saml_response, SamlVerificationError
+        from backend.core.config import settings as _settings
+        # Operators can override signature verification in development only.
+        skip_sig = bool(getattr(_settings, "SAML_SKIP_SIGNATURE_VERIFICATION", False))
+        assertion = verify_saml_response(
+            saml_response_b64=str(saml_b64),
+            idp_certificate_pem=cert_pem,
+            expected_issuer=cfg.get("entity_id"),
+            skip_signature=skip_sig,
+        )
+    except SamlVerificationError as exc:
+        await log_activity(
+            user_id="system", organization_id=org_id,
+            activity_type="enterprise.sso_failed",
+            details={"reason": str(exc)},
+            related_resource_type="organization", related_resource_id=str(org_id),
+        )
+        raise HTTPException(status_code=401, detail=f"SAML verification failed: {exc}")
+
+    # 3. Resolve / JIT-provision the user.
+    from backend.db.mongodb.mongodb import MongoDB
+    users_col = await MongoDB.get_collection("users")
+    email = (assertion.email or assertion.name_id or "").lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Assertion missing email/NameID")
+
+    existing = await users_col.find_one({"email": email})
+    if existing:
+        user_oid = existing["_id"]
+    else:
+        # JIT provision.
+        doc = {
+            "email": email,
+            "full_name": assertion.full_name or email.split("@")[0],
+            "is_active": True,
+            "metadata": {"provisioned_via": "saml", "issuer": assertion.issuer},
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+        }
+        result = await users_col.insert_one(doc)
+        user_oid = result.inserted_id
+
+    # 4. Seat enforcement + org join.
+    try:
+        from backend.services.billing.plan_caps import (
+            PlanCapExceeded, assert_can_add_seat,
+        )
+        from backend.db.mongodb.repositories.org_subscription_repository import (
+            seat_assignment_repository,
+        )
+        # Existing seat? Don't re-charge.
+        existing_seat = await seat_assignment_repository.count_active(org_id)
+        org = await organization_repository.get_by_id(org_id)
+        if _oid(user_oid) not in [_oid(m) for m in (org.member_ids or [])]:
+            try:
+                await assert_can_add_seat(org_id)
+            except PlanCapExceeded as exc:
+                raise HTTPException(status_code=402, detail=exc.detail)
+            await organization_repository.add_member(org_id, str(user_oid))
+            await seat_assignment_repository.assign(org_id, str(user_oid))
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sso.seat_join_failed", error=str(exc), org_id=org_id)
+
+    # 5. Issue Lumicoria JWT.
+    from datetime import timedelta as _td
+    from jose import jwt as _jwt
+    from backend.core.config import settings as _settings
+    payload = {
+        "sub": str(user_oid),
+        "user_id": str(user_oid),
+        "email": email,
+        "exp": datetime.utcnow() + _td(minutes=int(getattr(_settings, "ACCESS_TOKEN_EXPIRE_MINUTES", 60))),
+        "iat": datetime.utcnow(),
+        "provider": "saml",
+        "organization_id": str(org_id),
     }
+    secret = getattr(_settings, "SECRET_KEY", "")
+    access_token = _jwt.encode(payload, secret, algorithm="HS256") if secret else ""
+
+    await log_activity(
+        user_id=str(user_oid), organization_id=org_id,
+        activity_type="enterprise.sso_login",
+        details={"email": email, "issuer": assertion.issuer},
+        related_resource_type="organization", related_resource_id=str(org_id),
+    )
+
+    # 6. Redirect back to the app with the token and an optional relay state.
+    success_url = (relay_state or getattr(_settings, "SAML_SUCCESS_URL", "")
+                   or "http://localhost:8080/workspace") + (
+        ("&" if "?" in (relay_state or "") else "?") + f"sso_token={access_token}" if access_token else ""
+    )
+    return RedirectResponse(success_url, status_code=302)
 
 
 # ── SCIM tokens ──────────────────────────────────────────────────────

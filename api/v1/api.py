@@ -55,6 +55,11 @@ from backend.api.v1.endpoints import (
     notification_rules,  # Phase C: per-user notification prefs + quiet hours
     enterprise,          # Phase E: API tokens + webhooks + SSO + domains + session policy
     scim,                # Phase E: SCIM 2.0 user/group provisioning
+    chat as chat_module,         # Phase C: chat channels + WS + slash command
+    analytics_v2_extras,         # Phase D: analytics depth (retention/funnel/cohorts/exports)
+    search as search_module,     # Phase A: federated search
+    media as media_module,       # Phase A: avatars/covers + library + signed URLs
+    ops as ops_module,           # Phase A: health/queue/db/cache/per-org status
     workspace,                   # Phase A: workspace navigation surface
     organizations_extended,      # Phase A: org profile/branding/limits/admins/tags/announcements
     teams_extended,              # Phase A: team CSV import + integrations + reminders + analytics
@@ -806,6 +811,36 @@ api_router.include_router(
     workspace.router,
     prefix="/workspaces",
     tags=["workspace"],
+)
+
+api_router.include_router(
+    chat_module.router,
+    prefix="/chat-v2",
+    tags=["chat-v2"],
+)
+
+api_router.include_router(
+    analytics_v2_extras.router,
+    prefix="/analytics-v2",
+    tags=["analytics-v2-extras"],
+)
+
+api_router.include_router(
+    search_module.router,
+    prefix="/search",
+    tags=["search"],
+)
+
+api_router.include_router(
+    media_module.router,
+    prefix="/media",
+    tags=["media"],
+)
+
+api_router.include_router(
+    ops_module.router,
+    prefix="/ops",
+    tags=["ops"],
 )
 
 api_router.include_router(

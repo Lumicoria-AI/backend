@@ -50,10 +50,19 @@ def scoped_filter(
     extra: Optional[Dict[str, Any]],
     organization_id: str,
 ) -> Dict[str, Any]:
-    """Build a Mongo find() filter that always includes `organization_id`."""
-    base: Dict[str, Any] = {"organization_id": ObjectId(organization_id)}
+    """Build a Mongo find() filter that always includes `organization_id`.
+
+    Security: the canonical `organization_id` cannot be overridden by
+    caller-supplied extras.  Even if the caller passes their own
+    `organization_id` (e.g. accidentally inheriting it from a generic
+    filter dict), the scoped value wins.
+    """
+    org_oid = ObjectId(organization_id)
+    base: Dict[str, Any] = {}
     if extra:
         base.update(extra)
+    # Apply org scoping LAST so it always wins.
+    base["organization_id"] = org_oid
     return base
 
 
