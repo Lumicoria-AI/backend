@@ -754,6 +754,7 @@ async def get_project_activity(
 ):
     await _require_project_access(org_id, project_id, current_user)
     from backend.db.mongodb.mongodb import MongoDB
+    from backend.db.serializers import stringify_rows
     col = await MongoDB.get_collection("activity_logs")
     cursor = col.find({
         "organization_id": _oid(org_id),
@@ -763,12 +764,7 @@ async def get_project_activity(
         ],
     }).sort("timestamp", -1).skip(skip).limit(limit)
     rows = await cursor.to_list(length=limit)
-    for r in rows:
-        r["id"] = str(r.pop("_id", r.get("id")))
-        for k in ("organization_id", "user_id"):
-            if r.get(k) is not None:
-                r[k] = str(r[k])
-    return rows
+    return stringify_rows(rows)
 
 
 @router.get("/{project_id}/analytics")

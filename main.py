@@ -43,6 +43,46 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from bson import ObjectId as _BsonObjectId
+import json as _json
+from datetime import datetime as _datetime, date as _date
+
+# Teach fastapi.encoders.jsonable_encoder that ObjectId → str.  This is
+# the encoder used for endpoints with response_model declared; without
+# this patch the encoder falls through to `dict(obj)` / `vars(obj)` and
+# raises TypeError.
+try:
+    from fastapi import encoders as _fastapi_encoders
+    _fastapi_encoders.ENCODERS_BY_TYPE[_BsonObjectId] = str
+except Exception:  # noqa: BLE001
+    pass
+
+
+class LumicoriaJSONResponse(JSONResponse):
+    """Default JSON response that quietly stringifies any nested ObjectId
+    (and datetime / date) before serialising.  Catches the long tail of
+    endpoints that hand FastAPI a raw Mongo doc with ObjectIds in
+    arbitrary nested fields (e.g. activity_logs.details) where the
+    standard encoder blows up with TypeError("'ObjectId' object is not
+    iterable")."""
+
+    @staticmethod
+    def _default(value):
+        if isinstance(value, _BsonObjectId):
+            return str(value)
+        if isinstance(value, (_datetime, _date)):
+            return value.isoformat()
+        raise TypeError(f"Type {type(value).__name__} not JSON-serialisable")
+
+    def render(self, content):
+        return _json.dumps(
+            content,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=None,
+            separators=(",", ":"),
+            default=self._default,
+        ).encode("utf-8")
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import sentry_sdk
 from contextlib import asynccontextmanager
@@ -352,6 +392,9 @@ app = FastAPI(
     docs_url="/docs" if settings.docs_enabled else None,
     redoc_url="/redoc" if settings.docs_enabled else None,
     openapi_url=f"{settings.API_V1_STR}/openapi.json" if settings.docs_enabled else None,
+    # Custom response class handles ObjectId + datetime defensively so
+    # endpoints that return raw Mongo docs don't 500 on nested ObjectIds.
+    default_response_class=LumicoriaJSONResponse,
 )
 
 # ---------------------------------------------------------------------------

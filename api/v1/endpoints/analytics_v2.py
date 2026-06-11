@@ -206,16 +206,10 @@ async def org_audit_recent(
         query["activity_type"] = activity_type
     if resource_type:
         query["related_resource_type"] = resource_type
+    from backend.db.serializers import stringify_rows
     cursor = col.find(query).sort("timestamp", -1).skip(skip).limit(limit)
     rows = await cursor.to_list(length=limit)
-    out: List[Dict[str, Any]] = []
-    for r in rows:
-        r["id"] = str(r.pop("_id", r.get("id")))
-        for k in ("organization_id", "user_id"):
-            if r.get(k) is not None:
-                r[k] = str(r[k])
-        out.append(r)
-    return out
+    return stringify_rows(rows)
 
 
 @router.post("/org/{org_id}/audit/export")

@@ -802,14 +802,11 @@ async def get_team_activity(
             ],
         }).sort("timestamp", -1).skip(skip).limit(limit)
         rows = await cursor.to_list(length=limit)
+    from backend.db.serializers import stringify_oids
     out: List[Dict[str, Any]] = []
     for r in rows:
         d = r if isinstance(r, dict) else (r.model_dump(mode="json") if hasattr(r, "model_dump") else r.dict())
-        d["id"] = str(d.pop("_id", d.get("id")))
-        for k in ("organization_id", "user_id"):
-            if d.get(k) is not None:
-                d[k] = str(d[k])
-        out.append(d)
+        out.append(stringify_oids(d))
     return out
 
 

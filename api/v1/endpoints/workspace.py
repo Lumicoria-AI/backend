@@ -224,15 +224,11 @@ async def workspace_timeline(
     current_user: User = Depends(get_current_active_user),
 ):
     await _require_org_member(org_id, current_user)
+    from backend.db.serializers import stringify_rows
     col = await MongoDB.get_collection("activity_logs")
     cursor = col.find({"organization_id": _oid(org_id)}).sort("timestamp", -1).limit(limit)
     rows = await cursor.to_list(length=limit)
-    for r in rows:
-        r["id"] = str(r.pop("_id"))
-        for k in ("organization_id", "user_id"):
-            if r.get(k) is not None:
-                r[k] = str(r[k])
-    return rows
+    return stringify_rows(rows)
 
 
 @router.get("/{org_id}/calendar")
