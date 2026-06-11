@@ -80,6 +80,7 @@ celery_app = Celery(
         "backend.tasks.task_executor_tasks",   # Phase 6
         "backend.tasks.webhook_dispatcher",    # Phase E — egress worker
         "backend.tasks.agent_metrics_tasks",   # Phase B — metrics materialiser
+        "backend.tasks.automation_runner",     # Phase C — scheduled automations
     ],
 )
 
@@ -180,5 +181,17 @@ celery_app.conf.beat_schedule = {
     "agent-metrics-materialise": {
         "task": "agent_metrics.materialise",
         "schedule": 600.0,
+    },
+
+    # ── Phase C: scheduled automations ─────────────────────────────
+    # Every 60s: tick `schedule`-triggered rules whose cron matches.
+    "automations-tick-scheduled": {
+        "task": "automations.tick_scheduled",
+        "schedule": 60.0,
+    },
+    # Every 5 min: retry errored automation runs with backoff.
+    "automations-retry-errored": {
+        "task": "automations.retry_errored",
+        "schedule": 300.0,
     },
 }

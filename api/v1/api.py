@@ -60,6 +60,11 @@ from backend.api.v1.endpoints import (
     search as search_module,     # Phase A: federated search
     media as media_module,       # Phase A: avatars/covers + library + signed URLs
     ops as ops_module,           # Phase A: health/queue/db/cache/per-org status
+    agents_v2_extras,            # Phase B: custom agents + batches + presets + KB + feedback
+    notifications_extras,        # Phase C: rules + devices + topics + broadcast + subs
+    emails,                      # Phase C: templates + branding + sending domains + DKIM
+    comments_extras,             # Phase C: reviews + shares + counts + watch
+    integrations_v2,             # Phase A: 15 provider connectors per scope
     workspace,                   # Phase A: workspace navigation surface
     organizations_extended,      # Phase A: org profile/branding/limits/admins/tags/announcements
     teams_extended,              # Phase A: team CSV import + integrations + reminders + analytics
@@ -841,6 +846,36 @@ api_router.include_router(
     ops_module.router,
     prefix="/ops",
     tags=["ops"],
+)
+
+api_router.include_router(
+    agents_v2_extras.router,
+    prefix="/agents-v2",
+    tags=["agents-v2-extras"],
+)
+
+api_router.include_router(
+    notifications_extras.router,
+    prefix="/notifications-v2",
+    tags=["notifications-v2"],
+)
+
+api_router.include_router(
+    emails.router,
+    prefix="/emails",
+    tags=["emails"],
+)
+
+api_router.include_router(
+    comments_extras.router,
+    prefix="/comments-v2",
+    tags=["comments-v2"],
+)
+
+api_router.include_router(
+    integrations_v2.router,
+    prefix="/integrations-v2",
+    tags=["integrations-v2"],
 )
 
 api_router.include_router(
