@@ -69,7 +69,12 @@ async def _upload_and_record(
     key = _build_key(scope, scope_id, file.filename or "upload.bin")
     try:
         from backend.services.storage_service import storage_service
-        await storage_service.upload_file(key, content, content_type=file.content_type)
+        # NOTE: storage_service.upload_file's signature is (file_content,
+        # key, content_type) — pass keyword args so the positional order
+        # bug (botocore rejecting bytes as Key) can never recur.
+        await storage_service.upload_file(
+            file_content=content, key=key, content_type=file.content_type,
+        )
         url = storage_service.get_public_url(key)
     except Exception as exc:  # noqa: BLE001
         logger.exception("media.upload_failed", error=str(exc))
