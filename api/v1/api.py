@@ -226,6 +226,10 @@ api_router.include_router(analytics.router, prefix="/analytics", tags=["analytic
 # Activity endpoints
 api_router.include_router(activity.router, prefix="/activity", tags=["activity"])
 
+# Permissions probe (frontend capability gating)
+from backend.api.v1.endpoints import permissions as _permissions  # noqa: E402
+api_router.include_router(_permissions.router, prefix="/permissions", tags=["permissions"])
+
 # Integrations endpoints
 api_router.include_router(integrations.router, prefix="/integrations", tags=["integrations"])
 

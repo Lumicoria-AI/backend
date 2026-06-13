@@ -21,7 +21,7 @@ Reads from existing collections — no new schema:
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 import structlog
@@ -71,7 +71,7 @@ async def compute_productivity(
     if not organization_id or not user_id:
         return _empty()
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     today = _start_of_day(now)
     week_start = _start_of_week(now)
 

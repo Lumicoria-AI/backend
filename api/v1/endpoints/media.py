@@ -130,10 +130,18 @@ async def upload_team_avatar(
     current_user: User = Depends(get_current_active_user),
 ):
     org_id = organization_id or _resolve_primary_org_id(current_user)
-    return await _upload_and_record(
+    res = await _upload_and_record(
         scope="team", scope_id=team_id, file=file,
         organization_id=org_id, user_id=str(current_user.id),
     )
+    try:
+        from backend.db.mongodb.repositories.team_repository import team_repository
+        await team_repository.update_team(
+            team_id, organization_id=org_id, patch={"logo_url": res["url"]},
+        )
+    except Exception:
+        pass
+    return res
 
 
 @router.post("/avatar/project/{project_id}")
@@ -144,10 +152,18 @@ async def upload_project_avatar(
     current_user: User = Depends(get_current_active_user),
 ):
     org_id = organization_id or _resolve_primary_org_id(current_user)
-    return await _upload_and_record(
+    res = await _upload_and_record(
         scope="project", scope_id=project_id, file=file,
         organization_id=org_id, user_id=str(current_user.id),
     )
+    try:
+        from backend.db.mongodb.repositories.project_v2_repository import project_v2_repository
+        await project_v2_repository.update_project(
+            project_id, organization_id=org_id, patch={"logo_url": res["url"]},
+        )
+    except Exception:
+        pass
+    return res
 
 
 # ── Cover uploads ────────────────────────────────────────────────
@@ -165,6 +181,16 @@ async def upload_team_cover(
         scope="team_cover", scope_id=team_id, file=file,
         organization_id=org_id, user_id=str(current_user.id),
     )
+    # Persist directly onto the team row so cover survives reads via /teams.
+    try:
+        from backend.db.mongodb.repositories.team_repository import team_repository
+        await team_repository.update_team(
+            team_id, organization_id=org_id, patch={"cover_url": res["url"]},
+        )
+    except Exception:
+        # Cover upload still succeeded — surface the URL to the caller so the
+        # frontend can patch the team via /teams as a fallback.
+        pass
     return res
 
 
@@ -176,10 +202,18 @@ async def upload_project_cover(
     current_user: User = Depends(get_current_active_user),
 ):
     org_id = organization_id or _resolve_primary_org_id(current_user)
-    return await _upload_and_record(
+    res = await _upload_and_record(
         scope="project_cover", scope_id=project_id, file=file,
         organization_id=org_id, user_id=str(current_user.id),
     )
+    try:
+        from backend.db.mongodb.repositories.project_v2_repository import project_v2_repository
+        await project_v2_repository.update_project(
+            project_id, organization_id=org_id, patch={"cover_image_url": res["url"]},
+        )
+    except Exception:
+        pass
+    return res
 
 
 @router.post("/cover/org/{org_id}")
@@ -193,10 +227,15 @@ async def upload_org_cover(
         raise HTTPException(status_code=404, detail="Organization not found")
     if _oid(current_user.id) not in [_oid(a) for a in (org.admin_ids or [])]:
         raise HTTPException(status_code=403, detail="Org admin permission required")
-    return await _upload_and_record(
+    res = await _upload_and_record(
         scope="org_cover", scope_id=org_id, file=file,
         organization_id=org_id, user_id=str(current_user.id),
     )
+    try:
+        await organization_repository.update(org_id, {"cover_url": res["url"]})
+    except Exception:
+        pass
+    return res
 
 
 # ── Library + signed URL + delete ────────────────────────────────

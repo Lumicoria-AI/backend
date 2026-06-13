@@ -11,7 +11,7 @@ views, automations) live in `projects_v2_extended.py`.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import structlog
@@ -775,7 +775,7 @@ async def get_project_analytics(
 ):
     await _require_project_access(org_id, project_id, current_user)
     days = {"1d": 1, "7d": 7, "30d": 30, "90d": 90, "1y": 365}.get(time_range, 30)
-    since = datetime.utcnow() - timedelta(days=days)
+    since = datetime.now(timezone.utc) - timedelta(days=days)
     from backend.db.mongodb.mongodb import MongoDB
     tasks_col = await MongoDB.get_collection("tasks")
     runs_col = await MongoDB.get_collection("agent_runs")
@@ -788,7 +788,7 @@ async def get_project_analytics(
     tasks_overdue = await tasks_col.count_documents({
         "organization_id": org_oid, "project_id": proj_oid,
         "status": {"$nin": ["completed", "cancelled", "archived"]},
-        "due_date": {"$lt": datetime.utcnow()},
+        "due_date": {"$lt": datetime.now(timezone.utc)},
     })
     runs_total = await runs_col.count_documents({
         "organization_id": org_oid, "project_id": proj_oid,

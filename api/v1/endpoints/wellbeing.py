@@ -1,7 +1,7 @@
 from typing import Any, List, Optional, Dict
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from pydantic import BaseModel, Field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 import structlog
 
@@ -939,7 +939,7 @@ async def get_coach_state(
     # Weekly score series: average mood per day across Mon..Sun of
     # the current week.  Pulled directly off the metrics collection
     # so we don't depend on an aggregator field that doesn't exist.
-    today = datetime.utcnow().date()
+    today = datetime.now(timezone.utc).date()
     monday = today - timedelta(days=today.weekday())  # Monday this week
     week_series: List[Optional[float]] = [None] * 7
     try:
@@ -1007,7 +1007,7 @@ async def get_coach_state(
         "today_timeline": activities,
         "recommendations": recommendations,
         "week_series": week_series,
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     })
 
 

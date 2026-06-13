@@ -1,7 +1,10 @@
 from typing import Any, List, Optional, Dict
 from fastapi import APIRouter, Depends, HTTPException, status, Query, Body
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from datetime import datetime
+from datetime import datetime, timezone
+import csv
+import io
 
 from backend.api.deps import get_current_active_user
 from backend.models.user import User
@@ -143,6 +146,101 @@ async def get_activity_summary(
         "by_severity": by_severity,
         "time_range": {"start": start_date, "end": end_date},
     }
+
+# --- User-scoped audit log (Profile → Audit) ---
+
+
+@router.get("/me/audit", response_model=List[ActivityEntry])
+async def me_audit(
+    limit: int = Query(200, ge=1, le=1000),
+    skip: int = Query(0, ge=0),
+    activity_type: Optional[str] = None,
+    severity: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """Return a chronological audit feed of the signed-in user's actions
+    across this workspace.  Powers the /audit page.  Filters apply
+    post-fetch when the underlying repo doesn't support them natively."""
+    activities = await activity_repository.get_recent_activity(
+        organization_id=current_user.organization_id,
+        user_id=current_user.id,
+        activity_type=activity_type,
+        limit=max(limit + skip, 200),
+        skip=0,
+    )
+    out: List[Any] = []
+    for entry in activities:
+        ts = entry.timestamp
+        if start_date and ts < start_date:
+            continue
+        if end_date and ts > end_date:
+            continue
+        if severity and getattr(entry, "severity", "info") != severity:
+            continue
+        out.append(entry)
+    return out[skip:skip + limit]
+
+
+@router.get("/me/audit/export")
+async def me_audit_export(
+    activity_type: Optional[str] = None,
+    severity: Optional[str] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    current_user: User = Depends(get_current_active_user),
+):
+    """Stream the signed-in user's audit history as a CSV.  Includes the
+    same filters as /me/audit so the export matches what the user sees."""
+    activities = await activity_repository.get_recent_activity(
+        organization_id=current_user.organization_id,
+        user_id=current_user.id,
+        activity_type=activity_type,
+        limit=5000,
+        skip=0,
+    )
+
+    def _rows():
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow([
+            "timestamp", "activity_type", "severity",
+            "related_resource_type", "related_resource_id",
+            "ip_address", "user_agent", "details",
+        ])
+        yield buf.getvalue()
+        buf.seek(0); buf.truncate(0)
+        for entry in activities:
+            ts = entry.timestamp
+            if start_date and ts < start_date:
+                continue
+            if end_date and ts > end_date:
+                continue
+            sev = getattr(entry, "severity", "info")
+            if severity and sev != severity:
+                continue
+            details = getattr(entry, "details", {}) or {}
+            writer.writerow([
+                ts.isoformat() if ts else "",
+                entry.activity_type,
+                sev,
+                getattr(entry, "related_resource_type", "") or "",
+                getattr(entry, "related_resource_id", "") or "",
+                details.get("ip_address", "") if isinstance(details, dict) else "",
+                details.get("user_agent", "") if isinstance(details, dict) else "",
+                str(details) if details else "",
+            ])
+            yield buf.getvalue()
+            buf.seek(0); buf.truncate(0)
+
+    filename = f"lumicoria-audit-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.csv"
+    return StreamingResponse(
+        _rows(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
 
 # --- Internal debug endpoint (keep for development) ---
 

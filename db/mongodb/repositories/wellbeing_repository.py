@@ -1,7 +1,7 @@
 from typing import Optional, List, Dict, Any, Union
 from pymongo import ASCENDING, DESCENDING
 from bson import ObjectId
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from ..base_repository import BaseRepository
 from backend.models.mongodb_models import (
     WellbeingData,
@@ -689,7 +689,7 @@ class WellbeingRepository(BaseRepository[WellbeingData]):
     ) -> Dict[str, Any]:
         """Get wellbeing analytics for a user over a time range."""
         days = {"1d": 1, "7d": 7, "30d": 30, "90d": 90, "1y": 365}.get(time_range, 7)
-        since = datetime.utcnow() - timedelta(days=days)
+        since = datetime.now(timezone.utc) - timedelta(days=days)
 
         metrics = await self.get_user_metrics(
             user_id=user_id,
@@ -748,7 +748,7 @@ class WellbeingRepository(BaseRepository[WellbeingData]):
     ) -> Dict[str, Any]:
         """Get organization-wide wellbeing analytics."""
         days = {"1d": 1, "7d": 7, "30d": 30, "90d": 90, "1y": 365}.get(time_range, 7)
-        since = datetime.utcnow() - timedelta(days=days)
+        since = datetime.now(timezone.utc) - timedelta(days=days)
 
         collection = await self._get_metrics_collection()
         pipeline = [

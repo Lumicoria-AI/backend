@@ -176,6 +176,7 @@ class ProjectV2(MongoBaseModel):
     status: ProjectStatus = ProjectStatus.PLANNING
     priority: Optional[str] = "medium"
     color: Optional[str] = "#6C4AB0"
+    logo_url: Optional[str] = None
     cover_image_url: Optional[str] = None
     due_date: Optional[datetime] = None
     lead_id: Optional[PyObjectId] = None
@@ -202,6 +203,7 @@ class ProjectV2Create(BaseModel):
     status: ProjectStatus = ProjectStatus.PLANNING
     priority: Optional[str] = "medium"
     color: Optional[str] = "#6C4AB0"
+    logo_url: Optional[str] = None
     cover_image_url: Optional[str] = None
     due_date: Optional[datetime] = None
     team_id: Optional[str] = None
@@ -220,6 +222,7 @@ class ProjectV2Update(BaseModel):
     status: Optional[ProjectStatus] = None
     priority: Optional[str] = None
     color: Optional[str] = None
+    logo_url: Optional[str] = None
     cover_image_url: Optional[str] = None
     due_date: Optional[datetime] = None
     team_id: Optional[str] = None
@@ -240,6 +243,7 @@ class ProjectV2Response(BaseModel):
     status: ProjectStatus
     priority: Optional[str] = None
     color: Optional[str] = None
+    logo_url: Optional[str] = None
     cover_image_url: Optional[str] = None
     due_date: Optional[datetime] = None
     lead_id: Optional[str] = None

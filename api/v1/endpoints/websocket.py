@@ -15,6 +15,7 @@ import structlog
 import asyncio
 
 from backend.services.notification_service import connection_manager
+from backend.services.presence_service import presence_broker
 from backend.core.security import verify_token
 
 logger = structlog.get_logger()
@@ -212,6 +213,100 @@ async def get_websocket_status():
         "status": "operational",
         "connected_users": connected_users,
         "total_connections": total_connections
+    }
+
+
+@router.websocket("/presence")
+async def websocket_presence(
+    websocket: WebSocket,
+    token: Optional[str] = Query(None),
+    organization_id: Optional[str] = Query(None),
+):
+    """Realtime presence + typing.
+
+    Connect: ws://host:port/api/v1/ws/presence?token=JWT&organization_id=<oid>
+
+    Server → client message types:
+      - connected                { user_id, organization_id, online_user_ids }
+      - presence.update          { user_id, online, last_seen? }
+      - typing.start             { room, user_id, at }
+      - typing.stop              { room, user_id, at }
+      - pong                     ping response
+
+    Client → server message types:
+      - subscribe                { room: "project:<id>" | "team:<id>" | "chat:<id>" | "task:<id>" }
+      - unsubscribe              { room }
+      - typing                   { room, typing: true|false }
+      - ping                     heartbeat
+    """
+    authenticated_user_id = await authenticate_websocket(websocket, token)
+    if not authenticated_user_id:
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
+    if not organization_id:
+        await websocket.close(code=4400, reason="organization_id required")
+        return
+
+    await websocket.accept()
+    await presence_broker.mark_online(websocket, user_id=authenticated_user_id, organization_id=organization_id)
+
+    try:
+        await websocket.send_json({
+            "type": "connected",
+            "data": {
+                "user_id": authenticated_user_id,
+                "organization_id": organization_id,
+                "online_user_ids": presence_broker.online_users_for_org(organization_id),
+            },
+        })
+    except Exception:
+        pass
+
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw)
+            except Exception:
+                continue
+            mtype = (msg or {}).get("type")
+            data = (msg or {}).get("data") or {}
+
+            if mtype == "ping":
+                try:
+                    await websocket.send_json({"type": "pong"})
+                except Exception:
+                    pass
+            elif mtype == "subscribe":
+                room = str(data.get("room") or "").strip()
+                if room:
+                    await presence_broker.subscribe(websocket, user_id=authenticated_user_id, room=room)
+            elif mtype == "unsubscribe":
+                room = str(data.get("room") or "").strip()
+                if room:
+                    await presence_broker.unsubscribe(websocket, user_id=authenticated_user_id, room=room)
+            elif mtype == "typing":
+                room = str(data.get("room") or "").strip()
+                typing_flag = bool(data.get("typing", True))
+                if room:
+                    await presence_broker.broadcast_typing(
+                        room=room, user_id=authenticated_user_id, typing=typing_flag,
+                    )
+            # Unknown types are ignored.
+    except WebSocketDisconnect:
+        logger.info("presence_websocket_disconnect", user_id=authenticated_user_id, organization_id=organization_id)
+    except Exception as e:
+        logger.exception("presence_websocket_error", error=str(e))
+    finally:
+        await presence_broker.mark_offline(websocket, user_id=authenticated_user_id)
+
+
+@router.get("/presence/snapshot")
+async def presence_snapshot(organization_id: str):
+    """Snapshot of who is currently online in the org."""
+    return {
+        "organization_id": organization_id,
+        "online_user_ids": presence_broker.online_users_for_org(organization_id),
     }
 
 
