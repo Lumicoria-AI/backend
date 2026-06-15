@@ -150,8 +150,27 @@ async def get_activity_summary(
 # --- User-scoped audit log (Profile → Audit) ---
 
 
+def _resolve_org_id(user: User, organization_id: Optional[str]) -> Optional[str]:
+    """Pick an org id for the audit query.  Prefer the explicit query
+    param (so the frontend can scope), then fall back to whichever org
+    id field the User model carries — `organization_id`,
+    `primary_organization_id`, or the first item in
+    `organization_ids`.  Returns None when the user belongs to no org."""
+    if organization_id:
+        return organization_id
+    for key in ("organization_id", "primary_organization_id", "default_organization_id"):
+        v = getattr(user, key, None)
+        if v:
+            return str(v)
+    orgs = getattr(user, "organization_ids", None) or []
+    if orgs:
+        return str(orgs[0])
+    return None
+
+
 @router.get("/me/audit", response_model=List[ActivityEntry])
 async def me_audit(
+    organization_id: Optional[str] = Query(None),
     limit: int = Query(200, ge=1, le=1000),
     skip: int = Query(0, ge=0),
     activity_type: Optional[str] = None,
@@ -163,8 +182,12 @@ async def me_audit(
     """Return a chronological audit feed of the signed-in user's actions
     across this workspace.  Powers the /audit page.  Filters apply
     post-fetch when the underlying repo doesn't support them natively."""
+    org_id = _resolve_org_id(current_user, organization_id)
+    if not org_id:
+        # User belongs to no org — return an empty feed rather than 500.
+        return []
     activities = await activity_repository.get_recent_activity(
-        organization_id=current_user.organization_id,
+        organization_id=org_id,
         user_id=current_user.id,
         activity_type=activity_type,
         limit=max(limit + skip, 200),
@@ -185,6 +208,7 @@ async def me_audit(
 
 @router.get("/me/audit/export")
 async def me_audit_export(
+    organization_id: Optional[str] = Query(None),
     activity_type: Optional[str] = None,
     severity: Optional[str] = None,
     start_date: Optional[datetime] = None,
@@ -193,13 +217,17 @@ async def me_audit_export(
 ):
     """Stream the signed-in user's audit history as a CSV.  Includes the
     same filters as /me/audit so the export matches what the user sees."""
-    activities = await activity_repository.get_recent_activity(
-        organization_id=current_user.organization_id,
-        user_id=current_user.id,
-        activity_type=activity_type,
-        limit=5000,
-        skip=0,
-    )
+    org_id = _resolve_org_id(current_user, organization_id)
+    if not org_id:
+        activities: List[Any] = []
+    else:
+        activities = await activity_repository.get_recent_activity(
+            organization_id=org_id,
+            user_id=current_user.id,
+            activity_type=activity_type,
+            limit=5000,
+            skip=0,
+        )
 
     def _rows():
         buf = io.StringIO()
