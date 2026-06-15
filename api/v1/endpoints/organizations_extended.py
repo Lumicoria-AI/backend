@@ -137,10 +137,14 @@ async def update_profile_cover(
 async def get_branding(org_id: str, current_user: User = Depends(get_current_active_user)):
     org = await _require_org_member(org_id, current_user)
     settings = dict(getattr(org, "settings", {}) or {})
+    # Prefer the canonical top-level cover_url field (written by the
+    # /media/cover/org upload endpoint); fall back to legacy settings
+    # for orgs created before the field was added.
+    cover_url = getattr(org, "cover_url", None) or settings.get("cover_url")
     return {
         "branding": settings.get("branding") or {},
         "logo_url": getattr(org, "logo_url", None),
-        "cover_url": settings.get("cover_url"),
+        "cover_url": cover_url,
         "primary_color": (settings.get("branding") or {}).get("primary_color") or "#6C4AB0",
         "accent_color": (settings.get("branding") or {}).get("accent_color") or "#0EA5E9",
     }

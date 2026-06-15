@@ -712,6 +712,7 @@ class Organization(MongoBaseModel):
     industry: Optional[str] = None
     website: Optional[str] = None
     logo_url: Optional[str] = None
+    cover_url: Optional[str] = None
     # Plan / billing reference — populated by Phase 9 billing flow.
     plan: Optional[str] = None
     # Member + admin rosters.  An admin is also always a member.
@@ -736,6 +737,7 @@ class OrganizationCreate(BaseModel):
     industry: Optional[str] = None
     website: Optional[str] = None
     logo_url: Optional[str] = None
+    cover_url: Optional[str] = None
 
 
 class OrganizationUpdate(BaseModel):
@@ -744,6 +746,7 @@ class OrganizationUpdate(BaseModel):
     industry: Optional[str] = None
     website: Optional[str] = None
     logo_url: Optional[str] = None
+    cover_url: Optional[str] = None
     settings: Optional[Dict[str, Any]] = None
 
 
