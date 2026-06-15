@@ -123,6 +123,7 @@ def _serialize_project(p: ProjectV2) -> ProjectV2Response:
         status=ProjectStatus(d.get("status", "planning")) if isinstance(d.get("status"), str) else d.get("status", ProjectStatus.PLANNING),
         priority=d.get("priority"),
         color=d.get("color"),
+        logo_url=d.get("logo_url"),
         cover_image_url=d.get("cover_image_url"),
         due_date=d.get("due_date"),
         lead_id=str(d["lead_id"]) if d.get("lead_id") else None,
@@ -354,6 +355,7 @@ async def duplicate_project(
         status=ProjectStatus.PLANNING,
         priority=src.priority,
         color=src.color,
+        logo_url=src.logo_url,
         cover_image_url=src.cover_image_url,
         team_id=str(src.team_id) if src.team_id else None,
         lead_id=str(src.lead_id) if src.lead_id else None,
@@ -647,6 +649,7 @@ async def get_project_branding(
     return {
         "branding": project.branding or {},
         "color": project.color,
+        "logo_url": project.logo_url,
         "cover_image_url": project.cover_image_url,
     }
 
