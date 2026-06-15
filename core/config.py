@@ -11,7 +11,8 @@ be overridden by actual environment variables in production.
 
 from typing import List, Optional, Dict, Any, Union
 from pydantic_settings import BaseSettings
-from pydantic import AnyHttpUrl, validator, Field, HttpUrl, ConfigDict
+from pydantic import AnyHttpUrl, field_validator, Field, HttpUrl, ConfigDict
+from pydantic import ValidationInfo
 import secrets
 from functools import lru_cache
 from pathlib import Path
@@ -537,7 +538,8 @@ class Settings(BaseSettings):
         description="Allowed CORS origins. In production set to your actual domains.",
     )
 
-    @validator("BACKEND_CORS_ORIGINS", pre=True)
+    @field_validator("BACKEND_CORS_ORIGINS", mode="before")
+    @classmethod
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> Union[List[str], str]:
         if isinstance(v, str):
             if v.startswith("["):
@@ -549,10 +551,12 @@ class Settings(BaseSettings):
             return [i.strip() for i in v.split(",")]
         return v or []
 
-    @validator("SQLALCHEMY_DATABASE_URI", pre=True)
-    def assemble_sqlalchemy_uri(cls, v: Optional[str], values: Dict[str, Any]) -> Optional[str]:
+    @field_validator("SQLALCHEMY_DATABASE_URI", mode="before")
+    @classmethod
+    def assemble_sqlalchemy_uri(cls, v: Optional[str], info: ValidationInfo) -> Optional[str]:
         if v:
             return v
+        values = info.data
         host = values.get("POSTGRES_HOST")
         port = values.get("POSTGRES_PORT")
         user = values.get("POSTGRES_USER")
@@ -568,11 +572,12 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     DEBUG: bool = False  # Default OFF — opt-in only
 
-    @validator("DEBUG", pre=True)
-    def set_debug(cls, v: Optional[bool], values: Dict[str, Any]) -> bool:
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def set_debug(cls, v: Optional[bool], info: ValidationInfo) -> bool:
         if v is not None:
             return bool(v)
-        return values.get("ENVIRONMENT", "production") == "development"
+        return info.data.get("ENVIRONMENT", "production") == "development"
 
     # ── Observability ──────────────────────────────────────────────────
     LOG_LEVEL: str = "INFO"

@@ -19,6 +19,7 @@ returning everyone's rows.
 from __future__ import annotations
 
 import functools
+import inspect
 from typing import Any, Awaitable, Callable, Dict, Optional, TypeVar
 
 from bson import ObjectId
@@ -32,11 +33,28 @@ F = TypeVar("F", bound=Callable[..., Awaitable[Any]])
 
 
 def require_org(fn: F) -> F:
-    """Decorator: assert that `organization_id` is present and non-empty."""
+    """Decorator: assert that `organization_id` is present and non-empty.
+
+    Works whether `organization_id` is passed positionally OR via kwarg.
+    Uses inspect.signature() to find the parameter's position once at
+    decoration time, then checks both args[index] and kwargs at call
+    time.  Legacy repos with mixed-style call sites are safe to
+    decorate without a refactor.
+    """
+    sig = inspect.signature(fn)
+    params = list(sig.parameters.keys())
+    try:
+        org_index = params.index("organization_id")
+    except ValueError:
+        # Function doesn't declare organization_id — the decorator is a
+        # no-op rather than a hard error so adopting it gradually is safe.
+        return fn
 
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):  # type: ignore[no-untyped-def]
-        org_id = kwargs.get("organization_id")
+        org_id: Any = kwargs.get("organization_id")
+        if org_id in (None, "") and len(args) > org_index:
+            org_id = args[org_index]
         if not org_id:
             raise TenantScopingError(
                 f"{fn.__qualname__} requires organization_id (got {org_id!r})"

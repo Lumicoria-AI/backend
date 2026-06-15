@@ -168,6 +168,12 @@ class ProjectV2Repository(BaseRepository[ProjectV2]):
         col = await self.collection
         return await col.count_documents(query)
 
+    # Fields that callers may legitimately want to unset via PATCH.
+    # For these, an explicit None in the patch becomes a Mongo $unset
+    # rather than being silently dropped (the default for every other
+    # field, where None means "no change").
+    _UNSETTABLE_FIELDS = frozenset(("team_id", "lead_id", "due_date", "description", "logo_url", "cover_image_url"))
+
     @require_org
     async def update_project(
         self,
@@ -179,18 +185,36 @@ class ProjectV2Repository(BaseRepository[ProjectV2]):
         oid = to_oid(project_id)
         if oid is None:
             return None
-        update = {k: v for k, v in patch.items() if v is not None}
-        # Coerce ObjectId-typed updates
+
+        # Split the incoming patch into $set + $unset based on which
+        # field is being touched and whether the value is None.
+        set_update: Dict[str, Any] = {}
+        unset_update: Dict[str, str] = {}
+        for k, v in patch.items():
+            if v is None:
+                if k in self._UNSETTABLE_FIELDS:
+                    unset_update[k] = ""
+                # else: silently ignore Nones for fields we don't support unsetting
+                continue
+            set_update[k] = v
+
+        # Coerce ObjectId-typed sets
         for key in ("team_id", "lead_id"):
-            if key in update and update[key] is not None:
-                update[key] = ObjectId(str(update[key]))
-        if not update:
+            if key in set_update and set_update[key] is not None:
+                set_update[key] = ObjectId(str(set_update[key]))
+
+        if not set_update and not unset_update:
             return await self.get_project(project_id, organization_id=organization_id)
-        update["updated_at"] = datetime.utcnow()
+
+        set_update["updated_at"] = datetime.utcnow()
+        update_doc: Dict[str, Any] = {"$set": set_update}
+        if unset_update:
+            update_doc["$unset"] = unset_update
+
         col = await self.collection
         result = await col.find_one_and_update(
             scoped_filter({"_id": oid}, organization_id),
-            {"$set": update},
+            update_doc,
             return_document=True,
         )
         return ProjectV2(**result) if result else None
