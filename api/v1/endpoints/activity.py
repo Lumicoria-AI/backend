@@ -185,7 +185,26 @@ def _as_naive_utc(dt: Optional[datetime]) -> Optional[datetime]:
     return dt
 
 
-@router.get("/me/audit", response_model=List[ActivityEntry])
+def _entry_to_jsonable(entry: Any) -> Dict[str, Any]:
+    """Coerce a stored ActivityLogEntry into a JSON-safe dict.
+
+    The Pydantic model uses ObjectId for id / user_id / organization_id
+    (and `details` may carry arbitrary ObjectIds), which FastAPI's
+    Pydantic validator rejects for str-typed response models.  Convert
+    every ObjectId-shaped value to a string here so the endpoint can
+    return the rows without a response_model gate.
+    """
+    if hasattr(entry, "model_dump"):
+        d = entry.model_dump(mode="json")
+    elif hasattr(entry, "dict"):
+        d = entry.dict()
+    else:
+        d = dict(entry) if isinstance(entry, dict) else {}
+    from backend.db.serializers import stringify_oids
+    return stringify_oids(d)
+
+
+@router.get("/me/audit")
 async def me_audit(
     organization_id: Optional[str] = Query(None),
     limit: int = Query(200, ge=1, le=1000),
@@ -212,7 +231,7 @@ async def me_audit(
     )
     start_naive = _as_naive_utc(start_date)
     end_naive = _as_naive_utc(end_date)
-    out: List[Any] = []
+    out: List[Dict[str, Any]] = []
     for entry in activities:
         ts = _as_naive_utc(entry.timestamp)
         if start_naive and ts and ts < start_naive:
@@ -221,7 +240,7 @@ async def me_audit(
             continue
         if severity and getattr(entry, "severity", "info") != severity:
             continue
-        out.append(entry)
+        out.append(_entry_to_jsonable(entry))
     return out[skip:skip + limit]
 
 
