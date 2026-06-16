@@ -1,0 +1,460 @@
+# ============================================================================
+# Lumicoria AI — Docker Compose (Production)
+# ============================================================================
+# Services: backend, celery-worker, frontend, mongodb, redis, weaviate, minio,
+#           postgres, prometheus, grafana
+# Optional: qdrant, chroma (enable with --profile <name>)
+#
+# Quick start:
+#   cp ../.env.example ../.env   # fill in values
+#   docker compose up -d
+#
+# With Qdrant (instead of / alongside Weaviate):
+#   docker compose --profile qdrant up -d
+#
+# With Chroma:
+#   docker compose --profile chroma up -d
+#
+# Infrastructure only (for local dev):
+#   docker compose up -d mongodb redis weaviate minio
+# ============================================================================
+
+services:
+
+  # ── Backend API ──────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: lumicoria-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    environment:
+      # Override DB hosts to use Docker service names
+      MONGODB_URL: mongodb://mongodb:27017
+      MONGODB_URI: mongodb://mongodb:27017
+      REDIS_HOST: redis
+      VECTOR_STORE_URL: http://weaviate:8080
+      # PostgreSQL
+      POSTGRES_ENABLED: "true"
+      POSTGRES_DUAL_WRITE: "true"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lumicoria}
+      POSTGRES_DB: ${POSTGRES_DB:-lumicoria}
+      # MinIO (S3-compatible storage)
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      ENVIRONMENT: production
+      DEBUG: "false"
+    volumes:
+      - backend_uploads:/app/backend/uploads
+      - ../firebase-credentials.json:/app/backend/firebase-credentials.json:ro
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      weaviate:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    networks:
+      - lumicoria
+
+  # ── Celery Worker (RAG ingest background jobs) ──────────────────────────
+  # Consumes `ingest_file` / `ingest_url` / `ingest_text` tasks enqueued by
+  # the API. Same image as the backend — just runs `celery worker` instead
+  # of uvicorn. Scale with: `docker compose up -d --scale celery-worker=N`.
+  celery-worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: lumicoria-celery-worker
+    restart: unless-stopped
+    command:
+      - celery
+      - -A
+      - backend.tasks.celery_app
+      - worker
+      - --loglevel=info
+      - --concurrency=${CELERY_WORKER_CONCURRENCY:-4}
+      - --prefetch-multiplier=1
+    env_file:
+      - ../.env
+    environment:
+      CELERY_ENABLED: "true"
+      CELERY_TASK_ALWAYS_EAGER: "false"
+      # Use Docker service names (same overrides as the `backend` service).
+      MONGODB_URL: mongodb://mongodb:27017
+      MONGODB_URI: mongodb://mongodb:27017
+      REDIS_HOST: redis
+      VECTOR_STORE_URL: http://weaviate:8080
+      POSTGRES_ENABLED: "true"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lumicoria}
+      POSTGRES_DB: ${POSTGRES_DB:-lumicoria}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      ENVIRONMENT: production
+    volumes:
+      # Share the same ephemeral upload dir the API uses so both can read
+      # files parked in /app/backend/uploads (not strictly required because
+      # ingest_file re-downloads from MinIO, but harmless).
+      - backend_uploads:/app/backend/uploads
+      - ../firebase-credentials.json:/app/backend/firebase-credentials.json:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      weaviate:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    healthcheck:
+      # `celery inspect ping` asks the worker for a pong over the broker.
+      # -d selects this specific worker by its hostname.
+      test: ["CMD-SHELL", "celery -A backend.tasks.celery_app inspect ping -d celery@$$HOSTNAME || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    networks:
+      - lumicoria
+
+  # ── Celery Beat (periodic task scheduler) ────────────────────────────────
+  # Drives all scheduled tasks: wellbeing reminders, task digests, critical
+  # hour warnings, webhook delivery, agent metrics materialiser, and
+  # automation tick.  Must run exactly ONE instance (never scale this).
+  celery-beat:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: lumicoria-celery-beat
+    restart: unless-stopped
+    command:
+      - celery
+      - -A
+      - backend.tasks.celery_app
+      - beat
+      - --loglevel=info
+    env_file:
+      - ../.env
+    environment:
+      CELERY_ENABLED: "true"
+      CELERY_TASK_ALWAYS_EAGER: "false"
+      MONGODB_URL: mongodb://mongodb:27017
+      MONGODB_URI: mongodb://mongodb:27017
+      REDIS_HOST: redis
+      VECTOR_STORE_URL: http://weaviate:8080
+      POSTGRES_ENABLED: "true"
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lumicoria}
+      POSTGRES_DB: ${POSTGRES_DB:-lumicoria}
+      ENVIRONMENT: production
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    networks:
+      - lumicoria
+
+  # ── Frontend (Nginx + SPA) ──────────────────────────────────────────────
+  frontend:
+    build:
+      context: ../../Lumicoria-frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: http://localhost:8000
+        VITE_GOOGLE_OAUTH_CLIENT_ID: ${VITE_GOOGLE_OAUTH_CLIENT_ID:-}
+        VITE_FIREBASE_API_KEY: ${VITE_FIREBASE_API_KEY:-}
+        VITE_FIREBASE_AUTH_DOMAIN: ${VITE_FIREBASE_AUTH_DOMAIN:-}
+        VITE_FIREBASE_PROJECT_ID: ${VITE_FIREBASE_PROJECT_ID:-}
+        VITE_FIREBASE_STORAGE_BUCKET: ${VITE_FIREBASE_STORAGE_BUCKET:-}
+        VITE_FIREBASE_MESSAGING_SENDER_ID: ${VITE_FIREBASE_MESSAGING_SENDER_ID:-}
+        VITE_FIREBASE_APP_ID: ${VITE_FIREBASE_APP_ID:-}
+        VITE_FIREBASE_MEASUREMENT_ID: ${VITE_FIREBASE_MEASUREMENT_ID:-}
+        VITE_STRIPE_PUBLISHABLE_KEY: ${VITE_STRIPE_PUBLISHABLE_KEY:-}
+    container_name: lumicoria-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://localhost:80/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - lumicoria
+
+  # ── MongoDB ─────────────────────────────────────────────────────────────
+  mongodb:
+    image: mongo:7
+    container_name: lumicoria-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - lumicoria
+
+  # ── Redis ───────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: lumicoria-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - lumicoria
+
+  # ── MinIO (S3-Compatible Object Storage) ─────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: lumicoria-minio
+    restart: unless-stopped
+    ports:
+      - "9000:9000"    # S3 API
+      - "9001:9001"    # Console UI
+    volumes:
+      - minio_data:/data
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - lumicoria
+
+  # ── Weaviate (Vector Store — default) ───────────────────────────────────
+  weaviate:
+    image: semitechnologies/weaviate:1.28.4
+    container_name: lumicoria-weaviate
+    restart: unless-stopped
+    ports:
+      - "8081:8080"    # Mapped to 8081 on host to avoid conflict
+      - "50051:50051"  # gRPC
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+    environment:
+      QUERY_DEFAULTS_LIMIT: 25
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
+      DEFAULT_VECTORIZER_MODULE: "none"
+      CLUSTER_HOSTNAME: "node1"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/v1/.well-known/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - lumicoria
+
+  # ── Qdrant (Vector Store — optional, enable with: --profile qdrant) ─────
+  qdrant:
+    image: qdrant/qdrant:v1.9.0
+    container_name: lumicoria-qdrant
+    restart: unless-stopped
+    profiles: ["qdrant"]
+    ports:
+      - "6333:6333"    # REST API
+      - "6334:6334"    # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:6333/readyz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - lumicoria
+
+  # ── Chroma (Vector Store — optional, enable with: --profile chroma) ─────
+  chroma:
+    image: chromadb/chroma:latest
+    container_name: lumicoria-chroma
+    restart: unless-stopped
+    profiles: ["chroma"]
+    ports:
+      - "8082:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - lumicoria
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: lumicoria-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lumicoria}
+      POSTGRES_DB: ${POSTGRES_DB:-lumicoria}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - lumicoria
+
+  # ── Prometheus (metrics scraper) ────────────────────────────────────────
+  # Scrapes backend:8000/metrics every 15s.  Config lives at
+  # docker/prometheus/prometheus.yml; edit + `docker compose restart prometheus`
+  # to pick up scrape-target changes.
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: lumicoria-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://localhost:9090/-/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - lumicoria
+
+  # ── Grafana (dashboards over Prometheus) ────────────────────────────────
+  # Datasource + dashboards are auto-provisioned from docker/grafana/.
+  # Open http://localhost:3001 → login admin/admin → "Lumicoria" folder.
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: lumicoria-grafana
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - lumicoria
+
+volumes:
+  mongodb_data:
+    driver: local
+  redis_data:
+    driver: local
+  minio_data:
+    driver: local
+  weaviate_data:
+    driver: local
+  qdrant_data:
+    driver: local
+  chroma_data:
+    driver: local
+  backend_uploads:
+    driver: local
+  postgres_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  lumicoria:
+    driver: bridge
+
+# ============================================================================
+# Stripe Webhook Forwarding (Development)
+# ============================================================================
+# The Stripe CLI is NOT included in Docker Compose because it requires
+# interactive Stripe login. Run it on your host machine:
+#
+#   1. Install: brew install stripe/stripe-cli/stripe
+#   2. Login:   stripe login
+#   3. Forward: stripe listen --forward-to localhost:8000/api/v1/billing/webhook
+#   4. Copy the webhook signing secret (whsec_...) to backend/.env
+#
+# For production, configure webhooks in the Stripe Dashboard:
+#   https://dashboard.stripe.com/webhooks
+#   Endpoint: https://api.lumicoria.ai/api/v1/billing/webhook
+# ============================================================================

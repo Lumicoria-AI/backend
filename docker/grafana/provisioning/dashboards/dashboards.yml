@@ -1,0 +1,19 @@
+# ============================================================================
+# Grafana dashboard provisioning
+# ============================================================================
+# Points Grafana at the mounted `/var/lib/grafana/dashboards` directory —
+# every JSON dashboard there shows up in the UI on container boot.
+# ============================================================================
+
+apiVersion: 1
+
+providers:
+  - name: lumicoria
+    orgId: 1
+    folder: Lumicoria
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

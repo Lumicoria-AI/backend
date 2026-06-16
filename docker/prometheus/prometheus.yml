@@ -1,0 +1,36 @@
+# ============================================================================
+# Prometheus scrape config — Lumicoria AI
+# ============================================================================
+# Scrapes the FastAPI backend's /metrics endpoint (already exposed by
+# `prometheus_client` in backend/main.py).  All `lumicoria_ingest_*` series
+# added by backend/services/ingest/metrics.py show up here automatically.
+# ============================================================================
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: lumicoria-dev
+    environment: development
+
+scrape_configs:
+  # FastAPI backend — /metrics endpoint is served at the app root,
+  # not under /api/v1/.
+  #
+  # Target switches based on where the backend runs:
+  #   - backend:8000                 → backend in Docker (same compose network)
+  #   - host.docker.internal:8000    → backend on the host (uvicorn locally)
+  # Docker Desktop on macOS/Windows resolves host.docker.internal to the host.
+  - job_name: lumicoria-backend
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - host.docker.internal:8000
+        labels:
+          service: backend
+
+  # Prometheus self-scrape (handy for debugging scrape health).
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090

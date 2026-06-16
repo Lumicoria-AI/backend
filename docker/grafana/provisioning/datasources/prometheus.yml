@@ -1,0 +1,22 @@
+# ============================================================================
+# Grafana datasource provisioning
+# ============================================================================
+# Auto-registers Prometheus as the default datasource the first time the
+# Grafana container starts.  Safe to re-run — `editable: false` prevents
+# accidental UI edits from drifting away from this file.
+# ============================================================================
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    orgId: 1
+    uid: lumicoria-prom
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
+      httpMethod: POST

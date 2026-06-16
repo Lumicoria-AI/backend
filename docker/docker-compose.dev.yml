@@ -1,0 +1,57 @@
+# ============================================================================
+# Lumicoria AI — Docker Compose (Development Overrides)
+# ============================================================================
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# This mounts local code for hot-reload. No image rebuilds needed
+# when you change source files.
+# ============================================================================
+
+services:
+
+  # ── Backend: hot-reload with uvicorn --reload ───────────────────────────
+  backend:
+    volumes:
+      - ..:/app/backend          # Mount local code
+      - backend_uploads:/app/backend/uploads
+      - ../firebase-credentials.json:/app/backend/firebase-credentials.json:ro
+    command: ["python", "-m", "uvicorn", "backend.main:app",
+              "--host", "0.0.0.0", "--port", "8000", "--reload",
+              "--log-level", "debug"]
+    environment:
+      ENVIRONMENT: development
+      DEBUG: "true"
+
+  # ── Celery worker: mount local code + watchdog auto-restart ─────────────
+  # `celery worker` has no built-in --reload.  We use `watchmedo auto-restart`
+  # from watchdog (pulled in by celery's [redis] extras via kombu; if it's
+  # missing, fall back to plain `celery worker` and restart by hand).
+  celery-worker:
+    volumes:
+      - ..:/app/backend
+      - backend_uploads:/app/backend/uploads
+      - ../firebase-credentials.json:/app/backend/firebase-credentials.json:ro
+    command: ["sh", "-c",
+              "watchmedo auto-restart --directory=/app/backend --pattern='*.py' --recursive -- celery -A backend.tasks.celery_app worker --loglevel=debug --concurrency=2 --prefetch-multiplier=1 || celery -A backend.tasks.celery_app worker --loglevel=debug --concurrency=2 --prefetch-multiplier=1"]
+    environment:
+      ENVIRONMENT: development
+      DEBUG: "true"
+
+  # ── Frontend: Vite dev server with HMR ──────────────────────────────────
+  frontend:
+    build:
+      context: ../../Lumicoria-frontend
+      dockerfile: Dockerfile
+      target: builder         # Stop at builder stage (has Node.js)
+    volumes:
+      - ../../Lumicoria-frontend/src:/app/src       # Mount source for HMR
+      - ../../Lumicoria-frontend/public:/app/public
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
+    ports:
+      - "5173:5173"           # Vite dev port instead of nginx port 80
+    healthcheck:
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://localhost:5173/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
