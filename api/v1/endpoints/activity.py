@@ -168,6 +168,23 @@ def _resolve_org_id(user: User, organization_id: Optional[str]) -> Optional[str]
     return None
 
 
+def _as_naive_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    """Coerce a datetime to a tz-naive UTC instant.
+
+    The frontend sends ISO strings ending in `Z` which FastAPI parses
+    into tz-aware datetimes.  Mongo timestamps are typically stored
+    naive (assumed UTC).  Comparing the two raises:
+        TypeError: can't compare offset-naive and offset-aware datetimes
+    This helper drops the tzinfo (after converting to UTC if needed) so
+    both sides of a `<` / `>` comparison are naive UTC.
+    """
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
 @router.get("/me/audit", response_model=List[ActivityEntry])
 async def me_audit(
     organization_id: Optional[str] = Query(None),
@@ -193,12 +210,14 @@ async def me_audit(
         limit=max(limit + skip, 200),
         skip=0,
     )
+    start_naive = _as_naive_utc(start_date)
+    end_naive = _as_naive_utc(end_date)
     out: List[Any] = []
     for entry in activities:
-        ts = entry.timestamp
-        if start_date and ts < start_date:
+        ts = _as_naive_utc(entry.timestamp)
+        if start_naive and ts and ts < start_naive:
             continue
-        if end_date and ts > end_date:
+        if end_naive and ts and ts > end_naive:
             continue
         if severity and getattr(entry, "severity", "info") != severity:
             continue
@@ -229,6 +248,9 @@ async def me_audit_export(
             skip=0,
         )
 
+    start_naive = _as_naive_utc(start_date)
+    end_naive = _as_naive_utc(end_date)
+
     def _rows():
         buf = io.StringIO()
         writer = csv.writer(buf)
@@ -240,10 +262,10 @@ async def me_audit_export(
         yield buf.getvalue()
         buf.seek(0); buf.truncate(0)
         for entry in activities:
-            ts = entry.timestamp
-            if start_date and ts < start_date:
+            ts = _as_naive_utc(entry.timestamp)
+            if start_naive and ts and ts < start_naive:
                 continue
-            if end_date and ts > end_date:
+            if end_naive and ts and ts > end_naive:
                 continue
             sev = getattr(entry, "severity", "info")
             if severity and sev != severity:
