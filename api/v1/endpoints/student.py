@@ -6,6 +6,7 @@ import structlog
 
 from backend.api.deps import get_current_active_user
 from backend.agents.student_agent import StudentAgent
+from backend.agents.agent_service import AgentService
 from backend.models.user import User
 from backend.services.activity_logger import log_activity
 from backend.db.mongodb.repositories.student_repository import student_repository
