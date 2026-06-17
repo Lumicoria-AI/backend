@@ -1,0 +1,236 @@
+# Lumicoria Huddle — Self-hosted Jitsi Meet stack
+#
+# Stack: web (lobby + iframe) → prosody (XMPP+auth) → jicofo (focus)
+#        → jvb (video bridge) → jibri (recording).
+#
+# Deploy: `docker compose -f docker/jitsi/docker-compose.yml --env-file
+# docker/jitsi/.env up -d` on the same VM as the main backend, or a
+# dedicated VM.
+#
+# Reverse-proxy meet.lumicoria.ai → web:80 via nginx / Cloudflare.
+#
+# Before first boot, generate auth secrets:
+#   cd docker/jitsi
+#   cp env.example .env
+#   ./gen-passwords.sh         (Jitsi's official one-liner)
+#
+# JWT auth is wired via:
+#   ENABLE_AUTH=1
+#   AUTH_TYPE=jwt
+#   JWT_APP_ID + JWT_APP_SECRET
+# These MUST match backend's JITSI_APP_ID + JITSI_APP_SECRET.
+#
+# Reference: https://github.com/jitsi/docker-jitsi-meet
+
+version: "3.8"
+
+services:
+  # ── Frontend (lobby + iframe served by nginx) ────────────────────
+  web:
+    image: jitsi/web:stable
+    restart: unless-stopped
+    container_name: jitsi-web
+    ports:
+      - "${HTTP_PORT:-8000}:80"
+      - "${HTTPS_PORT:-8443}:443"
+    volumes:
+      - ${CONFIG}/web:/config:Z
+      - ${CONFIG}/web/letsencrypt:/etc/letsencrypt:Z
+      - ${CONFIG}/transcripts:/usr/share/jitsi-meet/transcripts:Z
+    environment:
+      - ENABLE_AUTH
+      - ENABLE_GUESTS
+      - ENABLE_LOBBY
+      - ENABLE_PREJOIN_PAGE
+      - PUBLIC_URL
+      - TZ
+      - JWT_APP_ID
+      - JWT_APP_SECRET
+      - JWT_ACCEPTED_ISSUERS
+      - JWT_ACCEPTED_AUDIENCES
+      - TOKEN_AUTH_URL
+      - XMPP_DOMAIN
+      - XMPP_AUTH_DOMAIN
+      - XMPP_BOSH_URL_BASE
+      - XMPP_GUEST_DOMAIN
+      - XMPP_MUC_DOMAIN
+      - XMPP_RECORDER_DOMAIN
+      - ETHERPAD_URL_BASE
+      - TURNCREDENTIALS_SECRET
+      - DISABLE_HTTPS
+      - LETSENCRYPT_DOMAIN
+      - LETSENCRYPT_EMAIL
+      - LETSENCRYPT_USE_STAGING
+    networks:
+      jitsi:
+        aliases:
+          - meet.lumicoria.local
+
+  # ── Prosody (XMPP) — gates auth via JWT token ────────────────────
+  prosody:
+    image: jitsi/prosody:stable
+    restart: unless-stopped
+    container_name: jitsi-prosody
+    expose:
+      - "5222"
+      - "5347"
+      - "5280"
+    volumes:
+      - ${CONFIG}/prosody/config:/config:Z
+      - ${CONFIG}/prosody/prosody-plugins-custom:/prosody-plugins-custom:Z
+    environment:
+      - AUTH_TYPE
+      - ENABLE_AUTH
+      - ENABLE_GUESTS
+      - ENABLE_LOBBY
+      - GLOBAL_MODULES
+      - GLOBAL_CONFIG
+      - LDAP_URL
+      - LDAP_BASE
+      - LDAP_BINDDN
+      - LDAP_BINDPW
+      - LDAP_FILTER
+      - LDAP_AUTH_METHOD
+      - LDAP_VERSION
+      - LDAP_USE_TLS
+      - LDAP_TLS_CIPHERS
+      - LDAP_TLS_CHECK_PEER
+      - LDAP_TLS_CACERT_FILE
+      - LDAP_TLS_CACERT_DIR
+      - LDAP_START_TLS
+      - XMPP_DOMAIN
+      - XMPP_AUTH_DOMAIN
+      - XMPP_GUEST_DOMAIN
+      - XMPP_MUC_DOMAIN
+      - XMPP_INTERNAL_MUC_DOMAIN
+      - XMPP_MODULES
+      - XMPP_MUC_MODULES
+      - XMPP_INTERNAL_MUC_MODULES
+      - XMPP_RECORDER_DOMAIN
+      - JWT_APP_ID
+      - JWT_APP_SECRET
+      - JWT_ACCEPTED_ISSUERS
+      - JWT_ACCEPTED_AUDIENCES
+      - JWT_ALLOW_EMPTY
+      - JWT_AUTH_TYPE
+      - JWT_TOKEN_AUTH_MODULE
+      - JIBRI_RECORDER_USER
+      - JIBRI_RECORDER_PASSWORD
+      - JIBRI_XMPP_USER
+      - JIBRI_XMPP_PASSWORD
+      - JICOFO_AUTH_USER
+      - JICOFO_AUTH_PASSWORD
+      - JVB_AUTH_USER
+      - JVB_AUTH_PASSWORD
+      - TZ
+    networks:
+      jitsi:
+        aliases:
+          - xmpp.meet.lumicoria.local
+
+  # ── Jicofo (conference focus) ────────────────────────────────────
+  jicofo:
+    image: jitsi/jicofo:stable
+    restart: unless-stopped
+    container_name: jitsi-jicofo
+    volumes:
+      - ${CONFIG}/jicofo:/config:Z
+    environment:
+      - AUTH_TYPE
+      - ENABLE_AUTH
+      - XMPP_DOMAIN
+      - XMPP_AUTH_DOMAIN
+      - XMPP_INTERNAL_MUC_DOMAIN
+      - XMPP_MUC_DOMAIN
+      - XMPP_RECORDER_DOMAIN
+      - XMPP_SERVER
+      - JICOFO_AUTH_USER
+      - JICOFO_AUTH_PASSWORD
+      - JICOFO_COMPONENT_SECRET
+      - JICOFO_ENABLE_BRIDGE_HEALTH_CHECKS
+      - JICOFO_CONF_SSRC_REWRITING
+      - JICOFO_ENABLE_AUTO_LOGIN
+      - TZ
+    depends_on:
+      - prosody
+    networks:
+      jitsi:
+
+  # ── Jitsi Video Bridge (JVB) — the SFU ───────────────────────────
+  jvb:
+    image: jitsi/jvb:stable
+    restart: unless-stopped
+    container_name: jitsi-jvb
+    ports:
+      - "10000:10000/udp"
+      - "${JVB_PORT:-8443}:8080"
+    volumes:
+      - ${CONFIG}/jvb:/config:Z
+    environment:
+      - DOCKER_HOST_ADDRESS
+      - PUBLIC_URL
+      - XMPP_AUTH_DOMAIN
+      - XMPP_INTERNAL_MUC_DOMAIN
+      - XMPP_SERVER
+      - JVB_AUTH_USER
+      - JVB_AUTH_PASSWORD
+      - JVB_BREWERY_MUC
+      - JVB_PORT
+      - JVB_TCP_HARVESTER_DISABLED
+      - JVB_TCP_PORT
+      - JVB_TCP_MAPPED_PORT
+      - JVB_STUN_SERVERS
+      - JVB_ENABLE_APIS
+      - JVB_WS_DOMAIN
+      - JVB_WS_SERVER_ID
+      - JVB_OCTO_BIND_ADDRESS
+      - JVB_OCTO_PUBLIC_ADDRESS
+      - JVB_OCTO_BIND_PORT
+      - JVB_OCTO_REGION
+      - PUBLIC_URL
+      - TZ
+    depends_on:
+      - prosody
+    networks:
+      jitsi:
+
+  # ── Jibri (server-side recording + livestreaming) ────────────────
+  # On meeting end, Jibri uploads MP4 to MinIO and calls our backend's
+  # /api/v1/huddles/jibri/webhook with the object key.
+  jibri:
+    image: jitsi/jibri:stable
+    restart: unless-stopped
+    container_name: jitsi-jibri
+    privileged: true
+    shm_size: "2gb"
+    cap_add:
+      - SYS_ADMIN
+    volumes:
+      - ${CONFIG}/jibri:/config:Z
+      - /dev/shm:/dev/shm
+    environment:
+      - XMPP_AUTH_DOMAIN
+      - XMPP_INTERNAL_MUC_DOMAIN
+      - XMPP_RECORDER_DOMAIN
+      - XMPP_SERVER
+      - JIBRI_XMPP_USER
+      - JIBRI_XMPP_PASSWORD
+      - JIBRI_BREWERY_MUC
+      - JIBRI_RECORDER_USER
+      - JIBRI_RECORDER_PASSWORD
+      - JIBRI_RECORDING_DIR
+      - JIBRI_FINALIZE_RECORDING_SCRIPT_PATH
+      - JIBRI_STRIP_DOMAIN_JID
+      - DISPLAY=:0
+      - LUMICORIA_BACKEND_URL
+      - LUMICORIA_JIBRI_SECRET
+      - LUMICORIA_MINIO_BUCKET
+      - TZ
+    depends_on:
+      - prosody
+    networks:
+      jitsi:
+
+networks:
+  jitsi:
+    driver: bridge

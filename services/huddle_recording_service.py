@@ -85,12 +85,47 @@ async def upload_chunk(
 
     ext = "webm" if "webm" in content_type else "mp4" if "mp4" in content_type else "bin"
     key = f"{CHUNK_KEY_PREFIX}/{org_id}/{huddle_id}/chunk-{chunk_index:06d}.{ext}"
-    upload = await storage_service.upload_file(blob, key, content_type=content_type)
+
+    # CMK envelope encryption — no-op when org doesn't have BYOK enabled.
+    try:
+        from backend.services.cmk_service import encrypt_blob
+        # Look up existing wrapped DEK for the huddle (if any)
+        session_factory2 = get_async_sessionmaker()
+        async with session_factory2() as session:
+            existing = (await session.execute(
+                select(HuddleSQL.recording_cmk_wrapped_key).where(HuddleSQL.id == huddle_id)
+            )).scalar_one_or_none()
+        ciphertext, wrapped = await encrypt_blob(
+            blob, organization_id=org_id, existing_wrapped_dek=existing,
+        )
+        if wrapped:
+            # Persist the wrapped DEK if it's new
+            if wrapped != existing:
+                session_factory3 = get_async_sessionmaker()
+                async with session_factory3() as session:
+                    await session.execute(
+                        sa_update(HuddleSQL)
+                        .where(HuddleSQL.id == huddle_id)
+                        .values(recording_cmk_wrapped_key=wrapped, updated_at=datetime.utcnow())
+                    )
+                    await session.commit()
+            payload = ciphertext
+            stored_content_type = "application/octet-stream"  # encrypted blob
+        else:
+            payload = blob
+            stored_content_type = content_type
+    except Exception as e:
+        logger.warning("huddle_cmk_encrypt_failed", huddle_id=huddle_id, error=str(e))
+        payload = blob
+        stored_content_type = content_type
+
+    upload = await storage_service.upload_file(payload, key, content_type=stored_content_type)
     return {
         "ok": True,
         "key": key,
         "size": upload.get("size"),
         "chunk_index": chunk_index,
+        "encrypted": stored_content_type == "application/octet-stream",
     }
 
 
@@ -174,6 +209,21 @@ async def finish_recording(
         related_resource_id=huddle_id,
         agent_name="Huddle",
     )
+
+    # Fire huddle.recording_ready webhook for downstream consumers
+    try:
+        from backend.services.huddle_events import emit_webhook, fire_and_forget
+        fire_and_forget(emit_webhook(org_id, "huddle.recording_ready", {
+            "huddle_id": huddle_id,
+            "manifest_key": manifest_key,
+            "total_chunks": total_chunks,
+            "retention_days": retention,
+            "content_type": content_type,
+            "expires_at": expires_at.isoformat(),
+        }))
+    except Exception:
+        pass
+
     return {
         "ok": True,
         "manifest_key": manifest_key,

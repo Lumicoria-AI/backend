@@ -141,6 +141,15 @@ class SessionPolicyInDB(BaseModel):
     data_residency: str = "us"  # us | eu | in
     cmk_enabled: bool = False
     cmk_kms_key_id: Optional[str] = None
+    # ── Huddle compliance policy ─────────────────────────────────────
+    # When huddle_force_record is True, every huddle this org creates
+    # automatically has recording_enabled=True. huddle_disable_e2ee
+    # turns end-to-end encryption off so DLP / compliance scanners can
+    # read recordings + transcripts.
+    huddle_force_record: bool = False
+    huddle_disable_e2ee: bool = False
+    huddle_default_recording_mode: str = "browser"  # browser | jibri | compliance
+    huddle_max_retention_days: Optional[int] = None
     updated_at: datetime = Field(default_factory=datetime.utcnow)
     updated_by: Optional[str] = None
 

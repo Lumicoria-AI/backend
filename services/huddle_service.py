@@ -38,6 +38,49 @@ logger = structlog.get_logger(__name__)
 
 # ── Public lifecycle ─────────────────────────────────────────────────────
 
+async def _apply_compliance_policy(
+    organization_id: str,
+    *,
+    recording_enabled: bool,
+    recording_retention_days: int,
+    e2ee_enabled: bool,
+    data_residency: str,
+    recording_mode: str,
+) -> Dict[str, Any]:
+    """Look up the org's SessionPolicy and override fields when the
+    compliance policy requires it. Always wins over host preference."""
+    out = {
+        "recording_enabled": recording_enabled,
+        "recording_retention_days": recording_retention_days,
+        "e2ee_enabled": e2ee_enabled,
+        "data_residency": data_residency,
+        "recording_mode": recording_mode,
+        "compliance_applied": False,
+    }
+    try:
+        from backend.db.mongodb.repositories.session_policy_repository import session_policy_repository  # type: ignore
+        policy = await session_policy_repository.get(organization_id=organization_id)
+    except Exception:
+        return out
+    if not policy:
+        return out
+
+    if policy.get("huddle_force_record"):
+        out["recording_enabled"] = True
+        out["recording_mode"] = policy.get("huddle_default_recording_mode") or out["recording_mode"]
+        out["compliance_applied"] = True
+    if policy.get("huddle_disable_e2ee"):
+        out["e2ee_enabled"] = False
+        out["compliance_applied"] = True
+    max_ret = policy.get("huddle_max_retention_days")
+    if max_ret and out["recording_retention_days"] > max_ret:
+        out["recording_retention_days"] = int(max_ret)
+        out["compliance_applied"] = True
+    if policy.get("data_residency"):
+        out["data_residency"] = policy["data_residency"]
+    return out
+
+
 async def create_huddle(
     *,
     host_user_id: str,
@@ -51,6 +94,7 @@ async def create_huddle(
     scheduled_start: Optional[datetime] = None,
     scheduled_end: Optional[datetime] = None,
     recording_enabled: bool = False,
+    recording_mode: str = "browser",
     recording_retention_days: int = 30,
     lobby_enabled: bool = False,
     require_sso: bool = False,
@@ -62,6 +106,16 @@ async def create_huddle(
     `scheduled` when `scheduled_start` is in the future."""
     is_scheduled = meeting_type == "scheduled" or (scheduled_start and scheduled_start > datetime.utcnow())
     status = "scheduled" if is_scheduled else "live"
+
+    # Apply org compliance policy — overrides host preferences when set.
+    final = await _apply_compliance_policy(
+        organization_id,
+        recording_enabled=recording_enabled,
+        recording_retention_days=recording_retention_days,
+        e2ee_enabled=e2ee_enabled,
+        data_residency=data_residency,
+        recording_mode=recording_mode,
+    )
 
     session_factory = get_async_sessionmaker()
     async with session_factory() as session:
@@ -78,13 +132,14 @@ async def create_huddle(
             started_at=None if is_scheduled else datetime.utcnow(),
             agent_keys=agent_keys or [],
             custom_agent_ids=custom_agent_ids or [],
-            recording_enabled=recording_enabled,
-            recording_retention_days=recording_retention_days,
+            recording_enabled=final["recording_enabled"],
+            recording_mode=final["recording_mode"],
+            recording_retention_days=final["recording_retention_days"],
             lobby_enabled=lobby_enabled,
             require_sso=require_sso,
-            e2ee_enabled=e2ee_enabled,
-            data_residency=data_residency,
-            meta=metadata or {},
+            e2ee_enabled=final["e2ee_enabled"],
+            data_residency=final["data_residency"],
+            meta={**(metadata or {}), "compliance_applied": final["compliance_applied"]},
         )
         session.add(row)
         await session.commit()
@@ -106,6 +161,22 @@ async def create_huddle(
         related_resource_id=result["id"],
         agent_name="Huddle",
     )
+
+    # Outbound — webhooks first (cheaper), Slack on start only.
+    try:
+        from backend.services.huddle_events import emit_webhook, fire_and_forget
+        fire_and_forget(emit_webhook(organization_id, "huddle.created", {
+            "huddle_id": result["id"],
+            "title": result["title"],
+            "host_user_id": host_user_id,
+            "meeting_type": meeting_type,
+            "team_id": team_id,
+            "project_id": project_id,
+            "share_token": result["share_token"],
+        }))
+    except Exception:
+        pass
+
     return result
 
 
@@ -238,6 +309,22 @@ async def start_huddle(huddle_id: str, *, requesting_user_id: str) -> Optional[D
         related_resource_id=huddle_id,
         agent_name="Huddle",
     )
+
+    # Outbound — webhook + Slack post.
+    try:
+        from backend.services.huddle_events import (
+            emit_webhook, emit_slack_huddle_started, fire_and_forget,
+        )
+        fire_and_forget(emit_webhook(result["organization_id"], "huddle.started", {
+            "huddle_id": huddle_id,
+            "title": result["title"],
+            "host_user_id": result["host_user_id"],
+            "share_token": result["share_token"],
+        }))
+        fire_and_forget(emit_slack_huddle_started(result["organization_id"], result))
+    except Exception:
+        pass
+
     return result
 
 
@@ -294,6 +381,19 @@ async def end_huddle(
         related_resource_id=huddle_id,
         agent_name="Huddle",
     )
+
+    # Outbound — webhook on huddle.ended.
+    try:
+        from backend.services.huddle_events import emit_webhook, fire_and_forget
+        fire_and_forget(emit_webhook(result["organization_id"], "huddle.ended", {
+            "huddle_id": huddle_id,
+            "title": result["title"],
+            "duration_sec": result.get("duration_sec"),
+            "participant_count_peak": result.get("participant_count_peak"),
+            "share_token": result["share_token"],
+        }))
+    except Exception:
+        pass
 
     # Fire MeetingAgent post-call summary asynchronously (don't block end()).
     if result.get("transcript_text"):
@@ -673,6 +773,7 @@ def _serialize_huddle(row: HuddleSQL, public: bool = False) -> Dict[str, Any]:
         "agent_keys": list(row.agent_keys or []),
         "custom_agent_ids": list(row.custom_agent_ids or []),
         "recording_enabled": bool(row.recording_enabled),
+        "recording_mode": getattr(row, "recording_mode", "browser"),
         "recording_url": row.recording_url,
         "recording_retention_days": row.recording_retention_days,
         "recording_expires_at": row.recording_expires_at.isoformat() if row.recording_expires_at else None,

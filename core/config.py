@@ -643,6 +643,16 @@ class Settings(BaseSettings):
     SLACK_CLIENT_ID: Optional[str] = None
     SLACK_CLIENT_SECRET: Optional[str] = None
 
+    # ── Lumicoria Huddle (Jitsi) ──────────────────────────────────────
+    # Public Jitsi (`meet.jit.si`) needs nothing. Self-hosted at
+    # meet.lumicoria.ai needs JITSI_APP_ID + JITSI_APP_SECRET (passed to
+    # prosody's mod_auth_token) and the domain.
+    JITSI_DOMAIN: str = "meet.jit.si"
+    JITSI_APP_ID: Optional[str] = None
+    JITSI_APP_SECRET: Optional[str] = None
+    JITSI_JWT_TTL_SECONDS: int = 60 * 60 * 4  # 4 hours per token
+    JITSI_ENABLE_RECORDING_API: bool = False  # toggle to True when Jibri is wired
+
     # Notion OAuth
     NOTION_OAUTH_CLIENT_ID: Optional[str] = None
     NOTION_OAUTH_CLIENT_SECRET: Optional[str] = None

@@ -40,6 +40,7 @@ from backend.services import (
     huddle_service as svc,
 )
 from backend.services.huddle_plan_guard import enforce_can_create, enforce_can_join
+from backend.services.jitsi_jwt import domain as jitsi_domain, sign_room_jwt
 
 logger = structlog.get_logger(__name__)
 router = APIRouter()
@@ -127,6 +128,24 @@ def _resolve_org_id(current_user: User) -> str:
     return str(org_id)
 
 
+def _enrich_with_jitsi(huddle: Dict[str, Any], user: Optional[User]) -> Dict[str, Any]:
+    """Attach jitsi_domain + jitsi_jwt to the response so the frontend
+    can embed self-hosted Jitsi (when configured) without an extra call."""
+    if not huddle:
+        return huddle
+    huddle["jitsi_domain"] = jitsi_domain()
+    is_host = bool(user) and str(getattr(user, "id", "")) == huddle.get("host_user_id")
+    huddle["jitsi_jwt"] = sign_room_jwt(
+        room=huddle.get("room_name") or "*",
+        user_id=str(getattr(user, "id", "")) if user else None,
+        display_name=getattr(user, "full_name", None) or getattr(user, "email", None) if user else None,
+        email=getattr(user, "email", None) if user else None,
+        moderator=is_host,
+        allow_recording=bool(huddle.get("recording_enabled")),
+    )
+    return huddle
+
+
 # ── Endpoints ──────────────────────────────────────────────────────────
 
 @router.post("/", status_code=status.HTTP_201_CREATED)
@@ -168,7 +187,7 @@ async def create_huddle_endpoint(
         data_residency=payload.data_residency,
         metadata=payload.metadata,
     )
-    return result
+    return _enrich_with_jitsi(result, current_user)
 
 
 @router.get("/")
@@ -200,7 +219,7 @@ async def get_huddle_endpoint(
     )
     if not result:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Huddle not found")
-    return result
+    return _enrich_with_jitsi(result, current_user)
 
 
 @router.get("/share/{share_token}")
@@ -219,7 +238,12 @@ async def get_huddle_public(share_token: str) -> Dict[str, Any]:
         row = (await session.execute(q)).scalar_one_or_none()
         if not row:
             raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Invalid link")
-        return svc._serialize_huddle(row, public=True)
+        public_view = svc._serialize_huddle(row, public=True)
+        public_view["jitsi_domain"] = jitsi_domain()
+        public_view["jitsi_jwt"] = sign_room_jwt(
+            room=row.room_name, display_name="Guest",
+        )
+        return public_view
 
 
 @router.patch("/{huddle_id}")
@@ -235,7 +259,7 @@ async def patch_huddle_endpoint(
     )
     if not result:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Not found or forbidden")
-    return result
+    return _enrich_with_jitsi(result, current_user)
 
 
 @router.post("/{huddle_id}/start")
@@ -246,7 +270,7 @@ async def start_huddle_endpoint(
     result = await svc.start_huddle(huddle_id, requesting_user_id=str(current_user.id))
     if not result:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Not found or forbidden")
-    return result
+    return _enrich_with_jitsi(result, current_user)
 
 
 @router.post("/{huddle_id}/end")
@@ -468,6 +492,85 @@ async def get_recording_endpoint(
     current_user: User = Depends(get_current_active_user),
 ) -> Dict[str, Any]:
     return await recording.get_recording_url(huddle_id, requesting_user_id=str(current_user.id))
+
+
+# ── Jibri handoff (server-side recording) ──────────────────────────────
+
+class JibriWebhookRequest(BaseModel):
+    """Payload Jibri POSTs when it finishes recording a room. The
+    Jibri service is configured via `docker/jitsi/docker-compose.yml`
+    with `JIBRI_FINALIZE_RECORDING_SCRIPT_PATH` invoking curl against
+    this endpoint."""
+    huddle_id: str
+    room_name: str
+    object_key: str  # MinIO key where Jibri uploaded the MP4
+    mime: str = "video/mp4"
+    size_bytes: Optional[int] = None
+    duration_sec: Optional[int] = None
+    signature: Optional[str] = None  # HMAC of payload signed by Jibri shared secret
+
+
+@router.post("/jibri/webhook")
+async def jibri_webhook_endpoint(payload: JibriWebhookRequest = Body(...)) -> Dict[str, Any]:
+    """Called by Jibri after server-side recording finalises. We verify
+    the HMAC and stamp the recording_url onto the HuddleSQL row.
+
+    HMAC: `hmac.sha256(JITSI_APP_SECRET, f"{huddle_id}.{object_key}")`.
+    """
+    import hmac, hashlib
+    from datetime import timedelta
+    from sqlalchemy import select, update as sa_update
+    from backend.db.postgres import get_async_sessionmaker
+    from backend.db.postgres_models import HuddleSQL
+    from backend.core.config import settings as _settings
+
+    if payload.signature and _settings.JITSI_APP_SECRET:
+        expected = hmac.new(
+            _settings.JITSI_APP_SECRET.encode("utf-8"),
+            f"{payload.huddle_id}.{payload.object_key}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(expected, payload.signature):
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
+
+    factory = get_async_sessionmaker()
+    async with factory() as session:
+        q = select(HuddleSQL).where(HuddleSQL.id == payload.huddle_id, HuddleSQL.deleted_at.is_(None))
+        row = (await session.execute(q)).scalar_one_or_none()
+        if not row:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Huddle not found")
+        retention = int(row.recording_retention_days or 30)
+        expires_at = datetime.utcnow() + timedelta(days=retention)
+        await session.execute(
+            sa_update(HuddleSQL)
+            .where(HuddleSQL.id == payload.huddle_id)
+            .values(
+                recording_mode="jibri",
+                recording_object_key=payload.object_key,
+                recording_mime=payload.mime,
+                recording_size_bytes=payload.size_bytes,
+                recording_expires_at=expires_at,
+                updated_at=datetime.utcnow(),
+            )
+        )
+        await session.commit()
+        org_id = row.organization_id
+
+    # Fire huddle.recording_ready webhook
+    try:
+        from backend.services.huddle_events import emit_webhook, fire_and_forget
+        fire_and_forget(emit_webhook(org_id, "huddle.recording_ready", {
+            "huddle_id": payload.huddle_id,
+            "object_key": payload.object_key,
+            "mime": payload.mime,
+            "size_bytes": payload.size_bytes,
+            "duration_sec": payload.duration_sec,
+            "recording_mode": "jibri",
+        }))
+    except Exception:
+        pass
+
+    return {"ok": True}
 
 
 # ── Calendar export ────────────────────────────────────────────────────

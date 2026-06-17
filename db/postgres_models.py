@@ -696,12 +696,16 @@ class HuddleSQL(Base):
 
     # Recording
     recording_enabled = Column(Boolean, nullable=False, default=False)
+    recording_mode = Column(String(16), nullable=False, default="browser")  # browser | jibri | compliance
     recording_url = Column(String(1024), nullable=True)
     recording_object_key = Column(String(1024), nullable=True)
     recording_size_bytes = Column(Integer, nullable=True)
     recording_mime = Column(String(128), nullable=True)
     recording_retention_days = Column(Integer, nullable=False, default=30)
     recording_expires_at = Column(DateTime, nullable=True, index=True)
+    # CMK envelope key — populated when org has BYOK CMK enabled.
+    # Stores the encrypted DEK per recording (Fernet-wrapped).
+    recording_cmk_wrapped_key = Column(Text, nullable=True)
 
     # Post-call processing
     transcript_text = Column(Text, nullable=True)
