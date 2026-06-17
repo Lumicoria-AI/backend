@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="x-apple-disable-message-reformatting">
+  <title>{{ title|default("You're invited to a Lumicoria Huddle") }}</title>
+  <style>
+    body { margin:0; padding:0; background:#EDE9FE; font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Inter','Segoe UI',Helvetica,Arial,sans-serif; color:#0F172A; }
+    a { color:#6C4AB0; text-decoration:none; }
+    .wrap { padding:40px 16px; background:linear-gradient(180deg,#EDE9FE 0%,#F5F3FF 35%,#FFFFFF 100%); }
+    .container { max-width:600px; margin:0 auto; background:#FFFFFF; border-radius:22px; overflow:hidden; box-shadow:0 24px 60px -24px rgba(76,29,149,0.28); }
+    .hero { padding:36px 36px 32px; background:linear-gradient(135deg,#7C3AED 0%,#6C4AB0 45%,#4C1D95 100%); color:#FFFFFF; }
+    .brand-name { color:#FFFFFF; font-size:17px; font-weight:600; letter-spacing:-0.01em; }
+    .brand-tag { color:#E9DEFA; font-size:11px; text-transform:uppercase; letter-spacing:0.14em; font-weight:500; margin-top:3px; }
+    .hero-headline { margin:24px 0 0; color:#FFFFFF; font-size:26px; line-height:1.25; font-weight:600; letter-spacing:-0.02em; }
+    .hero-sub { margin:12px 0 0; color:#E9DEFA; font-size:15px; line-height:1.55; }
+    .body { padding:32px 36px 8px; }
+    .lede { font-size:15px; line-height:1.65; color:#475569; margin:0 0 20px; }
+    .meeting-card { background:linear-gradient(180deg,#F8FAFF 0%,#F1EEFB 100%); border:1px solid rgba(124,58,237,0.12); border-radius:16px; padding:20px 22px; margin:0 0 24px; }
+    .meeting-card .label { font-size:11px; text-transform:uppercase; letter-spacing:0.12em; color:#8B5CF6; font-weight:600; margin:0 0 6px; }
+    .meeting-card h2 { font-size:18px; font-weight:600; color:#0F172A; margin:0 0 4px; letter-spacing:-0.01em; }
+    .meeting-card .host { font-size:13px; color:#64748B; margin:0; }
+    .cta-wrap { text-align:center; padding:8px 0 16px; }
+    .cta { display:inline-block; padding:14px 30px; border-radius:12px; background:linear-gradient(135deg,#7C3AED 0%,#4C1D95 100%); color:#FFFFFF !important; font-weight:600; font-size:15px; letter-spacing:-0.01em; box-shadow:0 12px 28px -8px rgba(76,29,149,0.45); }
+    .alt-link { padding:18px 36px 24px; font-size:12px; color:#64748B; line-height:1.55; }
+    .alt-link a { color:#6C4AB0; word-break:break-all; }
+    .footer { padding:20px 36px 36px; border-top:1px solid #F1F5F9; }
+    .footer p { font-size:12px; color:#94A3B8; line-height:1.55; margin:0; }
+    .message-block { padding:12px 16px; border-left:3px solid #C4B5FD; background:#FAF5FF; border-radius:4px; margin:0 0 20px; font-style:italic; color:#475569; font-size:14px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="container">
+      <div class="hero">
+        <div class="brand-name">Lumicoria</div>
+        <div class="brand-tag">Huddle</div>
+        <h1 class="hero-headline">{{ host_name|default("Your colleague") }} invited you to a meeting.</h1>
+        <p class="hero-sub">Join the live room from any browser. No installs, no logins.</p>
+      </div>
+      <div class="body">
+        <div class="meeting-card">
+          <div class="label">Meeting</div>
+          <h2>{{ title|default("Lumicoria Huddle") }}</h2>
+          <p class="host">Hosted by {{ host_name|default("a Lumicoria user") }}</p>
+        </div>
+        {% if message %}
+          <div class="message-block">"{{ message }}"</div>
+        {% endif %}
+        <p class="lede">Click the button below to join the room. AI agents in the call will summarise decisions and capture action items for you automatically.</p>
+        <div class="cta-wrap">
+          <a class="cta" href="{{ share_url }}">Join the meeting</a>
+        </div>
+      </div>
+      <div class="alt-link">
+        Or copy this link: <a href="{{ share_url }}">{{ share_url }}</a>
+      </div>
+      <div class="footer">
+        <p>This invite was sent through Lumicoria AI. If you weren't expecting it, you can safely ignore this email.</p>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

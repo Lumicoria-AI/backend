@@ -645,3 +645,120 @@ class KGExtractionSQL(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
     deleted_at = Column(DateTime, nullable=True, index=True)
 
+
+# ── Huddle (live meeting rooms) ───────────────────────────────────────
+
+def _huddle_room_name() -> str:
+    """Unguessable Jitsi room slug — namespaced for Lumicoria."""
+    return f"lumi-{uuid.uuid4().hex[:16]}"
+
+
+def _huddle_share_token() -> str:
+    """URL-safe share token, separate from room_name so we can revoke
+    a public link without disrupting an in-flight call."""
+    return uuid.uuid4().hex
+
+
+class HuddleSQL(Base):
+    """A live or scheduled meeting room. Linked to MeetingSQL via
+    `processed_meeting_id` once the post-call summary runs."""
+    __tablename__ = "huddles"
+
+    id = Column(String(36), primary_key=True, default=_uuid_str)
+
+    # Jitsi + sharing
+    room_name = Column(String(128), nullable=False, unique=True, index=True, default=_huddle_room_name)
+    share_token = Column(String(64), nullable=False, unique=True, index=True, default=_huddle_share_token)
+
+    # Hierarchy
+    host_user_id = Column(String(64), nullable=False, index=True)
+    organization_id = Column(String(64), nullable=False, index=True)
+    team_id = Column(String(64), nullable=True, index=True)
+    project_id = Column(String(64), nullable=True, index=True)
+    channel_id = Column(String(64), nullable=True)
+
+    # Identity
+    title = Column(String(500), nullable=False, default="Untitled meeting")
+    meeting_type = Column(String(32), nullable=False, default="instant")  # instant | scheduled | recurring
+
+    # Lifecycle
+    status = Column(String(32), nullable=False, default="live", index=True)  # scheduled | live | ended | cancelled
+    scheduled_start = Column(DateTime, nullable=True)
+    scheduled_end = Column(DateTime, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    ended_at = Column(DateTime, nullable=True)
+    duration_sec = Column(Integer, nullable=True)
+    participant_count_peak = Column(Integer, nullable=False, default=0)
+
+    # Agents in the call
+    agent_keys = Column(JSONB, nullable=False, default=list)
+    custom_agent_ids = Column(JSONB, nullable=False, default=list)
+
+    # Recording
+    recording_enabled = Column(Boolean, nullable=False, default=False)
+    recording_url = Column(String(1024), nullable=True)
+    recording_object_key = Column(String(1024), nullable=True)
+    recording_size_bytes = Column(Integer, nullable=True)
+    recording_mime = Column(String(128), nullable=True)
+    recording_retention_days = Column(Integer, nullable=False, default=30)
+    recording_expires_at = Column(DateTime, nullable=True, index=True)
+
+    # Post-call processing
+    transcript_text = Column(Text, nullable=True)
+    processed_meeting_id = Column(String(36), ForeignKey("meetings.id"), nullable=True, index=True)
+
+    # Security / compliance
+    lobby_enabled = Column(Boolean, nullable=False, default=False)
+    require_sso = Column(Boolean, nullable=False, default=False)
+    e2ee_enabled = Column(Boolean, nullable=False, default=False)
+    data_residency = Column(String(8), nullable=False, default="us")  # us | eu | in
+
+    # Flexible payload — breakout rooms, polls, etc. (Phase 2)
+    meta = Column("metadata", JSONB, nullable=False, default=dict)
+
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    deleted_at = Column(DateTime, nullable=True, index=True)
+
+
+class HuddleParticipantSQL(Base):
+    """One row per join — captures both human users and AI agents
+    that joined a huddle."""
+    __tablename__ = "huddle_participants"
+
+    id = Column(String(36), primary_key=True, default=_uuid_str)
+    huddle_id = Column(String(36), ForeignKey("huddles.id"), nullable=False, index=True)
+
+    # Human participant
+    user_id = Column(String(64), nullable=True, index=True)
+    guest_name = Column(String(255), nullable=True)
+    guest_email = Column(String(255), nullable=True)
+
+    # Agent participant (mutually exclusive with user_id)
+    agent_key = Column(String(64), nullable=True)
+    custom_agent_id = Column(String(64), nullable=True)
+
+    role = Column(String(32), nullable=False, default="participant")  # host | cohost | participant | guest | agent
+
+    joined_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    left_at = Column(DateTime, nullable=True)
+
+    meta = Column("metadata", JSONB, nullable=False, default=dict)
+
+
+class HuddleTranscriptChunkSQL(Base):
+    """Streaming transcript chunks emitted during a live huddle.
+    `agent_responses` is populated by the live-agent dispatcher
+    (Phase 1.5) — empty list in Phase 1."""
+    __tablename__ = "huddle_transcript_chunks"
+
+    id = Column(String(36), primary_key=True, default=_uuid_str)
+    huddle_id = Column(String(36), ForeignKey("huddles.id"), nullable=False, index=True)
+
+    speaker_user_id = Column(String(64), nullable=True)
+    speaker_name = Column(String(255), nullable=False, default="Speaker")
+    text = Column(Text, nullable=False)
+    ts = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+    agent_responses = Column(JSONB, nullable=False, default=list)
+

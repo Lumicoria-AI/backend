@@ -15,6 +15,7 @@ from backend.api.v1.endpoints import (
     research,
     projects,
     meeting,
+    huddle,
     wellbeing,
     customer_service,
     customer_service_tickets,
@@ -301,6 +302,21 @@ api_router.include_router(
         422: {"description": "Validation Error"},
         500: {"description": "Internal Server Error"}
     }
+)
+
+# Huddle endpoints (live meetings via Jitsi)
+api_router.include_router(
+    huddle.router,
+    prefix="/huddles",
+    tags=["huddle"],
+    responses={
+        200: {"description": "Success"},
+        201: {"description": "Created"},
+        400: {"description": "Bad Request"},
+        401: {"description": "Unauthorized"},
+        402: {"description": "Upgrade Required"},
+        404: {"description": "Not Found"},
+    },
 )
 
 # RAG endpoints
