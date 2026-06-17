@@ -428,6 +428,18 @@ async def add_participant(
             related_resource_id=huddle_id,
             agent_name="Huddle",
         )
+
+    # Live fan-out — every connected client gets the join immediately.
+    try:
+        from backend.services.huddle_agent_dispatcher import publish_participant_event
+        asyncio.create_task(publish_participant_event(
+            huddle_id=huddle_id,
+            event_type="participant_joined",
+            participant=_serialize_participant(p),
+        ))
+    except Exception:
+        pass
+
     return _serialize_participant(p)
 
 
@@ -470,6 +482,17 @@ async def remove_participant(
             related_resource_id=huddle_id,
             agent_name="Huddle",
         )
+
+    try:
+        from backend.services.huddle_agent_dispatcher import publish_participant_event
+        asyncio.create_task(publish_participant_event(
+            huddle_id=huddle_id,
+            event_type="participant_left",
+            participant={"user_id": user_id, "guest_email": guest_email, "agent_key": agent_key},
+        ))
+    except Exception:
+        pass
+
     return True
 
 
@@ -528,6 +551,25 @@ async def append_transcript_chunk(
             related_resource_id=huddle_id,
             agent_name="Huddle",
         )
+
+    # Live fan-out: push chunk to all clients + dispatch attached agents.
+    # Both are fire-and-forget — they must NEVER block the HTTP response.
+    try:
+        from backend.services.huddle_agent_dispatcher import (
+            dispatch_chunk,
+            publish_transcript_chunk,
+        )
+        asyncio.create_task(publish_transcript_chunk(huddle_id=huddle_id, chunk=result))
+        asyncio.create_task(dispatch_chunk(
+            huddle_id=huddle_id,
+            chunk_id=result["id"],
+            chunk_text=result["text"],
+            speaker_name=speaker_name,
+            user_id=user_id_for_activity,
+        ))
+    except Exception:
+        pass
+
     return result
 
 

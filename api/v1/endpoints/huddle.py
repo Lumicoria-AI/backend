@@ -468,3 +468,71 @@ async def get_recording_endpoint(
     current_user: User = Depends(get_current_active_user),
 ) -> Dict[str, Any]:
     return await recording.get_recording_url(huddle_id, requesting_user_id=str(current_user.id))
+
+
+# ── Calendar export ────────────────────────────────────────────────────
+
+class CalendarExportRequest(BaseModel):
+    attendees: List[EmailStr] = Field(default_factory=list)
+    description: Optional[str] = None
+    calendar_id: str = "primary"
+
+
+@router.post("/{huddle_id}/calendar-export")
+async def calendar_export_endpoint(
+    huddle_id: str,
+    payload: CalendarExportRequest = Body(...),
+    current_user: User = Depends(get_current_active_user),
+) -> Dict[str, Any]:
+    """Push the huddle into the host's Google Calendar as an event with
+    a Lumicoria Huddle join URL. Requires the org to have the Google
+    Workspace integration connected."""
+    huddle = await svc.get_huddle(huddle_id, requesting_user_id=str(current_user.id))
+    if not huddle:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Not found or forbidden")
+    if not huddle.get("scheduled_start") or not huddle.get("scheduled_end"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Huddle has no scheduled_start / scheduled_end")
+
+    base = "https://lumicoria.ai"
+    try:
+        from backend.core.config import settings as _settings
+        base = getattr(_settings, "FRONTEND_URL", base) or base
+    except Exception:
+        pass
+    share_url = f"{base}/huddles/join/{huddle['share_token']}"
+    description_text = payload.description or "Lumicoria Huddle — live meeting with AI agents."
+    description_full = (
+        f"{description_text}\n\n"
+        f"Join the meeting: {share_url}\n\n"
+        f"This meeting includes Lumicoria AI agents that capture decisions and action items in real time."
+    )
+
+    # Try to call Google Workspace integration. If the user hasn't
+    # connected the integration we just return the link so they can
+    # paste it manually.
+    try:
+        from backend.integrations.google_workspace import GoogleWorkspaceIntegration
+        from backend.integrations.google_workspace_client import GoogleWorkspaceClient  # type: ignore
+        client = GoogleWorkspaceClient(user_id=str(current_user.id))
+        integ = GoogleWorkspaceIntegration(client=client)
+        event = await integ.create_calendar_event(
+            summary=huddle.get("title") or "Lumicoria Huddle",
+            description=description_full,
+            start_time=datetime.fromisoformat(huddle["scheduled_start"].replace("Z", "+00:00")),
+            end_time=datetime.fromisoformat(huddle["scheduled_end"].replace("Z", "+00:00")),
+            attendees=list(payload.attendees),
+            calendar_id=payload.calendar_id,
+            location=share_url,
+        )
+        return {
+            "ok": True,
+            "share_url": share_url,
+            "event": event,
+        }
+    except Exception as e:
+        logger.warning("huddle_calendar_export_failed", huddle_id=huddle_id, error=str(e))
+        return {
+            "ok": False,
+            "share_url": share_url,
+            "error": "Google Workspace integration unavailable — share the link manually.",
+        }

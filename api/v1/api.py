@@ -16,6 +16,7 @@ from backend.api.v1.endpoints import (
     projects,
     meeting,
     huddle,
+    huddle_websocket,
     wellbeing,
     customer_service,
     customer_service_tickets,
@@ -253,6 +254,13 @@ api_router.include_router(
     transcribe_websocket.router,
     prefix="/ws",
     tags=["websocket", "transcription"]
+)
+
+# WebSocket endpoint for live Huddle room state (transcript, agents, presence)
+api_router.include_router(
+    huddle_websocket.router,
+    prefix="/ws",
+    tags=["websocket", "huddle"],
 )
 
 # Device token endpoints for push notifications

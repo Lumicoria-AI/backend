@@ -53,6 +53,10 @@ def _channel_topic(channel_id: str) -> str:
     return f"rt:channel:{channel_id}"
 
 
+def _huddle_topic(huddle_id: str) -> str:
+    return f"rt:huddle:{huddle_id}"
+
+
 class RealtimeBroker:
     """Publishes WS-bound messages to Redis and routes inbound messages to
     the local ConnectionManager."""
@@ -79,6 +83,9 @@ class RealtimeBroker:
     async def publish_to_channel(self, channel_id: str, message: Dict[str, Any]) -> None:
         await self._publish(_channel_topic(channel_id), message)
 
+    async def publish_to_huddle(self, huddle_id: str, message: Dict[str, Any]) -> None:
+        await self._publish(_huddle_topic(huddle_id), message)
+
     async def _publish(self, topic: str, message: Dict[str, Any]) -> None:
         try:
             client = await RedisClient.get_client()
@@ -101,6 +108,9 @@ class RealtimeBroker:
 
     async def subscribe_channel(self, channel_id: str) -> None:
         await self._ensure_subscribed({_channel_topic(channel_id)})
+
+    async def subscribe_huddle(self, huddle_id: str) -> None:
+        await self._ensure_subscribed({_huddle_topic(huddle_id)})
 
     async def _ensure_subscribed(self, topics: Set[str]) -> None:
         new = topics - self._subscribed_topics
