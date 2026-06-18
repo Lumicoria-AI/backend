@@ -118,6 +118,40 @@ async def dispatch_chunk(
                     "metadata": {"type": "general", "title": "Live", "participants": []},
                     "context": {},
                 })
+            elif agent_key == "translation":
+                # Translation is multi-target: produce captions for every
+                # language any client subscribed to in the room's metadata.
+                # We fall back to en if no targets configured.
+                # NOTE: huddle.metadata.caption_languages is a list[str].
+                from backend.db.postgres import get_async_sessionmaker
+                from backend.db.postgres_models import HuddleSQL
+                from sqlalchemy import select as _select
+                target_langs = []
+                try:
+                    factory2 = get_async_sessionmaker()
+                    async with factory2() as session:
+                        meta = (await session.execute(
+                            _select(HuddleSQL.meta).where(HuddleSQL.id == huddle_id)
+                        )).scalar_one_or_none() or {}
+                        target_langs = list(meta.get("caption_languages") or [])
+                except Exception:
+                    target_langs = []
+                if not target_langs:
+                    target_langs = ["en"]
+                translations: Dict[str, str] = {}
+                for lang in target_langs:
+                    try:
+                        t_input = {"text": chunk_text, "target_language": lang, **base_input}
+                        t_res = await svc.execute_agent_async("translation", t_input)
+                        translations[lang] = _short(t_res)
+                    except Exception:
+                        continue
+                return {
+                    "agent_key": "translation",
+                    "ok": True,
+                    "response": translations,  # dict of lang → text
+                    "latency_ms": int((time.time() - start) * 1000),
+                }
             else:
                 input_for_agent["prompt"] = chunk_text
 

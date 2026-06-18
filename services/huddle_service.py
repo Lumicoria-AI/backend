@@ -398,6 +398,14 @@ async def end_huddle(
     # Fire MeetingAgent post-call summary asynchronously (don't block end()).
     if result.get("transcript_text"):
         asyncio.create_task(_run_post_call_summary(huddle_id, result))
+
+    # Compute speaker analytics in the background.
+    try:
+        from backend.services.huddle_analytics import persist_for_huddle as _persist_analytics
+        asyncio.create_task(_persist_analytics(huddle_id))
+    except Exception:
+        pass
+
     return result
 
 

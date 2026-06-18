@@ -41,6 +41,7 @@ from backend.services import (
 )
 from backend.services.huddle_plan_guard import enforce_can_create, enforce_can_join
 from backend.services.jitsi_jwt import domain as jitsi_domain, sign_room_jwt
+from backend.services import huddle_analytics, huddle_tts
 
 logger = structlog.get_logger(__name__)
 router = APIRouter()
@@ -571,6 +572,193 @@ async def jibri_webhook_endpoint(payload: JibriWebhookRequest = Body(...)) -> Di
         pass
 
     return {"ok": True}
+
+
+# ── Phase 3 — TTS / analytics / calendar back-sync / ICS ───────────────
+
+class TTSRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=4000)
+    voice: str = "warm"
+    quality: str = "standard"
+
+
+@router.post("/{huddle_id}/tts")
+async def tts_endpoint(
+    huddle_id: str,
+    payload: TTSRequest = Body(...),
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """Synthesize speech for the virtual agent feature. Returns the audio
+    bytes inline so the frontend can play them via Web Audio + inject
+    into the host's mic stream."""
+    from fastapi.responses import Response
+    huddle = await svc.get_huddle(huddle_id, requesting_user_id=str(current_user.id))
+    if not huddle:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Not found or forbidden")
+    try:
+        audio, mime = await huddle_tts.synthesize(payload.text, voice=payload.voice, quality=payload.quality)
+    except RuntimeError as e:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(e))
+    return Response(content=audio, media_type=mime)
+
+
+@router.get("/tts/voices")
+async def tts_voices_endpoint(current_user: User = Depends(get_current_active_user)) -> Dict[str, Any]:
+    return {"voices": huddle_tts.VOICE_CATALOG}
+
+
+@router.get("/{huddle_id}/analytics")
+async def analytics_endpoint(
+    huddle_id: str,
+    recompute: bool = Query(False),
+    current_user: User = Depends(get_current_active_user),
+) -> Dict[str, Any]:
+    huddle = await svc.get_huddle(huddle_id, requesting_user_id=str(current_user.id))
+    if not huddle:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Not found or forbidden")
+    if recompute or not (huddle.get("metadata") or {}).get("speaker_analytics"):
+        analytics = await huddle_analytics.persist_for_huddle(huddle_id)
+    else:
+        analytics = (huddle.get("metadata") or {}).get("speaker_analytics")
+    return {"huddle_id": huddle_id, "analytics": analytics}
+
+
+@router.get("/{huddle_id}/ics")
+async def ics_endpoint(
+    huddle_id: str,
+    current_user: User = Depends(get_current_active_user),
+) -> Any:
+    """Generate an ICS file so Outlook / Apple Calendar can subscribe."""
+    from fastapi.responses import Response
+    huddle = await svc.get_huddle(huddle_id, requesting_user_id=str(current_user.id))
+    if not huddle:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Not found or forbidden")
+
+    start = huddle.get("scheduled_start") or huddle.get("started_at") or huddle.get("created_at")
+    end = huddle.get("scheduled_end") or huddle.get("ended_at") or start
+    if not start:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Huddle has no time data")
+
+    def _ics_dt(iso: str) -> str:
+        d = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        return d.strftime("%Y%m%dT%H%M%SZ")
+
+    base = "https://lumicoria.ai"
+    try:
+        from backend.core.config import settings as _settings
+        base = getattr(_settings, "FRONTEND_URL", base) or base
+    except Exception:
+        pass
+    share_url = f"{base}/huddles/join/{huddle['share_token']}"
+
+    title = (huddle.get("title") or "Lumicoria Huddle").replace("\n", " ")
+    description = (
+        "Lumicoria Huddle — join the live room.\\n"
+        f"Join: {share_url}\\n\\n"
+        "AI agents will capture decisions + action items automatically."
+    )
+    uid = f"huddle-{huddle_id}@lumicoria.ai"
+    now_stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+
+    ics = (
+        "BEGIN:VCALENDAR\r\n"
+        "PRODID:-//Lumicoria//Huddle//EN\r\n"
+        "VERSION:2.0\r\n"
+        "CALSCALE:GREGORIAN\r\n"
+        "METHOD:PUBLISH\r\n"
+        "BEGIN:VEVENT\r\n"
+        f"UID:{uid}\r\n"
+        f"DTSTAMP:{now_stamp}\r\n"
+        f"DTSTART:{_ics_dt(start)}\r\n"
+        f"DTEND:{_ics_dt(end)}\r\n"
+        f"SUMMARY:{title}\r\n"
+        f"DESCRIPTION:{description}\r\n"
+        f"LOCATION:{share_url}\r\n"
+        f"URL;VALUE=URI:{share_url}\r\n"
+        "END:VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    )
+    return Response(
+        content=ics,
+        media_type="text/calendar; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="huddle-{huddle_id}.ics"'},
+    )
+
+
+@router.post("/sync-calendar")
+async def sync_calendar_endpoint(
+    days_ahead: int = Query(14, ge=1, le=60),
+    current_user: User = Depends(get_current_active_user),
+) -> Dict[str, Any]:
+    """Pull Google Calendar events that mention a Lumicoria join URL and
+    create scheduled HuddleSQL rows for them so they show up in our UI.
+
+    Returns the list of newly-created huddles. Idempotent — events
+    already linked to a huddle (matched by metadata.calendar_event_id)
+    are skipped."""
+    user_id = str(current_user.id)
+    org_id = _resolve_org_id(current_user)
+
+    base = "https://lumicoria.ai"
+    try:
+        from backend.core.config import settings as _settings
+        base = getattr(_settings, "FRONTEND_URL", base) or base
+    except Exception:
+        pass
+
+    try:
+        from backend.integrations.google_workspace import GoogleWorkspaceIntegration
+        from backend.integrations.google_workspace_client import GoogleWorkspaceClient  # type: ignore
+        client = GoogleWorkspaceClient(user_id=user_id)
+        integ = GoogleWorkspaceIntegration(client=client)
+        events = await integ.get_upcoming_events(days_ahead=days_ahead)
+    except Exception as e:
+        logger.warning("huddle_calendar_sync_failed", error=str(e))
+        return {"ok": False, "error": "Google Workspace integration unavailable.", "created": []}
+
+    created: List[Dict[str, Any]] = []
+    skipped = 0
+    for ev in (events or []):
+        ev_id = ev.get("id") or ev.get("event_id")
+        if not ev_id:
+            continue
+        # Skip events not pointing at Lumicoria
+        text = " ".join([
+            ev.get("description") or "",
+            ev.get("location") or "",
+            ev.get("hangoutLink") or "",
+            ev.get("summary") or "",
+        ])
+        if "lumicoria" not in text.lower():
+            continue
+        # Already mirrored?
+        existing = await svc.list_huddles(
+            user_id=user_id, organization_id=org_id, limit=200,
+            statuses=["scheduled", "live"],
+        )
+        if any(h.get("metadata", {}).get("calendar_event_id") == ev_id for h in existing):
+            skipped += 1
+            continue
+        start = ev.get("start", {}).get("dateTime") or ev.get("start", {}).get("date")
+        end = ev.get("end", {}).get("dateTime") or ev.get("end", {}).get("date")
+        if not start or not end:
+            continue
+        h = await svc.create_huddle(
+            host_user_id=user_id,
+            organization_id=org_id,
+            title=ev.get("summary") or "Calendar meeting",
+            meeting_type="scheduled",
+            scheduled_start=datetime.fromisoformat(start.replace("Z", "+00:00")),
+            scheduled_end=datetime.fromisoformat(end.replace("Z", "+00:00")),
+            agent_keys=["meeting"],
+            metadata={
+                "calendar_event_id": ev_id,
+                "calendar_source": "google",
+                "original_location": ev.get("location"),
+            },
+        )
+        created.append(h)
+    return {"ok": True, "created": created, "skipped": skipped}
 
 
 # ── Calendar export ────────────────────────────────────────────────────

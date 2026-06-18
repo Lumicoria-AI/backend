@@ -251,19 +251,25 @@ async def get_plans():
     """Get all available subscription plans (public — no auth required)."""
     plans = []
     for plan_key, limits in PLAN_LIMITS.items():
+        # Team / Business store `price_monthly_per_seat`; older tiers
+        # store `price_monthly`. Surface whichever exists so the public
+        # /billing/plans endpoint doesn't 500 for org-scoped plans.
+        price = limits.get("price_monthly")
+        if price is None:
+            price = limits.get("price_monthly_per_seat")
         plans.append(PlanInfoResponse(
             plan=plan_key,
             display_name=limits["display_name"],
-            price_monthly=limits["price_monthly"],
-            max_agents=limits["max_agents"],
-            max_agent_runs_per_month=limits["max_agent_runs_per_month"],
-            max_documents_per_month=limits["max_documents_per_month"],
-            max_file_upload_mb=limits["max_file_upload_mb"],
-            max_knowledge_base_queries=limits["max_knowledge_base_queries"],
-            advanced_features=limits["advanced_features"],
-            priority_support=limits["priority_support"],
-            api_access=limits["api_access"],
-            custom_agent_templates=limits["custom_agent_templates"],
+            price_monthly=price,
+            max_agents=limits.get("max_agents"),
+            max_agent_runs_per_month=limits.get("max_agent_runs_per_month"),
+            max_documents_per_month=limits.get("max_documents_per_month"),
+            max_file_upload_mb=limits.get("max_file_upload_mb"),
+            max_knowledge_base_queries=limits.get("max_knowledge_base_queries"),
+            advanced_features=limits.get("advanced_features", False),
+            priority_support=limits.get("priority_support", False),
+            api_access=limits.get("api_access", False),
+            custom_agent_templates=limits.get("custom_agent_templates", False),
         ))
     return plans
 
