@@ -30,8 +30,14 @@ class S3Client:
         use_ssl: bool = False,
         region: str = "us-east-1",
         label: str = "s3",
+        public_endpoint_url: Optional[str] = None,
     ):
         self.endpoint_url = endpoint_url
+        # Public-facing endpoint used when generating URLs that the browser
+        # will fetch directly. Defaults to endpoint_url; for self-hosted MinIO
+        # behind a reverse proxy, set this to the public hostname so we don't
+        # leak the docker-internal `minio:9000`.
+        self.public_endpoint_url = public_endpoint_url or endpoint_url
         self.access_key = access_key
         self.secret_key = secret_key
         self.bucket = bucket
@@ -155,8 +161,13 @@ class S3Client:
         logger.info("Set public-read policy", bucket=self.bucket, prefix=prefix)
 
     def public_url(self, key: str) -> str:
-        """Return a direct (non-presigned) URL for a publicly readable object."""
-        endpoint = self.endpoint_url
+        """Return a direct (non-presigned) URL for a publicly readable object.
+
+        Uses `public_endpoint_url` so browsers never see the docker-internal
+        `minio:9000` hostname — set MINIO_PUBLIC_URL in .env to expose the
+        bucket via your reverse proxy (e.g. https://storage.lumicoria.ai).
+        """
+        endpoint = self.public_endpoint_url or self.endpoint_url
         scheme = "https" if self.use_ssl else "http"
         if not endpoint.startswith(("http://", "https://")):
             endpoint = f"{scheme}://{endpoint}"
@@ -229,6 +240,9 @@ class DualWriteStorageService:
             bucket=cfg.MINIO_BUCKET,
             use_ssl=cfg.MINIO_USE_SSL,
             label="minio",
+            # Browser-facing URL — falls back to the internal endpoint if
+            # MINIO_PUBLIC_URL isn't set (existing dev behaviour).
+            public_endpoint_url=getattr(cfg, "MINIO_PUBLIC_URL", None) or cfg.MINIO_ENDPOINT,
         )
         await asyncio.to_thread(self._primary.ensure_bucket)
         logger.info("MinIO primary storage ready", bucket=cfg.MINIO_BUCKET)

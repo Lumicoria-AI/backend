@@ -225,6 +225,71 @@ class InviteService:
 
         return invite
 
+    async def send_organization_invite(
+        self,
+        *,
+        organization_id: str,
+        emails: List[str],
+        role: Any = None,
+        invited_by: str,
+        inviter_name: Optional[str] = None,  # noqa: ARG002  (legacy, snapshot is resolved inside)
+        inviter_email: Optional[str] = None,  # noqa: ARG002
+        message: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        send_email: bool = True,
+    ) -> Dict[str, Any]:
+        """Bulk invite helper used by teams.py / organizations.py.
+
+        Wraps `issue_invite` for each email, attaches metadata (e.g.
+        `team_id`, `team_role`) onto each resulting Invite row, and returns
+        a summary dict keyed by email."""
+        from bson import ObjectId
+        from backend.db.mongodb.models.invite import (
+            InviteCreate, InviteRole, InviteScope,
+        )
+
+        # Resolve role enum from str (the API sometimes passes a raw string)
+        resolved_role = role
+        if isinstance(role, str):
+            try:
+                resolved_role = InviteRole(role)
+            except ValueError:
+                resolved_role = InviteRole.MEMBER
+        elif role is None:
+            resolved_role = InviteRole.MEMBER
+
+        results: Dict[str, Any] = {"created": [], "skipped": [], "errors": []}
+        for email in emails:
+            try:
+                payload = InviteCreate(
+                    email=email,
+                    scope=InviteScope.ORGANIZATION,
+                    organization_id=ObjectId(organization_id),
+                    role=resolved_role,
+                    message=message,
+                )
+                invite = await self.issue_invite(
+                    payload=payload,
+                    invited_by=invited_by,
+                    send_email=send_email,
+                )
+                # Persist team metadata so the accept flow can route correctly.
+                if metadata:
+                    try:
+                        await invite_repository.update_metadata(
+                            invite_id=str(invite.id),
+                            metadata=metadata,
+                        )
+                    except Exception:
+                        # Best-effort — older repos may not have this helper.
+                        pass
+                results["created"].append({"email": email, "invite_id": str(invite.id)})
+            except Exception as e:
+                logger.warning("invite_send_failed", email=email, error=str(e))
+                results["errors"].append({"email": email, "error": str(e)[:200]})
+
+        return results
+
     async def send_invite_email(self, *, invite: Invite) -> bool:
         """Render and send the task_invite.html email."""
         if not invite or not invite.email:

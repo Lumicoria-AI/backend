@@ -74,6 +74,11 @@ class S3Settings(BaseSettings):
     MINIO_SECRET_KEY: str = "minioadmin"
     MINIO_BUCKET: str = "lumicoria-documents"
     MINIO_USE_SSL: bool = False
+    # Browser-facing URL for public object URLs. In production set to
+    # https://storage.lumicoria.ai (or similar) — a Cloudflare-fronted
+    # subdomain that reverse-proxies your MinIO bucket. Leave empty in
+    # dev to use the internal MINIO_ENDPOINT.
+    MINIO_PUBLIC_URL: Optional[str] = None
 
     # Cloudflare R2 (backup — simultaneous dual-write)
     R2_ENDPOINT: Optional[str] = None
@@ -624,7 +629,12 @@ class Settings(BaseSettings):
     
     # Email configuration
     EMAIL_FROM_ADDRESS: str = "noreply@lumicoria.ai"
-    EMAIL_FROM_NAME: str = "Lumicoria.ai"
+    EMAIL_FROM_NAME: str = "Lumicoria AI"
+    # Public-facing brand logo URL — Gmail and other clients sometimes use
+    # this as the sender avatar when BIMI isn't configured (via the
+    # X-Entity-Ref-Id / image headers). Used as <img src> in template headers too.
+    EMAIL_LOGO_URL: str = "https://lumicoria.ai/images/lumicoria-logo-gradient.png"
+    EMAIL_REPLY_TO: Optional[str] = "hello@lumicoria.ai"
     EMAIL_SANDBOX_MODE: bool = False  # Set True to disable actual sending (testing)
 
     # ── External Integrations (all optional) ───────────────────────────

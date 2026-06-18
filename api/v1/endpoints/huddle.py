@@ -112,14 +112,43 @@ class FinishRecordingRequest(BaseModel):
 
 # ── Plan lookup helper ─────────────────────────────────────────────────
 
-async def _user_plan(user_id: str) -> str:
+async def _user_plan(user_id: str, organization_id: Optional[str] = None) -> str:
+    """Resolve the effective plan for usage caps.
+
+    Lookup order:
+      1. Organization's plan field (this is what `bump_org.py` writes).
+         Reflects the org admin's purchasing decision — the right answer
+         for huddle/team/project usage.
+      2. Per-user billing subscription (for personal accounts).
+      3. "free" fallback.
+    """
+    # 1. Org plan
+    if organization_id:
+        try:
+            from backend.db.mongodb.mongodb import MongoDB
+            from bson import ObjectId
+            db = await MongoDB.get_database()
+            try:
+                oid = ObjectId(organization_id)
+            except Exception:
+                oid = organization_id
+            org = await db.organizations.find_one({"_id": oid})
+            if org and org.get("plan"):
+                plan = org["plan"]
+                return plan.value if hasattr(plan, "value") else str(plan).lower()
+        except Exception:
+            pass
+    # 2. User subscription
     try:
         from backend.services.billing_service import get_user_subscription
         sub = await get_user_subscription(user_id)
         plan = getattr(sub, "plan", None)
-        return getattr(plan, "value", str(plan or "free"))
+        if plan:
+            return plan.value if hasattr(plan, "value") else str(plan).lower()
     except Exception:
-        return "free"
+        pass
+    # 3. Free
+    return "free"
 
 
 def _resolve_org_id(current_user: User) -> str:
@@ -156,7 +185,7 @@ async def create_huddle_endpoint(
 ) -> Dict[str, Any]:
     user_id = str(current_user.id)
     org_id = _resolve_org_id(current_user)
-    plan = await _user_plan(user_id)
+    plan = await _user_plan(user_id, org_id)
 
     await enforce_can_create(
         plan=plan,
@@ -297,7 +326,8 @@ async def join_huddle_endpoint(
     current_user: Optional[User] = Depends(get_current_active_user),
 ) -> Dict[str, Any]:
     user_id: Optional[str] = str(current_user.id) if current_user else None
-    plan = await _user_plan(user_id) if user_id else "free"
+    join_org_id = _resolve_org_id(current_user) if current_user else None
+    plan = await _user_plan(user_id, join_org_id) if user_id else "free"
     existing = await svc.list_participants(huddle_id)
     open_count = sum(1 for p in existing if not p.get("left_at"))
     enforce_can_join(plan=plan, current_participants=open_count)
@@ -445,7 +475,8 @@ async def start_recording_endpoint(
     current_user: User = Depends(get_current_active_user),
 ) -> Dict[str, Any]:
     user_id = str(current_user.id)
-    plan = await _user_plan(user_id)
+    rec_org_id = _resolve_org_id(current_user)
+    plan = await _user_plan(user_id, rec_org_id)
     from backend.services.huddle_plan_guard import caps_for
     if not caps_for(plan).get("recording_allowed"):
         raise HTTPException(
