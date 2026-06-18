@@ -29,7 +29,7 @@ services:
     container_name: lumicoria-backend
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "80:8000"
     env_file:
       - ../.env
     environment:
@@ -54,7 +54,7 @@ services:
       DEBUG: "false"
     volumes:
       - backend_uploads:/app/backend/uploads
-      - ../firebase-credentials.json:/app/backend/firebase-credentials.json:ro
+      - ../firebase-credentials.json:/app/firebase-credentials.json:ro
     depends_on:
       mongodb:
         condition: service_healthy
@@ -118,7 +118,7 @@ services:
       # files parked in /app/backend/uploads (not strictly required because
       # ingest_file re-downloads from MinIO, but harmless).
       - backend_uploads:/app/backend/uploads
-      - ../firebase-credentials.json:/app/backend/firebase-credentials.json:ro
+      - ../firebase-credentials.json:/app/firebase-credentials.json:ro
     depends_on:
       redis:
         condition: service_healthy
