@@ -69,15 +69,42 @@ class BaseRepository(Generic[T]):
         return self.model_class(**doc) if doc else None
 
     async def update(self, id: str, data: Dict[str, Any]) -> Optional[T]:
+        """Update a document by id.
+
+        `data` may be:
+          - A plain dict of fields to set (e.g. {"name": "x"}) — auto-wrapped
+            in $set plus an updated_at timestamp.
+          - A MongoDB update specification (any key starting with $, e.g.
+            {"$addToSet": {"member_ids": uid}}). Passed through verbatim;
+            we just merge an $set.updated_at into it.
+
+        Without this branch, callers like add_to_organization that pass
+        operator-style payloads hit pymongo's "$addToSet in $addToSet not
+        allowed in replacement document" WriteError.
+        """
         collection = await self._get_collection()
-        update_data = {k: v for k, v in data.items() if v is not None}
-        if update_data:
+
+        if not data:
+            return await self.get_by_id(id)
+
+        is_operator_update = any(isinstance(k, str) and k.startswith("$") for k in data.keys())
+
+        if is_operator_update:
+            update_spec: Dict[str, Any] = {k: v for k, v in data.items() if v is not None}
+            existing_set = update_spec.get("$set", {})
+            if not isinstance(existing_set, dict):
+                existing_set = {}
+            existing_set["updated_at"] = datetime.utcnow()
+            update_spec["$set"] = existing_set
+            await collection.update_one({"_id": ObjectId(id)}, update_spec)
+        else:
+            update_data = {k: v for k, v in data.items() if v is not None}
             update_data["updated_at"] = datetime.utcnow()
             await collection.update_one(
                 {"_id": ObjectId(id)},
-                {"$set": update_data}
+                {"$set": update_data},
             )
-        # Fetch the updated document
+
         return await self.get_by_id(id)
 
     async def delete(self, id: str) -> bool:
