@@ -414,7 +414,18 @@ async def _run_post_call_summary(huddle_id: str, huddle: Dict[str, Any]) -> None
     the resulting `meetings` row back to this huddle."""
     try:
         from backend.agents.meeting_agent import MeetingAgent
-        agent = MeetingAgent()
+        # MeetingAgent.__init__ requires a config dict. Match the shape
+        # used by api/v1/endpoints/meeting.py so behaviour is identical
+        # between manual and post-huddle invocations.
+        meeting_agent_config = {
+            "type": "meeting",
+            "agent_model_config": {},
+            "extraction_targets": [
+                "action_items", "decisions", "key_points", "follow_ups",
+                "questions", "concerns", "deadlines",
+            ],
+        }
+        agent = MeetingAgent(meeting_agent_config)
         result = await agent.process_async({
             "transcript": huddle.get("transcript_text") or "",
             "meeting_type": "general",

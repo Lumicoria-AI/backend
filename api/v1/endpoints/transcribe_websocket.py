@@ -207,6 +207,18 @@ async def websocket_transcribe(
 
     except WebSocketDisconnect:
         logger.info("transcribe_ws_disconnect", user_id=user_id)
+    except RuntimeError as e:
+        # These two RuntimeError messages happen during the normal close
+        # race when the client drops mid-frame. They are not bugs.
+        msg = str(e)
+        if (
+            'Cannot call "receive"' in msg
+            or 'Cannot call "send"' in msg
+            or "WebSocket is not connected" in msg
+        ):
+            logger.info("transcribe_ws_close_race", user_id=user_id)
+        else:
+            logger.error("transcribe_ws_error", user_id=user_id, error=msg)
     except Exception as e:
         logger.error("transcribe_ws_error", user_id=user_id, error=str(e))
     finally:

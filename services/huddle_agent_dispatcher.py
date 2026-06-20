@@ -102,9 +102,12 @@ async def dispatch_chunk(
         "live": True,
     }
 
-    # Lazy-import AgentService to avoid circulars on cold start.
-    from backend.agents.agent_service import AgentService
-    svc = AgentService()
+    # AgentService is a singleton initialised at FastAPI startup with the
+    # full provider/model config. Calling AgentService() directly bypasses
+    # that init and crashes because __init__ requires `config`. Use the
+    # accessor that returns the live singleton.
+    from backend.agents.agent_service import get_agent_service
+    svc = get_agent_service()
 
     async def _run_one(agent_key: str) -> Dict[str, Any]:
         start = time.time()

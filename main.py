@@ -489,14 +489,56 @@ async def log_requests(request: Request, call_next):
 # ---------------------------------------------------------------------------
 # Exception handlers
 # ---------------------------------------------------------------------------
+# Paths probed by bots and dev tools that we don't serve. 404s on these
+# are not errors — log at info or skip entirely so real errors stand out.
+_NOISY_404_PATHS = {
+    "/favicon.ico",
+    "/security.txt",
+    "/.well-known/security.txt",
+    "/robots.txt",
+    "/.git/config",
+    "/.env",
+}
+
+# (path, status) pairs that are expected business outcomes rather than
+# bugs. Demote them from error → info-level so they don't pollute the
+# error stream during normal use.
+_EXPECTED_4XX = {
+    ("/api/v1/organizations/me", 404),  # personal-account users
+    ("/api/v1/auth/refresh", 401),       # expired refresh token
+    ("/api/v1/billing/portal", 502),     # Stripe key absent in non-billing envs
+}
+
+
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
-    logger.error(
-        "http_exception",
-        path=request.url.path,
-        status_code=exc.status_code,
-        detail=str(exc.detail)
-    )
+    path = request.url.path
+
+    if path in _NOISY_404_PATHS and exc.status_code == 404:
+        # Drop entirely. Scanner noise.
+        pass
+    elif (path, exc.status_code) in _EXPECTED_4XX:
+        logger.info(
+            "http_expected",
+            path=path,
+            status_code=exc.status_code,
+            detail=str(exc.detail),
+        )
+    elif 400 <= exc.status_code < 500:
+        # 4xx is client error, not server error. Warn, don't error.
+        logger.warning(
+            "http_exception",
+            path=path,
+            status_code=exc.status_code,
+            detail=str(exc.detail),
+        )
+    else:
+        logger.error(
+            "http_exception",
+            path=path,
+            status_code=exc.status_code,
+            detail=str(exc.detail),
+        )
     return JSONResponse(
         status_code=exc.status_code,
         content={"detail": str(exc.detail)},
