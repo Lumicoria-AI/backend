@@ -56,8 +56,12 @@ async def bump(email: str, plan_name: str = "professional") -> None:
         )
         print(f"✓  updated subscription  plan_override={plan.value}  status=active")
     else:
+        # stripe_customer_id is required by the model but isn't used
+        # for admin-override flows. Stripe real IDs start with "cus_",
+        # so the "admin_override:" prefix is collision-safe.
         new_sub = SubscriptionInDB(
             user_id=user_id,
+            stripe_customer_id=f"admin_override:{user_id}",
             plan=SubscriptionPlan.FREE,
             status=SubscriptionStatus.ACTIVE,
             is_admin_override=True,
