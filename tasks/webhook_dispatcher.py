@@ -189,25 +189,30 @@ async def _drain_due_deliveries(batch_size: int = 50) -> int:
 # ──────────────────────────────────────────────────────── Celery shim
 
 
-def _get_loop():
-    """Reuse the same event loop pattern as document_tasks._get_loop."""
+def _run_async(coro):
+    """Run a coroutine to completion in a fresh, isolated event loop.
+
+    Motor (the async MongoDB driver) binds Futures to the loop that was
+    current when the connection's first I/O ran. Reusing a loop across
+    Celery prefork workers causes "Future attached to a different loop"
+    errors. A fresh loop per task closes that hole; the cost is one new
+    Motor client per invocation, which is fine for beat-scheduled jobs.
+    """
+    # Reset any module-level Motor client cached against an old loop so
+    # the next coroutine recreates it on this fresh one.
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            raise RuntimeError("event loop closed")
-        return loop
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        return loop
+        from backend.db.mongodb.mongodb import MongoDB
+        MongoDB.reset_for_new_loop()  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    return asyncio.run(coro)
 
 
 @celery_app.task(name="webhooks.deliver_due", bind=True, max_retries=3)
 def deliver_due_webhooks(self, batch_size: int = 50) -> Dict[str, Any]:
     """Beat-triggered: drain webhook_deliveries that are due."""
     try:
-        loop = _get_loop()
-        n = loop.run_until_complete(_drain_due_deliveries(batch_size=batch_size))
+        n = _run_async(_drain_due_deliveries(batch_size=batch_size))
         return {"processed": n}
     except Exception as exc:  # noqa: BLE001
         logger.exception("webhooks.deliver_due_failed", error=str(exc))

@@ -49,10 +49,19 @@ def _resolve_org_id(current_user: User) -> str:
     ids = getattr(current_user, "organization_ids", None) or []
     if ids:
         return str(ids[0])
-    raise HTTPException(status_code=400, detail="User has no organization context")
+    # Personal mode — user has no org. Use the user's own id as the
+    # scope key so personal comments segregate cleanly per account.
+    return str(current_user.id)
 
 
 async def _require_org_membership(org_id: str, current_user: User):
+    # Personal mode: org_id equals the user's own id → no Organization
+    # document exists. Allow the comment; the scope key (org_id ==
+    # user_id) gives natural isolation. Personal tasks and personal
+    # documents reach here.
+    if str(org_id) == str(current_user.id):
+        return None
+
     org = await organization_repository.get_by_id(org_id)
     if not org:
         raise HTTPException(status_code=404, detail="Organization not found")

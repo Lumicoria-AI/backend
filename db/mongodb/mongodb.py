@@ -45,6 +45,22 @@ class MongoDB:
         db = await cls.get_database()
         return db[collection_name]
 
+    @classmethod
+    def reset_for_new_loop(cls) -> None:
+        """Drop the cached Motor client so the next call rebuilds it on
+        the current event loop. Used by Celery tasks that run on a fresh
+        asyncio.run() loop each invocation — Motor binds Futures to the
+        loop that ran the first I/O, so reuse across loops fails with
+        'Future attached to a different loop'.
+        """
+        if cls.client is not None:
+            try:
+                cls.client.close()
+            except Exception:
+                pass
+        cls.client = None
+        cls.db = None
+
 
 async def get_mongodb() -> AsyncIOMotorDatabase:
     return await MongoDB.get_database()

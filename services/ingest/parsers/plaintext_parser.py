@@ -55,12 +55,22 @@ class PlainTextParser:
         if isinstance(source, bytes):
             text = source.decode("utf-8", errors="replace")
         else:
-            # Path or raw text. If it's an existing file, read it.
-            path = Path(source)
-            if path.exists() and path.is_file():
-                text = path.read_text(encoding="utf-8", errors="replace")
-            else:
-                text = source
+            # Path or raw text. Only probe as a path for short, path-shaped
+            # strings; Path(s).exists() calls stat() which raises
+            # OSError(36) "File name too long" on inputs > NAME_MAX (255).
+            text = source
+            if (
+                len(source) < 4096
+                and "\n" not in source
+                and "\x00" not in source
+            ):
+                try:
+                    path = Path(source)
+                    if path.exists() and path.is_file():
+                        text = path.read_text(encoding="utf-8", errors="replace")
+                except (OSError, ValueError):
+                    # ENAMETOOLONG, perms, invalid path — treat as raw text.
+                    pass
 
         # Code file short-circuit: one block, chunker splits language-aware.
         if (

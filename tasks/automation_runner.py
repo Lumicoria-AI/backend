@@ -188,23 +188,26 @@ async def _retry_errored_runs(batch_size: int = 50) -> Dict[str, int]:
     return {"retried": retried}
 
 
-def _get_loop():
+def _run_async(coro):
+    """Run a coroutine in a fresh event loop per Celery task.
+
+    Motor binds Futures to the loop that ran the connection's first I/O;
+    reusing a loop across prefork workers causes 'Future attached to a
+    different loop' errors. asyncio.run() creates and tears down a new
+    loop, isolating each task.
+    """
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            raise RuntimeError("closed")
-        return loop
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        return loop
+        from backend.db.mongodb.mongodb import MongoDB
+        MongoDB.reset_for_new_loop()  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    return asyncio.run(coro)
 
 
 @celery_app.task(name="automations.tick_scheduled", bind=True, max_retries=3)
 def tick_scheduled_automations(self) -> Dict[str, Any]:
     try:
-        loop = _get_loop()
-        return loop.run_until_complete(_tick_scheduled_automations())
+        return _run_async(_tick_scheduled_automations())
     except Exception as exc:  # noqa: BLE001
         logger.exception("automations.tick_failed", error=str(exc))
         raise self.retry(exc=exc, countdown=30)
@@ -213,8 +216,7 @@ def tick_scheduled_automations(self) -> Dict[str, Any]:
 @celery_app.task(name="automations.retry_errored", bind=True, max_retries=3)
 def retry_errored_runs(self) -> Dict[str, Any]:
     try:
-        loop = _get_loop()
-        return loop.run_until_complete(_retry_errored_runs())
+        return _run_async(_retry_errored_runs())
     except Exception as exc:  # noqa: BLE001
         logger.exception("automations.retry_failed", error=str(exc))
         raise self.retry(exc=exc, countdown=60)
