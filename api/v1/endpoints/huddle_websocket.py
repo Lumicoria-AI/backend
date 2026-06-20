@@ -104,7 +104,10 @@ async def _serve_room(websocket: WebSocket, huddle_id: str, user_id_for_connecti
     # ConnectionManager treats this as a separate channel. The broker
     # delivers `rt:huddle:{id}` messages to this synthetic id.
     channel_id = f"huddle:{huddle_id}:{user_id_for_connection}"
-    await connection_manager.connect(websocket, channel_id)
+    # The outer endpoint already accepted the socket. Register without
+    # re-accepting — connect() would call websocket.accept() a second
+    # time and Starlette raises a hard ASGI error.
+    connection_manager.register(websocket, channel_id)
     await realtime.subscribe_huddle(huddle_id)
 
     await websocket.send_json({

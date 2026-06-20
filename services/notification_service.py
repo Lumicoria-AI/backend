@@ -36,10 +36,26 @@ class ConnectionManager:
     async def connect(self, websocket, user_id: str):
         """Accept and store a WebSocket connection for a user."""
         await websocket.accept()
+        self._register(websocket, user_id)
+        logger.info("websocket_connected", user_id=user_id)
+
+    def register(self, websocket, user_id: str) -> None:
+        """Store an already-accepted WebSocket without re-accepting.
+
+        Use this when the caller has called websocket.accept() itself —
+        e.g. the huddle WS endpoint accepts after auth and then delegates
+        to _serve_room. Calling connect() in that case re-accepts and
+        Starlette raises:
+        "Expected ASGI message 'websocket.send' or 'websocket.close',
+         but got 'websocket.accept'".
+        """
+        self._register(websocket, user_id)
+        logger.info("websocket_registered", user_id=user_id)
+
+    def _register(self, websocket, user_id: str) -> None:
         if user_id not in self.active_connections:
             self.active_connections[user_id] = []
         self.active_connections[user_id].append(websocket)
-        logger.info("websocket_connected", user_id=user_id)
     
     def disconnect(self, websocket, user_id: str):
         """Remove a WebSocket connection for a user."""
