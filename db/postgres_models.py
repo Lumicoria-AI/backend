@@ -766,3 +766,90 @@ class HuddleTranscriptChunkSQL(Base):
 
     agent_responses = Column(JSONB, nullable=False, default=list)
 
+
+# ─────────────────────────────────────────────────────────────────────
+# Autonomous Brain — morning + evening digest runs
+# ─────────────────────────────────────────────────────────────────────
+#
+# The brain runs as a LangGraph state machine inside a per-user Celery
+# task. Every run records one BrainRun row + one BrainTrace row per
+# node so we can debug runs after the fact and prove what the brain did
+# with the user's email. Offline eval results land in BrainEval for
+# trend monitoring across deploys.
+
+
+class BrainRun(Base):
+    """One row per morning or evening brain run, per user.
+
+    `status='ok'` = all nodes passed eval. `'degraded'` = one or more
+    nodes fell back. `'failed'` = the run couldn't deliver a digest.
+    `'skipped'` = gate said no (brain disabled, off-window, no creds).
+    """
+    __tablename__ = "brain_runs"
+
+    id = Column(String(36), primary_key=True, default=_uuid_str)
+    user_id = Column(String(64), nullable=False, index=True)
+    organization_id = Column(String(64), nullable=True, index=True)
+
+    mode = Column(String(16), nullable=False)          # 'morning' | 'evening'
+    status = Column(String(16), nullable=False, default="ok")
+
+    started_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    ended_at = Column(DateTime, nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+
+    emails_processed = Column(Integer, nullable=False, default=0)
+    attachments_processed = Column(Integer, nullable=False, default=0)
+    tasks_created = Column(Integer, nullable=False, default=0)
+    proposals_drafted = Column(Integer, nullable=False, default=0)
+    digest_sent = Column(Boolean, nullable=False, default=False)
+
+    skip_reason = Column(String(64), nullable=True)
+    error = Column(Text, nullable=True)
+
+    meta = Column("metadata", JSONB, nullable=False, default=dict)
+
+
+class BrainTrace(Base):
+    """Step-level trace for a single node in a BrainRun. Powers the
+    admin "drill into run X" timeline and the eval audit log. We never
+    persist full email bodies here — `payload_summary` is counts +
+    IDs only so the trace is safe to surface to admins."""
+    __tablename__ = "brain_traces"
+
+    id = Column(String(36), primary_key=True, default=_uuid_str)
+    run_id = Column(
+        String(36),
+        ForeignKey("brain_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    node = Column(String(64), nullable=False)
+    started_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    ended_at = Column(DateTime, nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+
+    # 'ok' | 'retry' | 'fallback' | 'fail'
+    status = Column(String(16), nullable=False, default="ok")
+    eval_score = Column(Float, nullable=True)
+
+    payload_summary = Column(JSONB, nullable=False, default=dict)
+
+
+class BrainEval(Base):
+    """Offline eval suite results. One row per `scripts/eval_brain.py`
+    run. The numbers feed the deploy gate — failing scores below
+    threshold block the next deploy via CI."""
+    __tablename__ = "brain_evals"
+
+    id = Column(String(36), primary_key=True, default=_uuid_str)
+    ran_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+    dataset_version = Column(String(32), nullable=True)
+
+    classification_f1 = Column(Float, nullable=True)
+    ranking_ndcg = Column(Float, nullable=True)
+    confidence_ece = Column(Float, nullable=True)
+
+    extra = Column(JSONB, nullable=False, default=dict)
+

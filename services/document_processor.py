@@ -674,62 +674,137 @@ class DocumentProcessor:
         drive_file_id: str,
         metadata: Dict[str, Any],
         chunk_size: int = None,
-        chunk_overlap: int = None
+        chunk_overlap: int = None,
+        *,
+        drive_client: Optional[Any] = None,
+        user_id: Optional[str] = None,
     ) -> ProcessedDocument:
-        """
-        Process a document from Google Drive.
-        
+        """Process a document from Google Drive end-to-end.
+
         Args:
             drive_file_id: Google Drive file ID
-            metadata: Document metadata
-            chunk_size: Size of text chunks (default: 1000 chars)
-            chunk_overlap: Overlap between chunks (default: 100 chars)
-            
+            metadata: Document metadata. Should include `user_id` if no
+                `drive_client` is passed — we look up the user's
+                Google integration to build a client.
+            chunk_size: Override chunker size.
+            chunk_overlap: Override chunker overlap.
+            drive_client: Optional pre-built `GoogleWorkspaceClient`.
+                The brain pipeline reuses a single client across many
+                files in one run; ad-hoc callers can omit this and the
+                method will build one from the user's stored credentials.
+            user_id: Override for the user whose Google integration to
+                use. Defaults to `metadata['user_id']`.
+
         Returns:
-            ProcessedDocument object with processing results
+            ProcessedDocument with chunk_count, vector_ids, and status.
         """
         try:
-            # Get document ID or generate a new one
             document_id = metadata.get("document_id", str(uuid.uuid4()))
             metadata["document_id"] = document_id
-            
-            # Make sure source is set
-            if "source" not in metadata:
-                metadata["source"] = "drive"
-                
+            metadata.setdefault("source", "drive")
             metadata["drive_file_id"] = drive_file_id
             metadata["created_at"] = metadata.get("created_at", datetime.utcnow().isoformat())
-            
-            # Download and process the file from Google Drive
-            # NOTE: This is a placeholder. In a real implementation, you would:
-            # 1. Use Google Drive API to download the file
-            # 2. Save it to a temporary location
-            # 3. Process it like a regular file
-            # 4. Delete the temporary file
-            
-            # For now, we'll simulate with a fake document
-            logger.info(f"Processing Google Drive document: {drive_file_id}")
-            
-            # Create a minimal document for demonstration
-            text = f"This is a placeholder for Google Drive document {drive_file_id}. In a real implementation, the content would be downloaded from Google Drive API."
-            
-            # Process as text
-            return await self.process_text(
-                text=text,
-                metadata=metadata,
-                chunk_size=chunk_size,
-                chunk_overlap=chunk_overlap
-            )
-            
+
+            # Resolve a Drive client. The brain pipeline passes one in
+            # explicitly to amortise OAuth refresh across many files.
+            if drive_client is None:
+                resolved_user_id = user_id or metadata.get("user_id")
+                if not resolved_user_id:
+                    raise ValueError(
+                        "process_google_drive needs a user_id (in metadata or kwarg) "
+                        "or a pre-built drive_client",
+                    )
+                from backend.services.integration_service import integration_service
+                integ = await integration_service.get_user_integration(
+                    str(resolved_user_id), provider="google_workspace",
+                )
+                if not integ or not integ.get("credentials"):
+                    raise ValueError(
+                        f"User {resolved_user_id} has no active Google Workspace integration",
+                    )
+                from backend.services.ai_clients.google_workspace_client import (
+                    GoogleWorkspaceClient,
+                )
+                drive_client = GoogleWorkspaceClient(integ["credentials"])
+
+            # Download via the typed Drive helper. Native Google docs
+            # get exported to a portable MIME automatically.
+            payload = await drive_client.download_drive_file(drive_file_id)
+            if payload is None:
+                logger.warning("drive.file_missing", drive_file_id=drive_file_id)
+                return ProcessedDocument(
+                    document_id=document_id,
+                    chunk_count=0,
+                    metadata=metadata,
+                    vector_ids=[],
+                    status="error",
+                    error="Drive file not found",
+                )
+
+            file_bytes: bytes = payload["bytes"]
+            file_name: str = payload.get("name") or f"{drive_file_id}.bin"
+            file_mime: str = payload.get("mime_type") or "application/octet-stream"
+
+            metadata.setdefault("filename", file_name)
+            metadata.setdefault("title", file_name)
+            metadata["mime_type"] = file_mime
+            metadata.setdefault("file_size", payload.get("size", len(file_bytes)))
+            if "original_mime_type" in payload:
+                metadata["drive_native_mime_type"] = payload["original_mime_type"]
+
+            # Persist to a temp file so the same parser used for uploads
+            # handles the bytes. Cleaned up in `finally`.
+            import tempfile as _tempfile
+            tmp_path: Optional[str] = None
+            try:
+                # Pick a sensible suffix so PyMuPDF / Docling can sniff.
+                _SUFFIX_FROM_MIME = {
+                    "application/pdf": ".pdf",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+                    "text/plain": ".txt",
+                    "text/markdown": ".md",
+                    "text/csv": ".csv",
+                    "image/png": ".png",
+                    "image/jpeg": ".jpg",
+                }
+                suffix = (
+                    _SUFFIX_FROM_MIME.get(file_mime)
+                    or os.path.splitext(file_name)[1]
+                    or ".bin"
+                )
+                with _tempfile.NamedTemporaryFile(
+                    suffix=suffix, delete=False,
+                ) as tmp:
+                    tmp.write(file_bytes)
+                    tmp_path = tmp.name
+
+                return await self.process_file(
+                    file_path=tmp_path,
+                    metadata=metadata,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                )
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
+
         except Exception as e:
-            logger.error("Error processing Google Drive document", error=str(e), drive_file_id=drive_file_id)
+            logger.error(
+                "Error processing Google Drive document",
+                error=str(e), drive_file_id=drive_file_id,
+            )
             return ProcessedDocument(
                 document_id=metadata.get("document_id", str(uuid.uuid4())),
                 chunk_count=0,
                 metadata=metadata,
                 vector_ids=[],
                 status="error",
-                error=str(e)
+                error=str(e),
             )
     
     async def process_chat_history(

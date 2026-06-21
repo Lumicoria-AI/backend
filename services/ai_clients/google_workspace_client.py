@@ -586,29 +586,33 @@ class GoogleWorkspaceClient:
     async def list_messages(self, query: str = None, max_results: int = 10) -> List[Dict[str, Any]]:
         """
         List Gmail messages.
-        
+
         Args:
             query: Gmail search query
             max_results: Maximum number of results
-            
+
         Returns:
             List of messages
+
+        Note: kept for compatibility. New callers should prefer
+        `list_message_ids_since` + `get_message` for paginated, batched
+        retrieval with proper rate-limit handling.
         """
         try:
             gmail_service = self._get_service(
                 "gmail", "v1", ["https://www.googleapis.com/auth/gmail.readonly"]
             )
-            
+
             def _list_messages():
                 return gmail_service.users().messages().list(
                     userId='me',
                     q=query,
                     maxResults=max_results
                 ).execute()
-                
+
             messages_result = await self.run_in_executor(_list_messages)
             messages = messages_result.get('messages', [])
-            
+
             # Get full message details
             detailed_messages = []
             for msg in messages:
@@ -617,14 +621,312 @@ class GoogleWorkspaceClient:
                         userId='me',
                         id=msg_id
                     ).execute()
-                    
+
                 message_data = await self.run_in_executor(_get_message, msg['id'])
                 detailed_messages.append(message_data)
-                
+
             return detailed_messages
         except Exception as e:
             logger.error("Error listing Gmail messages", error=str(e))
             return []
+
+    # ─────────────────────────────────────────────────────────────────
+    # Gmail + Drive read API — powers the autonomous morning brain.
+    # All methods retry on 429 / 5xx with exponential backoff and
+    # surface HttpError untouched for non-retryable failures.
+    # ─────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _is_retryable_http_error(exc: BaseException) -> bool:
+        """True for 429 (rate-limited) and 5xx (transient). Other
+        HttpErrors (400/401/403/404) bubble up so the brain can act on
+        them — e.g. flip `needs_reauth=true` on a 401."""
+        if not isinstance(exc, HttpError):
+            return False
+        status_code = getattr(getattr(exc, "resp", None), "status", None)
+        if status_code is None:
+            return False
+        return status_code == 429 or 500 <= int(status_code) < 600
+
+    async def _retrying_execute(self, sync_fn, *args, **kwargs):
+        """Run a sync googleapiclient call in the executor with
+        exponential backoff (1s, 2s, 4s) on 429 / 5xx. Three attempts.
+
+        Tenacity is already a project dep (`requirements.txt`) — we use
+        it here for consistency with `webhook_dispatcher` and Weaviate
+        ingest. Kept local to avoid an extra module import surface.
+        """
+        from tenacity import (
+            retry, retry_if_exception, stop_after_attempt,
+            wait_exponential_jitter,
+        )
+
+        @retry(
+            reraise=True,
+            stop=stop_after_attempt(3),
+            wait=wait_exponential_jitter(initial=1, max=8),
+            retry=retry_if_exception(self._is_retryable_http_error),
+        )
+        def _call():
+            return sync_fn(*args, **kwargs)
+
+        return await self.run_in_executor(_call)
+
+    async def list_message_ids_since(
+        self,
+        *,
+        after_epoch_seconds: int,
+        label_ids: Optional[List[str]] = None,
+        exclude_label_ids: Optional[List[str]] = None,
+        max_results: int = 200,
+    ) -> List[Dict[str, str]]:
+        """Return lightweight id+threadId tuples for every message newer
+        than `after_epoch_seconds`. Paginates through `nextPageToken`.
+
+        Cheaper than `list_messages` (no per-message GET). The brain
+        calls `get_message` for each id in batched, parallel fashion.
+        """
+        gmail = self._get_service(
+            "gmail", "v1", ["https://www.googleapis.com/auth/gmail.readonly"],
+        )
+
+        query_parts = [f"after:{int(after_epoch_seconds)}"]
+        if exclude_label_ids:
+            for lbl in exclude_label_ids:
+                query_parts.append(f"-label:{lbl}")
+        q = " ".join(query_parts)
+
+        results: List[Dict[str, str]] = []
+        page_token: Optional[str] = None
+
+        while True:
+            def _call(token):
+                req = gmail.users().messages().list(
+                    userId="me",
+                    q=q,
+                    labelIds=label_ids or None,
+                    maxResults=min(100, max_results - len(results)),
+                    pageToken=token,
+                )
+                return req.execute()
+
+            try:
+                page = await self._retrying_execute(_call, page_token)
+            except HttpError as exc:
+                logger.error("gmail.list_failed",
+                             status=getattr(exc.resp, "status", None),
+                             error=str(exc))
+                raise
+
+            for m in page.get("messages", []) or []:
+                results.append({"id": m["id"], "threadId": m.get("threadId")})
+                if len(results) >= max_results:
+                    return results
+
+            page_token = page.get("nextPageToken")
+            if not page_token:
+                break
+
+        return results
+
+    async def get_message(
+        self,
+        message_id: str,
+        *,
+        fmt: str = "full",
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch a single Gmail message. `fmt`: 'full' | 'metadata' |
+        'raw'. The brain uses 'full' for parsing, 'metadata' for cheap
+        triage when the body isn't needed."""
+        gmail = self._get_service(
+            "gmail", "v1", ["https://www.googleapis.com/auth/gmail.readonly"],
+        )
+
+        def _call():
+            return gmail.users().messages().get(
+                userId="me", id=message_id, format=fmt,
+            ).execute()
+
+        try:
+            return await self._retrying_execute(_call)
+        except HttpError as exc:
+            status_code = getattr(exc.resp, "status", None)
+            if int(status_code or 0) == 404:
+                return None
+            logger.error("gmail.get_failed",
+                         message_id=message_id, status=status_code,
+                         error=str(exc))
+            raise
+
+    async def get_attachment(
+        self,
+        message_id: str,
+        attachment_id: str,
+    ) -> Optional[bytes]:
+        """Download an attachment as raw bytes. Returns None if Gmail
+        reports the attachment is missing."""
+        gmail = self._get_service(
+            "gmail", "v1", ["https://www.googleapis.com/auth/gmail.readonly"],
+        )
+
+        def _call():
+            return gmail.users().messages().attachments().get(
+                userId="me", messageId=message_id, id=attachment_id,
+            ).execute()
+
+        try:
+            payload = await self._retrying_execute(_call)
+        except HttpError as exc:
+            status_code = getattr(exc.resp, "status", None)
+            if int(status_code or 0) == 404:
+                return None
+            logger.error("gmail.attachment_failed",
+                         message_id=message_id, attachment_id=attachment_id,
+                         status=status_code, error=str(exc))
+            raise
+
+        data = payload.get("data")
+        if not data:
+            return None
+        # Gmail returns URL-safe base64.
+        return base64.urlsafe_b64decode(data.encode("utf-8"))
+
+    async def download_drive_file(
+        self,
+        file_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Download a Drive file. Native Google Docs/Sheets/Slides are
+        exported to a portable MIME (docx/xlsx/pdf). Other files come
+        back as their original bytes.
+
+        Returns ``{ "bytes": bytes, "name": str, "mime_type": str,
+        "size": int }`` or None if the file is missing.
+        """
+        drive = self._get_service(
+            "drive", "v3",
+            ["https://www.googleapis.com/auth/drive.readonly"],
+        )
+
+        # Get metadata first so we know how to export.
+        def _meta():
+            return drive.files().get(
+                fileId=file_id,
+                fields="id,name,mimeType,size,modifiedTime",
+            ).execute()
+
+        try:
+            meta = await self._retrying_execute(_meta)
+        except HttpError as exc:
+            status_code = getattr(exc.resp, "status", None)
+            if int(status_code or 0) == 404:
+                return None
+            raise
+
+        mime = meta.get("mimeType", "")
+        # Map native Google MIMEs to a downloadable export format.
+        _EXPORT_MIMES = {
+            "application/vnd.google-apps.document":
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/vnd.google-apps.spreadsheet":
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.google-apps.presentation":
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "application/vnd.google-apps.drawing": "image/png",
+        }
+
+        if mime in _EXPORT_MIMES:
+            export_mime = _EXPORT_MIMES[mime]
+            def _export():
+                return drive.files().export_media(
+                    fileId=file_id, mimeType=export_mime,
+                ).execute()
+            try:
+                data = await self._retrying_execute(_export)
+            except HttpError as exc:
+                logger.error("drive.export_failed",
+                             file_id=file_id, mime=mime,
+                             error=str(exc))
+                raise
+            return {
+                "bytes": data if isinstance(data, (bytes, bytearray)) else bytes(data),
+                "name": meta.get("name"),
+                "mime_type": export_mime,
+                "size": len(data) if data else 0,
+                "original_mime_type": mime,
+            }
+
+        # Non-native: stream the raw bytes.
+        def _download():
+            return drive.files().get_media(fileId=file_id).execute()
+
+        try:
+            data = await self._retrying_execute(_download)
+        except HttpError as exc:
+            logger.error("drive.download_failed",
+                         file_id=file_id, mime=mime, error=str(exc))
+            raise
+        return {
+            "bytes": data if isinstance(data, (bytes, bytearray)) else bytes(data),
+            "name": meta.get("name"),
+            "mime_type": mime,
+            "size": int(meta.get("size") or len(data)),
+            "original_mime_type": mime,
+        }
+
+    async def list_drive_changes(
+        self,
+        *,
+        start_page_token: Optional[str] = None,
+        include_removed: bool = False,
+    ) -> Dict[str, Any]:
+        """Pull the Drive changes feed since `start_page_token`.
+
+        First call (no token): returns ``{"start_page_token": str}`` —
+        store this as the baseline. Subsequent calls with that token
+        return the changes (file added / modified / trashed) since the
+        baseline plus a new token.
+
+        Shape:
+            ``{ "changes": [Change], "next_page_token": Optional[str],
+                 "new_start_page_token": Optional[str] }``
+        """
+        drive = self._get_service(
+            "drive", "v3",
+            ["https://www.googleapis.com/auth/drive.readonly"],
+        )
+
+        if start_page_token is None:
+            def _seed():
+                return drive.changes().getStartPageToken().execute()
+            seed = await self._retrying_execute(_seed)
+            return {
+                "changes": [],
+                "next_page_token": None,
+                "new_start_page_token": seed.get("startPageToken"),
+            }
+
+        changes: List[Dict[str, Any]] = []
+        page_token = start_page_token
+        new_start: Optional[str] = None
+
+        while page_token:
+            def _call(token):
+                return drive.changes().list(
+                    pageToken=token,
+                    pageSize=100,
+                    includeRemoved=include_removed,
+                    fields="changes(fileId,removed,time,file(id,name,mimeType,modifiedTime,trashed)),nextPageToken,newStartPageToken",
+                ).execute()
+            page = await self._retrying_execute(_call, page_token)
+            changes.extend(page.get("changes", []) or [])
+            new_start = page.get("newStartPageToken") or new_start
+            page_token = page.get("nextPageToken")
+
+        return {
+            "changes": changes,
+            "next_page_token": None,
+            "new_start_page_token": new_start,
+        }
     
     # Google Sheets methods
     async def create_spreadsheet(self, title: str, data: List[List[Any]] = None, folder_id: str = None) -> Dict[str, Any]:

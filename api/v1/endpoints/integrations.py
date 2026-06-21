@@ -2,6 +2,7 @@ from typing import Any, List, Optional, Dict
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from pydantic import BaseModel, Field
 from datetime import datetime, timedelta
+import json
 import secrets
 import urllib.parse
 import aiohttp
@@ -101,8 +102,12 @@ OAUTH_PROVIDERS = {
         "scopes": [
             "https://www.googleapis.com/auth/calendar",
             "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/drive.readonly",
             "https://www.googleapis.com/auth/documents",
             "https://www.googleapis.com/auth/spreadsheets",
+            # Gmail read + send (read powers the autonomous morning brain).
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.modify",
             "https://www.googleapis.com/auth/gmail.send",
         ],
     },
@@ -130,18 +135,60 @@ OAUTH_PROVIDERS = {
     },
 }
 
-# In-memory store for pending OAuth states: { state_token: { user_id, provider, created_at } }
-_pending_oauth_states: Dict[str, Dict[str, Any]] = {}
-
 STATE_TTL_SECONDS = 600  # 10 minutes
 
 
-def _cleanup_expired_states():
-    """Remove expired states from the in-memory store."""
-    now = time.time()
-    expired = [k for k, v in _pending_oauth_states.items() if now - v["created_at"] > STATE_TTL_SECONDS]
-    for k in expired:
-        del _pending_oauth_states[k]
+class _OAuthStateStore:
+    """Redis-backed OAuth state store.
+
+    The state token guards against CSRF and replay. We persist it in Redis
+    (not in process memory) so the authorize and the callback can land on
+    different uvicorn workers, replicas, or VMs. TTL is server-side so
+    expired states evict automatically.
+
+    Key format: ``oauth:state:{token}`` → JSON ``{user_id, provider, created_at}``
+    """
+
+    _PREFIX = "oauth:state:"
+
+    @classmethod
+    def _key(cls, state: str) -> str:
+        return f"{cls._PREFIX}{state}"
+
+    @classmethod
+    async def put(cls, state: str, *, user_id: str, provider: str) -> None:
+        from backend.db.redis.redis import RedisClient
+        payload = json.dumps({
+            "user_id": user_id,
+            "provider": provider,
+            "created_at": time.time(),
+        })
+        await RedisClient.set(cls._key(state), payload, expire=STATE_TTL_SECONDS)
+
+    @classmethod
+    async def take(cls, state: str) -> Optional[Dict[str, Any]]:
+        """Atomically read + delete (single-use)."""
+        from backend.db.redis.redis import RedisClient
+        client = await RedisClient.get_client()
+        # GETDEL is atomic in Redis ≥ 6.2; falls back to GET + DELETE for safety.
+        try:
+            raw = await client.getdel(cls._key(state))
+        except Exception:
+            raw = await client.get(cls._key(state))
+            if raw:
+                await client.delete(cls._key(state))
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None
+
+
+# Backward-compatible no-op kept so any in-process callers (tests, scripts)
+# don't break. Redis handles expiry server-side.
+def _cleanup_expired_states() -> None:
+    return None
 
 
 def _get_oauth_client_credentials(provider: str) -> tuple[str, str]:
@@ -316,14 +363,8 @@ async def oauth_authorize(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    _cleanup_expired_states()
-
     state = secrets.token_urlsafe(32)
-    _pending_oauth_states[state] = {
-        "user_id": str(current_user.id),
-        "provider": provider,
-        "created_at": time.time(),
-    }
+    await _OAuthStateStore.put(state, user_id=str(current_user.id), provider=provider)
 
     provider_config = OAUTH_PROVIDERS[provider]
     redirect_uri = f"{settings.FRONTEND_URL}/integrations/oauth/callback"
@@ -361,9 +402,7 @@ async def oauth_callback(
     Exchange an OAuth authorization code for tokens and store them encrypted.
     Called by the frontend after the popup redirect.
     """
-    _cleanup_expired_states()
-
-    pending = _pending_oauth_states.pop(request.state, None)
+    pending = await _OAuthStateStore.take(request.state)
     if not pending:
         raise HTTPException(status_code=400, detail="Invalid or expired OAuth state. Please try again.")
     if pending["user_id"] != str(current_user.id):
