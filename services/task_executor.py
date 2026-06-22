@@ -60,6 +60,7 @@ def _agent_class_map():
     from backend.agents.data_analysis_agent import DataAnalysisAgent
     from backend.agents.translation_agent import TranslationAgent
     from backend.agents.general_agent import GeneralAgent
+    from backend.agents.brain_agent import BrainAgent
     try:
         from backend.agents.vision_agent import VisionAgent  # type: ignore
     except Exception:
@@ -86,6 +87,9 @@ def _agent_class_map():
         "data_analysis": DataAnalysisAgent,
         "translation": TranslationAgent,
         "general": GeneralAgent,
+        # Autonomous brain — daily prioritisation. Not surfaced to chat;
+        # invoked only by services/brain/nodes/prioritise.py.
+        "brain": BrainAgent,
     }
     if VisionAgent:
         mapping["vision"] = VisionAgent
