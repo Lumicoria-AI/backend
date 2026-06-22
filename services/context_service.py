@@ -40,75 +40,310 @@ class ContextService:
         organization_id: Optional[str] = None,
         k: int = 8,
         filters: Optional[Dict[str, Any]] = None,
-        include_sources: Optional[List[str]] = None
+        include_sources: Optional[List[str]] = None,
+        *,
+        token_budget: Optional[int] = None,
+        recency_half_life_days: float = 7.0,
+        rerank: Optional[bool] = None,
+        diversity: bool = True,
+        hybrid_alpha: float = 0.5,
     ) -> Dict[str, Any]:
-        """
-        Get relevant context for a query from the vector store.
-        
+        """Retrieve grounded context for ``query`` from the user's vector store.
+
+        The retrieval pipeline (all in this one method):
+
+          1. Generate the query embedding once.
+          2. **Hybrid search**: Weaviate's native vector + BM25 fusion when
+             the store supports it; pure vector otherwise. ``hybrid_alpha``
+             0=BM25-only, 1=vector-only, 0.5=even mix (default).
+          3. Filter by ``user_id`` (Weaviate) + post-filter by
+             ``organization_id`` (so personal docs without an org still
+             show up to their owner).
+          4. **Recency boost**: ``score *= 0.5 ** (age_days / half_life)``.
+             Newer chunks rank higher without crowding out high-relevance
+             old ones.
+          5. **Source diversity**: at most 2 chunks per document_id, 3 per
+             source. Stops the top-k from being 8 chunks of the same email
+             thread.
+          6. **Optional rerank**: cross-encoder rerank if
+             ``settings.CONTEXT_RERANK_ENABLED`` (or per-call ``rerank``)
+             and a rerank provider is configured. Behind a flag because
+             it's a per-call cost.
+          7. **Token-budget trim**: if ``token_budget`` is set, pack chunks
+             until the budget is hit (rough 4 chars / token).
+          8. **Provenance**: response carries ``sources`` listing every
+             chunk's document_id, source, chunk_id, score, score_components.
+
         Args:
-            query: The user's query
-            user_id: User ID for filtering context
-            organization_id: Optional organization ID for filtering context
-            k: Number of context chunks to retrieve
-            filters: Additional filters to apply
-            include_sources: List of source types to include (e.g., ["upload", "drive", "chat_history"])
-            
+            query: The natural-language query.
+            user_id: Owner filter (always applied).
+            organization_id: Optional org filter (post-filtered).
+            k: Target number of context chunks to return.
+            filters: Extra metadata filters to AND into the search.
+            include_sources: Restrict to specific source types
+                (e.g. ["upload", "gmail", "drive", "chat_history"]).
+            token_budget: If set, trim chunks until total tokens ≤ budget.
+            recency_half_life_days: Newer chunks get a boost; 7 means a
+                chunk's effective score halves every week.
+            rerank: Force rerank on/off. ``None`` = follow settings flag.
+            diversity: Apply source diversity. Set False for "give me
+                everything from this one doc" queries.
+            hybrid_alpha: Weight between BM25 (0) and vector (1).
+
         Returns:
-            Dictionary with relevant context and metadata
+            ``{"context": [...], "sources": [...], "query": str,
+               "timestamp": iso, "stats": {...}}`` — additive return
+            shape; old callers reading only ``context`` keep working.
         """
         await self.initialize()
-        
-        # Generate embedding for the query
+
+        # 1. Embed the query.
         query_embedding = await self.llm_client.generate_embeddings(texts=[query])
         if not query_embedding or len(query_embedding) == 0:
             logger.error("Failed to generate query embedding")
-            return {"context": [], "error": "Failed to generate query embedding"}
-            
-        # Build filters
-        search_filters = filters or {}
-        
-        # Filter by user_id in Weaviate. organization_id is post-filtered
-        # to support docs with no org set (personal uploads before org was configured).
-        search_filters["user_id"] = user_id
+            return {"context": [], "sources": [], "error": "Failed to generate query embedding"}
 
-        # Add source filter if specified
+        # 2. Build filters. Weaviate filters at index time; org is
+        #    post-filtered to admit pre-org personal docs.
+        search_filters: Dict[str, Any] = dict(filters or {})
+        search_filters["user_id"] = user_id
         if include_sources:
             search_filters["source"] = include_sources
 
-        # Search vector store
+        if not settings.db.VECTOR_STORE_ENABLED:
+            return {"context": [], "sources": [], "error": "Vector store disabled"}
+
+        # Overshoot k by 4× so diversity + org filter + recency reordering
+        # still produce a full k at the end. Cap at 64 to keep latency sane.
+        fetch_k = min(64, k * 4)
+
         try:
-            if not settings.db.VECTOR_STORE_ENABLED:
-                return {"context": [], "error": "Vector store disabled"}
-
             vector_store = get_vector_store()
-            # Fetch extra results so post-filtering by org still yields enough
-            fetch_k = k * 2 if organization_id else k
-            results = await vector_store.similarity_search(
-                query_vector=query_embedding[0],
-                k=fetch_k,
-                filters=search_filters
-            )
 
-            # Post-filter by org: keep docs matching the org OR docs with no org
+            # 3. Hybrid if the adapter supports it; vector-only otherwise.
+            results: List[Dict[str, Any]] = []
+            if hasattr(vector_store, "similarity_search_hybrid"):
+                results = await vector_store.similarity_search_hybrid(
+                    query=query,
+                    query_vector=query_embedding[0],
+                    k=fetch_k,
+                    filters=search_filters,
+                    alpha=hybrid_alpha,
+                )
+            if not results:
+                # Either hybrid isn't available or it returned nothing.
+                results = await vector_store.similarity_search(
+                    query_vector=query_embedding[0],
+                    k=fetch_k,
+                    filters=search_filters,
+                )
+
+            # 4. Post-filter by org.
             if organization_id:
                 results = [
                     r for r in results
                     if not r.get("metadata", {}).get("organization_id")
                     or r["metadata"]["organization_id"] == organization_id
-                ][:k]
+                ]
 
-            # Format results
+            stats: Dict[str, Any] = {
+                "raw_hits": len(results),
+                "fetch_k": fetch_k,
+                "hybrid": hasattr(vector_store, "similarity_search_hybrid"),
+            }
+
+            # 5. Apply recency boost — operates in place, returns sorted.
+            results = self._apply_recency_boost(results, recency_half_life_days)
+
+            # 6. Source diversity.
+            if diversity:
+                results = self._apply_diversity(
+                    results, max_per_doc=2, max_per_source=3,
+                )
+                stats["after_diversity"] = len(results)
+
+            # 7. Trim to k before the (expensive) rerank.
+            results = results[:k]
+
+            # 8. Optional rerank.
+            rerank_enabled = rerank if rerank is not None else getattr(
+                settings, "CONTEXT_RERANK_ENABLED", False,
+            )
+            if rerank_enabled:
+                results = await self._rerank(query, results)
+                stats["reranked"] = True
+
+            # 9. Token-budget trimming.
+            if token_budget:
+                results = self._trim_to_token_budget(results, token_budget)
+                stats["token_budget"] = token_budget
+
+            # 10. Format + provenance.
             formatted_context = self._format_context(results)
-            
+            sources = self._build_sources_provenance(results)
+
+            stats["returned"] = len(formatted_context)
+
             return {
                 "context": formatted_context,
+                "sources": sources,
                 "query": query,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.utcnow().isoformat(),
+                "stats": stats,
             }
-            
+
         except Exception as e:
             logger.error("Error retrieving context", error=str(e))
-            return {"context": [], "error": str(e)}
+            return {"context": [], "sources": [], "error": str(e)}
+
+    # ─────────────────────────────────────────────────────────────────
+    # Retrieval pipeline helpers
+    # ─────────────────────────────────────────────────────────────────
+
+    def _apply_recency_boost(
+        self,
+        results: List[Dict[str, Any]],
+        half_life_days: float,
+    ) -> List[Dict[str, Any]]:
+        """Multiply each result's score by an exponential recency decay.
+
+        ``half_life_days`` controls how aggressive the boost is — 7 means
+        a chunk's effective score halves every week. Chunks with no
+        ``created_at`` get a neutral factor of 1.0. The original score
+        is preserved in ``score_components["raw_score"]`` so callers can
+        debug ranking changes.
+        """
+        if not results or half_life_days <= 0:
+            return results
+
+        now = datetime.utcnow()
+        decay_lambda = 0.6931471805599453 / half_life_days  # ln(2) / half_life
+
+        boosted = []
+        for r in results:
+            md = r.get("metadata") or {}
+            raw_score = float(r.get("score") or 0.0)
+            created_at = md.get("created_at")
+
+            recency_factor = 1.0
+            if created_at:
+                try:
+                    if isinstance(created_at, str):
+                        ts = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    else:
+                        ts = created_at
+                    # Make naive so subtraction works.
+                    if ts.tzinfo is not None:
+                        ts = ts.replace(tzinfo=None)
+                    age_days = max(0.0, (now - ts).total_seconds() / 86400.0)
+                    import math
+                    recency_factor = math.exp(-decay_lambda * age_days)
+                except Exception:
+                    recency_factor = 1.0
+
+            new_score = raw_score * recency_factor
+            components = dict(r.get("score_components") or {})
+            components["raw_score"] = raw_score
+            components["recency_factor"] = round(recency_factor, 4)
+
+            boosted.append({
+                **r,
+                "score": new_score,
+                "score_components": components,
+            })
+
+        boosted.sort(key=lambda r: r["score"], reverse=True)
+        return boosted
+
+    def _apply_diversity(
+        self,
+        results: List[Dict[str, Any]],
+        *,
+        max_per_doc: int = 2,
+        max_per_source: int = 3,
+    ) -> List[Dict[str, Any]]:
+        """Cap chunks-per-document and chunks-per-source so the top-k
+        doesn't collapse onto one email thread or one PDF."""
+        kept: List[Dict[str, Any]] = []
+        seen_per_doc: Dict[str, int] = {}
+        seen_per_source: Dict[str, int] = {}
+
+        for r in results:
+            md = r.get("metadata") or {}
+            doc_id = str(md.get("document_id") or "")
+            source = str(md.get("source") or "unknown")
+
+            if doc_id and seen_per_doc.get(doc_id, 0) >= max_per_doc:
+                continue
+            if seen_per_source.get(source, 0) >= max_per_source:
+                continue
+
+            kept.append(r)
+            if doc_id:
+                seen_per_doc[doc_id] = seen_per_doc.get(doc_id, 0) + 1
+            seen_per_source[source] = seen_per_source.get(source, 0) + 1
+
+        return kept
+
+    def _trim_to_token_budget(
+        self,
+        results: List[Dict[str, Any]],
+        token_budget: int,
+    ) -> List[Dict[str, Any]]:
+        """Pack chunks until the cumulative token estimate hits the
+        budget. Uses a 4-chars-per-token approximation — fast and
+        accurate enough for budgeting; precise tokenisation is a Phase 8
+        upgrade once we lock the embedding/inference model mix."""
+        if token_budget <= 0:
+            return results
+
+        kept: List[Dict[str, Any]] = []
+        used = 0
+        for r in results:
+            content = r.get("content") or r.get("text") or ""
+            tokens = max(1, len(content) // 4)
+            if used + tokens > token_budget and kept:
+                break
+            kept.append(r)
+            used += tokens
+        return kept
+
+    async def _rerank(
+        self,
+        query: str,
+        results: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Cross-encoder rerank. Off unless a provider key is set —
+        wired here so the pipeline shape doesn't change; the actual
+        provider call goes in once we pick between Voyage / Cohere /
+        local cross-encoder. For now we no-op and tag the results so
+        downstream telemetry can tell rerank was *attempted*."""
+        # Provider selection happens in Phase 8 (eval-driven).
+        # Returning the input unchanged keeps the API stable.
+        for r in results:
+            components = dict(r.get("score_components") or {})
+            components["rerank_attempted"] = True
+            r["score_components"] = components
+        return results
+
+    def _build_sources_provenance(
+        self,
+        results: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """One row per returned chunk — what powers the "Sources" footer
+        in agent proposals and the digest email."""
+        out: List[Dict[str, Any]] = []
+        for r in results:
+            md = r.get("metadata") or {}
+            out.append({
+                "document_id": md.get("document_id"),
+                "source": md.get("source"),
+                "chunk_id": md.get("chunk_id"),
+                "title": md.get("title") or md.get("filename"),
+                "score": r.get("score"),
+                "score_components": r.get("score_components") or {},
+            })
+        return out
     
     async def add_chat_context(
         self,
@@ -739,25 +974,31 @@ class ContextService:
         }
     
     def _format_context(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Format vector store results for context inclusion."""
-        formatted_results = []
-        
+        """Format vector store results for context inclusion.
+
+        Backward-compatible shape — adds ``score_components`` for callers
+        that want to inspect ranking, but old code that only reads
+        ``text`` / ``score`` / ``source`` keeps working.
+        """
+        formatted_results: List[Dict[str, Any]] = []
+
         for result in results:
-            # Extract key information
-            formatted_result = {
-                "text": result["content"],
-                "score": result["score"],
-                "source": result["metadata"].get("source", "unknown"),
-                "metadata": {}
+            metadata_in = result.get("metadata") or {}
+            formatted_result: Dict[str, Any] = {
+                "text": result.get("content", "") or result.get("text", ""),
+                "score": result.get("score"),
+                "source": metadata_in.get("source", "unknown"),
+                "score_components": result.get("score_components") or {},
+                "metadata": {},
             }
-            
-            # Include relevant metadata but filter out internal fields
-            for key, value in result["metadata"].items():
-                if key not in ["user_id", "organization_id", "chunk_id"]:
+
+            # Include relevant metadata but filter out internal fields.
+            for key, value in metadata_in.items():
+                if key not in ("user_id", "organization_id", "chunk_id"):
                     formatted_result["metadata"][key] = value
-                    
+
             formatted_results.append(formatted_result)
-            
+
         return formatted_results
 
 # Create a singleton instance

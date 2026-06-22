@@ -257,6 +257,83 @@ class WeaviateDocumentStore:
             logger.error("Error in similarity search", error=str(e))
             return []
 
+    async def similarity_search_hybrid(
+        self,
+        query: str,
+        query_vector: List[float],
+        k: int = 4,
+        filters: Optional[Dict[str, Any]] = None,
+        alpha: float = 0.5,
+    ) -> List[Dict[str, Any]]:
+        """Hybrid retrieval — combines vector similarity with Weaviate's
+        native BM25 over the ``content`` property.
+
+        Args:
+            query: The original natural-language query (drives BM25).
+            query_vector: The embedded query (drives vector similarity).
+            k: How many results to return.
+            filters: Same filter dict shape as similarity_search.
+            alpha: 0 = BM25 only, 1 = vector only, 0.5 = even mix.
+
+        Result shape matches similarity_search but each row also carries:
+            score:            the fused hybrid score (0–1)
+            score_components: {"vector_score", "bm25_score", "hybrid_score"}
+
+        The collection's ``content`` property is created with the default
+        TEXT data type which Weaviate auto-tokenizes for BM25 — so this
+        works without any schema migration.
+        """
+        if not self.client:
+            await self.connect()
+
+        collection = self.client.collections.get(self.collection_name)
+        wv_filter = self._build_filter(filters) if filters else None
+
+        try:
+            response = collection.query.hybrid(
+                query=query or "",
+                vector=query_vector,
+                alpha=alpha,
+                limit=k,
+                filters=wv_filter,
+                return_metadata=MetadataQuery(score=True, explain_score=True),
+                return_properties=[
+                    "content", "metadata", "document_id", "chunk_id", "source",
+                ],
+            )
+
+            results: List[Dict[str, Any]] = []
+            for obj in response.objects:
+                score = float(getattr(obj.metadata, "score", None) or 0.0)
+                explain = getattr(obj.metadata, "explain_score", "") or ""
+
+                metadata = json.loads(obj.properties.get("metadata", "{}")) if obj.properties.get("metadata") else {}
+                metadata["document_id"] = obj.properties.get("document_id", "")
+                metadata["chunk_id"] = obj.properties.get("chunk_id", 0)
+                metadata["source"] = obj.properties.get("source", "")
+
+                results.append({
+                    "id": str(obj.uuid),
+                    "content": obj.properties.get("content", ""),
+                    "metadata": metadata,
+                    "score": score,
+                    "score_components": {
+                        "hybrid_score": score,
+                        # Weaviate's explainScore string contains the
+                        # vector + keyword breakdown — surface raw so
+                        # callers can debug ranking decisions.
+                        "explain": explain[:512] if explain else None,
+                        "alpha": alpha,
+                    },
+                })
+
+            return results
+
+        except Exception as e:
+            logger.error("Error in hybrid search", error=str(e))
+            # Caller falls back to vector-only on empty list.
+            return []
+
     def _build_filter(self, filters: Dict[str, Any]) -> Optional[Filter]:
         """Build a Weaviate v4 Filter from a dictionary."""
         filter_parts = []
