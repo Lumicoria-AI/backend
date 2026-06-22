@@ -111,6 +111,28 @@ async def fetch_gmail(state: BrainState) -> Dict[str, Any]:
 
     eval_score = len(emails) / len(id_refs) if id_refs else 1.0
 
+    # One rolled-up audit row — message IDs only, never subjects or
+    # bodies. The brain.email_read fan-out per-message would be too
+    # noisy; counts + IDs are enough for the audit feed.
+    try:
+        from backend.services.activity_logger import log_activity
+        await log_activity(
+            user_id=state.user_id,
+            organization_id=state.organization_id,
+            activity_type="brain.email_read",
+            details={
+                "run_id": state.run_id,
+                "count": len(emails),
+                "with_attachments": payload["with_attachments"],
+                "message_ids": [e.message_id for e in emails][:50],
+                "window_hours": hours_back,
+            },
+            related_resource_type="BRAIN_RUN",
+            related_resource_id=state.run_id,
+        )
+    except Exception:
+        pass
+
     return {
         "emails": emails,
         "__payload_summary": payload,

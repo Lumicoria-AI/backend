@@ -118,12 +118,17 @@ async def download_attachments(state: BrainState) -> Dict[str, Any]:
                 return None
 
             key = f"users/{state.user_id}/gmail/{msg_id}/{att_id}/{fname}"
+            # CMK-wrap before upload. The org_id is what scopes the
+            # encryption KEK — in personal mode we fall back to the
+            # user_id (same convention used elsewhere in the brain).
+            org_id_for_cmk = state.organization_id or state.user_id
             try:
                 from backend.services.storage_service import storage_service
-                await storage_service.upload(
+                upload_result = await storage_service.upload_encrypted(
+                    file_content=data,
                     key=key,
-                    data=data,
                     content_type=mime,
+                    organization_id=org_id_for_cmk,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
@@ -139,6 +144,7 @@ async def download_attachments(state: BrainState) -> Dict[str, Any]:
                 "mime_type": mime,
                 "size": len(data),
                 "minio_key": key,
+                "encrypted": bool(upload_result.get("encrypted")),
             }
 
     results = await asyncio.gather(*[_one(w) for w in work])
@@ -150,6 +156,29 @@ async def download_attachments(state: BrainState) -> Dict[str, Any]:
 
     eval_score = (len(blobs) / len(work)) if work else 1.0
 
+    # Per-attachment activity log — IDs only, never the bytes / filename
+    # content beyond the bucket key. Used by the org audit feed.
+    try:
+        from backend.services.activity_logger import log_activity
+        for b in blobs:
+            await log_activity(
+                user_id=state.user_id,
+                organization_id=state.organization_id,
+                activity_type="brain.attachment_ingested",
+                details={
+                    "run_id": state.run_id,
+                    "message_id": b.get("message_id"),
+                    "attachment_id": b.get("attachment_id"),
+                    "mime_type": b.get("mime_type"),
+                    "size": b.get("size"),
+                    "encrypted": bool(b.get("encrypted")),
+                },
+                related_resource_type="BRAIN_RUN",
+                related_resource_id=state.run_id,
+            )
+    except Exception:
+        pass
+
     return {
         "meta": new_meta,
         "__payload_summary": {
@@ -159,6 +188,7 @@ async def download_attachments(state: BrainState) -> Dict[str, Any]:
             "attempted": len(work),
             "downloaded": len(blobs),
             "skipped": len(work) - len(blobs),
+            "encrypted": sum(1 for b in blobs if b.get("encrypted")),
         },
         "__eval_score": round(eval_score, 3),
     }

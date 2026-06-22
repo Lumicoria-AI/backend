@@ -118,6 +118,28 @@ async def create_tasks(state: BrainState) -> Dict[str, Any]:
             tid = str(getattr(created, "id", "") or "")
             if tid:
                 created_ids.append(tid)
+                # One audit row per created task — title is the brain's
+                # extracted title (already filtered for PII by the
+                # classify + prioritise stages).
+                try:
+                    from backend.services.activity_logger import log_activity
+                    await log_activity(
+                        user_id=state.user_id,
+                        organization_id=state.organization_id,
+                        activity_type="brain.task_created",
+                        details={
+                            "run_id": state.run_id,
+                            "task_id": tid,
+                            "title": action.title[:120],
+                            "priority": action.priority,
+                            "assigned_to_agent": action.assigned_to_agent,
+                            "confidence": float(action.confidence or 0.0),
+                        },
+                        related_resource_type="TASK",
+                        related_resource_id=tid,
+                    )
+                except Exception:
+                    pass
             else:
                 failed += 1
         except Exception as exc:  # noqa: BLE001

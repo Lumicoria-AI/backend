@@ -335,6 +335,59 @@ class DualWriteStorageService:
                 return await asyncio.to_thread(self._secondary.download, key)
             raise
 
+    # -- Encrypted upload / download -----------------------------------------
+    #
+    # Wraps `upload_file` / `download_file` with `cmk_service.seal_bytes` /
+    # `unseal_bytes`. The brain pipeline writes Gmail attachments and (later)
+    # other confidential blobs through these — bytes at rest in MinIO + R2
+    # are AES-128-CBC-encrypted with a fresh per-blob DEK; the DEK is wrapped
+    # with the org's KEK and packed into a self-describing header on the
+    # blob itself. No sidecar metadata required.
+
+    async def upload_encrypted(
+        self,
+        file_content: bytes,
+        key: str,
+        content_type: str = "application/octet-stream",
+        *,
+        organization_id: str,
+    ) -> Dict[str, Any]:
+        """Encrypt with the org's KEK, then dual-write to MinIO + R2.
+
+        Returns the same shape as ``upload_file`` plus ``encrypted: True``
+        so callers / observability can tell which uploads are sealed.
+        """
+        from backend.services.cmk_service import seal_bytes
+
+        sealed = seal_bytes(file_content, organization_id=organization_id)
+        # When seal_bytes can't build a KEK (e.g. SECRET_KEY missing in
+        # a stripped test env) it returns the plaintext unchanged —
+        # `encrypted` reflects whether the bytes actually got sealed.
+        from backend.services.cmk_service import is_sealed
+        was_sealed = is_sealed(sealed)
+
+        result = await self.upload_file(
+            file_content=sealed,
+            key=key,
+            content_type=content_type,
+        )
+        result["encrypted"] = was_sealed
+        return result
+
+    async def download_decrypted(
+        self,
+        key: str,
+        *,
+        organization_id: str,
+    ) -> bytes:
+        """Download + unseal in one call. Falls back to plaintext-return
+        when the bytes don't carry the LMCR magic header — so legacy
+        uploads written before Phase 6 still read cleanly."""
+        from backend.services.cmk_service import unseal_bytes
+
+        sealed = await self.download_file(key=key)
+        return unseal_bytes(sealed, organization_id=organization_id)
+
     # -- Delete --------------------------------------------------------------
 
     async def delete_file(self, key: str) -> bool:

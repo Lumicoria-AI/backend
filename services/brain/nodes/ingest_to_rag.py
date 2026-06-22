@@ -104,10 +104,15 @@ async def ingest_to_rag(state: BrainState) -> Dict[str, Any]:
         async with sem:
             try:
                 from backend.services.storage_service import storage_service
-                # storage_service exposes get/get_object — call the
-                # configured download method. Falls back to presigned URL
-                # if no direct accessor exists.
-                data = await _download_blob_bytes(storage_service, blob["minio_key"])
+                # CMK-unseal on the way back in. The same org_id we used
+                # on upload scopes the KEK lookup. download_decrypted
+                # falls through cleanly on plaintext blobs (no header)
+                # so legacy uploads also work.
+                org_id_for_cmk = state.organization_id or state.user_id
+                data = await storage_service.download_decrypted(
+                    key=blob["minio_key"],
+                    organization_id=org_id_for_cmk,
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "ingest_to_rag.blob_download_failed",
@@ -242,22 +247,3 @@ def _email_body_text(m) -> str:
 def _suffix_from_filename(name: str) -> str:
     ext = os.path.splitext(name or "")[1].lower()
     return ext or ".bin"
-
-
-async def _download_blob_bytes(storage_service, key: str) -> bytes | None:
-    """Fetch the MinIO object back as raw bytes. The storage_service
-    interface varies across implementations — we try the most common
-    accessor names in order."""
-    for method in ("get_object", "get", "download"):
-        fn = getattr(storage_service, method, None)
-        if fn is None:
-            continue
-        try:
-            res = await fn(key)
-            if isinstance(res, (bytes, bytearray)):
-                return bytes(res)
-            if isinstance(res, dict) and "bytes" in res:
-                return res["bytes"]
-        except Exception:
-            continue
-    return None
