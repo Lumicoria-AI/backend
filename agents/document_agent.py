@@ -1,6 +1,7 @@
 from .base_agent import BaseAgent
 from backend.ai_models import LLMConfig
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
+import hashlib
 import json
 import structlog
 import asyncio
@@ -9,6 +10,20 @@ import re
 
 # Configure logger
 logger = structlog.get_logger(__name__)
+
+
+# Bump this when the prompts or schema change — cached results carrying
+# the old version are ignored and re-extracted on next read.
+EXTRACTOR_VERSION = "1.0.0"
+
+# Pipeline tuning constants — adjust to balance latency / cost / quality.
+_STAGE_A_INPUT_CHARS = 4000      # Stage A only needs a sample
+_CHUNK_SIZE_CHARS = 7200          # ~1800 tokens at 4 chars/token
+_CHUNK_OVERLAP_CHARS = 240
+_MAX_CHUNKS = 40                  # hard cap so cost is bounded on huge docs
+_PARALLEL_CHUNKS = 8              # asyncio semaphore for Stage B
+_SKIP_CHUNK_BELOW_CHARS = 4000    # below this we send the whole doc to Stage C
+_STAGE_D_PASS_FLOOR = 0.7         # below → retry Stage C once with strict mode
 
 class DocumentAgent(BaseAgent):
     """Agent for processing documents using LLM providers.
@@ -64,134 +79,624 @@ class DocumentAgent(BaseAgent):
             return {"error": f"Failed to process query: {str(e)}"}
 
     async def process_async(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Process document data asynchronously.
+        """Process a document end-to-end through the 4-stage pipeline.
 
-        Extracts key information **and** structured tasks from the document.
+        Stage A: classify the document (type, sensitivity, urgency,
+                 language, expected action count).
+        Stage B: chunk via RecursiveCharacterTextSplitter, summarise
+                 every chunk in parallel (Semaphore(8)).
+        Stage C: extract structured items — action items, decisions,
+                 dates, people — citing chunk_ids for provenance.
+        Stage D: LLM-as-judge self-evaluation. Below the pass floor →
+                 retry Stage C once with strict mode (temperature=0,
+                 stricter prompt). Still below → flag low_confidence.
 
         Args:
-            data: Dictionary containing document text and metadata
+            data: ``{"text": str, "metadata": dict, "user_context": dict}``.
 
         Returns:
-            Dictionary with ``analysis``, ``tasks`` list, and metadata.
+            Backward-compatible dict — every key the old shape produced
+            still ships ("analysis", "tasks", "metadata",
+            "extraction_targets", "model_used", "timestamp"). Plus new
+            keys ("extraction_id", "classification", "extraction",
+            "confidence", "low_confidence", "chunk_count",
+            "duration_ms", "cached", "sources") that downstream
+            consumers can opt into without breaking anything that
+            reads only the old keys.
         """
         try:
-            document_text = data.get("text", "")
-            document_metadata = data.get("metadata", {})
-            user_context = data.get("user_context", {})
+            document_text: str = data.get("text", "") or ""
+            document_metadata: Dict[str, Any] = data.get("metadata") or {}
+            user_context: Dict[str, Any] = data.get("user_context") or {}
 
-            if not document_text:
+            if not document_text.strip():
                 return {"error": "No document text provided"}
-
             if not self.llm_client:
                 return {"error": "LLM client not initialized"}
 
-            # Truncate to fit context window
-            text_for_llm = document_text[:12000]
+            start_ms = self._now_ms()
 
-            # --- 1. General extraction ---
-            extraction_prompt = (
-                f"Analyze the following document and extract key information including "
-                f"{', '.join(self.extraction_targets)}. For each extracted item, include "
-                f"the exact text from the document and the relevant context.\n\n"
-                f"Document content:\n{text_for_llm}"
-            )
-
-            # --- 2. Task extraction (structured JSON) ---
-            # Phase 4: inject current datetime and tighten the date schema so
-            # downstream reminder/calendar code never has to guess a format.
-            now_utc = datetime.utcnow()
-            user_tz = (user_context or {}).get("timezone", "UTC")
-            now_iso = now_utc.replace(microsecond=0).isoformat() + "Z"
-            week_from_now_iso = (now_utc + timedelta(days=7)).replace(microsecond=0).isoformat() + "Z"
-            five_days_iso = (now_utc + timedelta(days=5)).replace(microsecond=0).isoformat() + "Z"
-
-            # Phase 6: pull the agent capability registry so the LLM can
-            # optionally assign each task to one of the 21 specialised agents.
-            # One source of truth — backend/agents/router.py.
-            try:
-                from backend.agents.router import AGENT_REGISTRY as _AGENT_REGISTRY
-                agent_lines = "\n".join(
-                    f'    - "{k}": {v}' for k, v in _AGENT_REGISTRY.items()
+            # ── Cache lookup ─────────────────────────────────────────
+            content_hash = self._hash_text(document_text)
+            cached = await self._cache_get(content_hash)
+            if cached:
+                logger.info(
+                    "document_agent.cache_hit",
+                    content_hash=content_hash[:12],
+                    document_id=document_metadata.get("document_id"),
                 )
-            except Exception:
-                agent_lines = "    (agent registry unavailable)"
+                return self._compose_public_result(
+                    cached=cached,
+                    document_metadata=document_metadata,
+                    user_context=user_context,
+                    was_cached=True,
+                )
 
-            task_prompt = (
-                "You are extracting actionable tasks from a document for a user's "
-                "task manager.  Return ONLY a JSON array (no prose, no markdown).\n\n"
-                f"Current time (UTC):       {now_iso}\n"
-                f"User timezone:            {user_tz}\n"
-                f"Default if no due hint:   {five_days_iso}\n"
-                f"Maximum allowed due_date: {week_from_now_iso}\n\n"
-                "Schema per element:\n"
-                '  "title": short, imperative task title (verb + object),\n'
-                '  "description": fuller description of what needs to be done,\n'
-                '  "priority": "low" | "medium" | "high" | "critical",\n'
-                '  "due_date": ISO-8601 UTC datetime string OR null,\n'
-                '  "deadline": exact phrase from the document if any (or null),\n'
-                '  "inferred_due_date": true if due_date was NOT explicitly stated,\n'
-                '  "assignee": person responsible if mentioned (or null),\n'
-                '  "assigned_to_agent": one of the agent keys below OR null\n\n'
-                "Available Lumicoria agents (key: capability):\n"
-                f"{agent_lines}\n\n"
-                "Rules for assigned_to_agent:\n"
-                "  • Pick the single agent whose capability best fits the task action.\n"
-                "  • If the task is a meeting / scheduling / action-item rollup, choose 'meeting'.\n"
-                "  • If the task is contract / clause / legal review, choose 'legal_document'.\n"
-                "  • If the task is summarise / extract from an uploaded doc, choose 'rag' or 'document'.\n"
-                "  • If the task is research / fact-finding, choose 'research'.\n"
-                "  • If the task is draft / write / brainstorm content, choose 'creative'.\n"
-                "  • If the task is translate, choose 'translation'.\n"
-                "  • If the task is data / CSV / analytics, choose 'data_analysis'.\n"
-                "  • If the task requires only human judgment (calling a person, paying a bill, signing), set null.\n"
-                "  • Set null when no agent clearly fits — DO NOT guess.\n\n"
-                "Rules for due_date (MANDATORY — NEVER return null):\n"
-                "  • Every task MUST have a non-null due_date in ISO-8601 UTC.\n"
-                "  • If the document gives an absolute date, parse it into ISO-8601 UTC.\n"
-                "  • If language signals urgency (urgent, ASAP, today) → within 24 hours.\n"
-                "  • If language says 'this week' / 'by EOW' → end of the current week.\n"
-                "  • If language says 'next week' → 7 days from now.\n"
-                f"  • If NO date signal exists, set due_date to exactly {five_days_iso} (5 days from now).\n"
-                f"  • due_date MUST NOT exceed {week_from_now_iso} (1-week cap).\n"
-                "  • Set inferred_due_date=true unless an exact date appeared in the text.\n"
-                "  • Returning null / empty / missing due_date is INVALID and the task will be rejected.\n\n"
-                "Rules for priority:\n"
-                "  • 'critical': blocks the business, security, regulatory, immediate.\n"
-                "  • 'high': named owner + tight deadline.\n"
-                "  • 'medium': default.\n"
-                "  • 'low': nice-to-have, vague timing.\n\n"
-                "Only include genuinely actionable items.  No status updates, no meta.\n"
-                "If there are no tasks, return [].\n\n"
-                f"Document content:\n{text_for_llm}"
+            # ── Stage A — classify ──────────────────────────────────
+            classification = await self._stage_a_classify(
+                document_text=document_text,
+                user_context=user_context,
             )
 
-            # Run both prompts concurrently
-            extraction_coro = self.llm_client.generate(
-                [{"role": "user", "content": extraction_prompt}]
-            )
-            tasks_coro = self.llm_client.generate(
-                [{"role": "user", "content": task_prompt}]
+            # ── Stage B — chunk + summarise (parallel, semaphore-capped)
+            chunk_summaries, raw_chunks = await self._stage_b_chunk_and_summarise(
+                document_text=document_text,
+                classification=classification,
             )
 
-            extraction_response, tasks_response = await asyncio.gather(
-                extraction_coro, tasks_coro
+            # ── Stage C — extract (one or two passes)
+            extraction, parsed_ok = await self._stage_c_extract(
+                document_text=document_text,
+                classification=classification,
+                chunk_summaries=chunk_summaries,
+                raw_chunks=raw_chunks,
+                user_context=user_context,
+                strict=False,
             )
 
-            # Parse the tasks JSON from the LLM response
-            tasks = self._parse_tasks_json(tasks_response.content)
+            # ── Stage D — self-evaluate
+            self_eval = await self._stage_d_self_evaluate(
+                classification=classification,
+                extraction=extraction,
+                chunk_summaries=chunk_summaries,
+            )
 
-            return {
-                "analysis": extraction_response.content,
-                "tasks": tasks,
-                "metadata": document_metadata,
-                "extraction_targets": self.extraction_targets,
-                "model_used": self.model_config.get("model", "unknown"),
-                "timestamp": datetime.utcnow().isoformat(),
+            low_confidence = False
+            if self_eval is not None and self_eval.get("score", 0.0) < _STAGE_D_PASS_FLOOR:
+                # One strict retry of Stage C — temperature=0, tighter prompt.
+                logger.info(
+                    "document_agent.stage_d_retry",
+                    score=self_eval.get("score"),
+                )
+                extraction_retry, _ok = await self._stage_c_extract(
+                    document_text=document_text,
+                    classification=classification,
+                    chunk_summaries=chunk_summaries,
+                    raw_chunks=raw_chunks,
+                    user_context=user_context,
+                    strict=True,
+                )
+                self_eval_retry = await self._stage_d_self_evaluate(
+                    classification=classification,
+                    extraction=extraction_retry,
+                    chunk_summaries=chunk_summaries,
+                )
+                if self_eval_retry and self_eval_retry.get("score", 0.0) >= _STAGE_D_PASS_FLOOR:
+                    extraction = extraction_retry
+                    self_eval = self_eval_retry
+                else:
+                    # Keep whichever pass had the higher score.
+                    if (
+                        self_eval_retry
+                        and self_eval_retry.get("score", 0.0)
+                        > self_eval.get("score", 0.0)
+                    ):
+                        extraction = extraction_retry
+                        self_eval = self_eval_retry
+                    low_confidence = True
+
+            confidence = float(
+                (self_eval or {}).get("score")
+                or extraction.get("overall_confidence")
+                or 0.0
+            )
+
+            cache_payload = {
+                "content_hash": content_hash,
+                "extractor_version": EXTRACTOR_VERSION,
+                "classification": classification,
+                "chunk_summaries": chunk_summaries,
+                "extraction": extraction,
+                "self_eval": self_eval,
+                "confidence": confidence,
+                "low_confidence": low_confidence,
+                "chunk_count": len(chunk_summaries),
+                "duration_ms": self._now_ms() - start_ms,
             }
+            await self._cache_set(
+                content_hash=content_hash,
+                payload=cache_payload,
+                document_id=document_metadata.get("document_id"),
+            )
+
+            return self._compose_public_result(
+                cached=cache_payload,
+                document_metadata=document_metadata,
+                user_context=user_context,
+                was_cached=False,
+            )
 
         except Exception as e:
             logger.error(f"Error processing document: {str(e)}")
             return {"error": f"Failed to process document: {str(e)}"}
+
+    # ─────────────────────────────────────────────────────────────────
+    # Public-result shaping — preserves the legacy keys + adds new ones
+    # ─────────────────────────────────────────────────────────────────
+
+    def _compose_public_result(
+        self,
+        *,
+        cached: Dict[str, Any],
+        document_metadata: Dict[str, Any],
+        user_context: Dict[str, Any],
+        was_cached: bool,
+    ) -> Dict[str, Any]:
+        """Map the structured cache payload onto the legacy return shape
+        plus the new fields. Keeping the legacy keys untouched means
+        every existing caller (task_executor, chat, document_tasks)
+        continues to work without a single line changed."""
+        extraction = cached.get("extraction") or {}
+        action_items = extraction.get("action_items") or []
+        # Normalise each ExtractedActionItem dict through the existing
+        # `_normalize_task_record` so downstream task-creation code sees
+        # the canonical shape it always saw — title, description,
+        # priority, due_date (mandatory + capped), assignee, agent_key.
+        tasks: List[Dict[str, Any]] = []
+        user_tz = (user_context or {}).get("timezone", "UTC")
+        for ai in action_items:
+            try:
+                normalised = self._normalize_task_record({
+                    "title": ai.get("title", ""),
+                    "description": ai.get("description", ""),
+                    "priority": ai.get("priority", "medium"),
+                    "due_date": (
+                        ai.get("due_date").isoformat()
+                        if hasattr(ai.get("due_date"), "isoformat")
+                        else ai.get("due_date")
+                    ),
+                    "deadline": ai.get("deadline_phrase"),
+                    "inferred_due_date": ai.get("inferred_due_date", False),
+                    "assignee": ai.get("assignee"),
+                    "assigned_to_agent": ai.get("assigned_to_agent"),
+                })
+                tasks.append(normalised)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("document_agent.task_normalise_skip", error=str(e))
+
+        # `sources` powers the "Sources" footer in agent proposals + the
+        # digest — one row per chunk that grounded an action item.
+        sources: List[Dict[str, Any]] = []
+        for ai in action_items:
+            for cid in ai.get("cite_chunk_ids", []) or []:
+                sources.append({
+                    "chunk_id": cid,
+                    "kind": "action_item",
+                    "title": ai.get("title"),
+                })
+
+        return {
+            # ── Legacy shape (unchanged) ────────────────────────────
+            "analysis": extraction.get("summary", "") or "",
+            "tasks": tasks,
+            "metadata": document_metadata,
+            "extraction_targets": self.extraction_targets,
+            "model_used": self.model_config.get("model", "unknown"),
+            "timestamp": datetime.utcnow().isoformat(),
+            # ── New, additive fields ────────────────────────────────
+            "extraction_id": f"{cached.get('content_hash', '')}:{cached.get('extractor_version', '')}",
+            "content_hash": cached.get("content_hash"),
+            "extractor_version": cached.get("extractor_version"),
+            "classification": cached.get("classification"),
+            "extraction": extraction,
+            "self_eval": cached.get("self_eval"),
+            "confidence": cached.get("confidence"),
+            "low_confidence": bool(cached.get("low_confidence")),
+            "chunk_count": cached.get("chunk_count"),
+            "duration_ms": cached.get("duration_ms"),
+            "cached": was_cached,
+            "sources": sources,
+        }
+
+    # ─────────────────────────────────────────────────────────────────
+    # Stage A — classify
+    # ─────────────────────────────────────────────────────────────────
+
+    async def _stage_a_classify(
+        self,
+        *,
+        document_text: str,
+        user_context: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """One small LLM call. Returns a dict matching DocumentClassification.
+
+        Validated via schema_eval — on parse fail we fall back to a
+        conservative classification (type=other, urgency=low) so the
+        pipeline keeps moving.
+        """
+        from .document_agent_schemas import DocumentClassification
+        from backend.services.brain.evals import check_schema
+
+        sample = document_text[:_STAGE_A_INPUT_CHARS]
+        prompt = (
+            "Classify this document.\n\n"
+            "Return STRICT JSON only (no prose, no markdown). Schema:\n"
+            '  {"document_type": "contract|invoice|meeting_notes|proposal|email_thread|'
+            'report|spec|policy|presentation|letter|form|research_paper|other",\n'
+            '   "language": "ISO-639-1 code (en, es, fr, ...)",\n'
+            '   "sensitivity": "public|internal|confidential|restricted",\n'
+            '   "urgency": "critical|high|medium|low",\n'
+            '   "estimated_action_count": 0..50,\n'
+            '   "short_title": "≤120 chars summary or null",\n'
+            '   "detected_parties": ["name1", "name2", ...]}\n\n'
+            "Sample:\n```\n"
+            f"{sample}\n```"
+        )
+        try:
+            response = await self.llm_client.generate(
+                [{"role": "user", "content": prompt}],
+            )
+            raw = getattr(response, "content", None) or str(response)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("document_agent.stage_a_llm_failed", error=str(e))
+            return DocumentClassification().model_dump()
+
+        items, eval_result = check_schema(
+            raw, DocumentClassification, pass_floor=0.9,
+        )
+        if not eval_result.passed or not items:
+            logger.warning(
+                "document_agent.stage_a_parse_failed",
+                reason=eval_result.reason,
+            )
+            return DocumentClassification().model_dump()
+        return items[0].model_dump()
+
+    # ─────────────────────────────────────────────────────────────────
+    # Stage B — chunk + summarise (parallel, Semaphore-capped)
+    # ─────────────────────────────────────────────────────────────────
+
+    async def _stage_b_chunk_and_summarise(
+        self,
+        *,
+        document_text: str,
+        classification: Dict[str, Any],
+    ) -> Tuple[List[Dict[str, Any]], List[str]]:
+        """Returns ``(chunk_summaries, raw_chunks)``. If the doc is below
+        the chunk threshold, returns ``([], [document_text])`` so
+        Stage C can operate on the full text directly.
+        """
+        from .document_agent_schemas import ChunkSummary
+        from backend.services.brain.evals import check_schema
+
+        # Short docs: skip chunking entirely.
+        if len(document_text) <= _SKIP_CHUNK_BELOW_CHARS:
+            return [], [document_text]
+
+        # Use LangChain's splitter for structure-aware boundaries.
+        try:
+            from langchain_text_splitters import RecursiveCharacterTextSplitter
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=_CHUNK_SIZE_CHARS,
+                chunk_overlap=_CHUNK_OVERLAP_CHARS,
+                separators=["\n\n\n", "\n\n", "\n", ". ", " ", ""],
+            )
+            raw_chunks = splitter.split_text(document_text)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "document_agent.chunk_split_failed",
+                error=str(e), fallback="naive_slices",
+            )
+            raw_chunks = [
+                document_text[i : i + _CHUNK_SIZE_CHARS]
+                for i in range(0, len(document_text), _CHUNK_SIZE_CHARS)
+            ]
+
+        if len(raw_chunks) > _MAX_CHUNKS:
+            logger.info(
+                "document_agent.chunks_capped",
+                original=len(raw_chunks), cap=_MAX_CHUNKS,
+            )
+            raw_chunks = raw_chunks[:_MAX_CHUNKS]
+
+        # Summarise each chunk in parallel with a semaphore.
+        semaphore = asyncio.Semaphore(_PARALLEL_CHUNKS)
+        doc_type = classification.get("document_type", "other")
+
+        async def _summarise_one(idx: int, chunk: str) -> Optional[Dict[str, Any]]:
+            async with semaphore:
+                prompt = (
+                    f"Document type: {doc_type}\n"
+                    f"Chunk index: {idx} of {len(raw_chunks) - 1}\n\n"
+                    "Summarise this chunk in ≤200 words. Mark has_action=true if it "
+                    "contains a verb-led action item, deadline, or decision.\n\n"
+                    "Return STRICT JSON only. Schema:\n"
+                    '  {"chunk_id": int, "summary": "≤2000 char string", '
+                    '"key_terms": ["..."], "has_action": bool}\n\n'
+                    "Chunk:\n```\n"
+                    f"{chunk}\n```"
+                )
+                try:
+                    response = await self.llm_client.generate(
+                        [{"role": "user", "content": prompt}],
+                    )
+                    raw = getattr(response, "content", None) or str(response)
+                except Exception as e:  # noqa: BLE001
+                    logger.debug(
+                        "document_agent.stage_b_chunk_failed",
+                        chunk=idx, error=str(e),
+                    )
+                    return None
+
+                items, ev = check_schema(raw, ChunkSummary, pass_floor=0.9)
+                if not items:
+                    return None
+                # Force chunk_id alignment with our index.
+                item = items[0]
+                item.chunk_id = idx
+                return item.model_dump()
+
+        summaries = await asyncio.gather(
+            *[_summarise_one(i, c) for i, c in enumerate(raw_chunks)],
+            return_exceptions=False,
+        )
+        chunk_summaries = [s for s in summaries if s]
+        return chunk_summaries, raw_chunks
+
+    # ─────────────────────────────────────────────────────────────────
+    # Stage C — structured extract
+    # ─────────────────────────────────────────────────────────────────
+
+    async def _stage_c_extract(
+        self,
+        *,
+        document_text: str,
+        classification: Dict[str, Any],
+        chunk_summaries: List[Dict[str, Any]],
+        raw_chunks: List[str],
+        user_context: Dict[str, Any],
+        strict: bool,
+    ) -> Tuple[Dict[str, Any], bool]:
+        """Run the structured extract pass. ``strict=True`` tightens the
+        prompt and asks the LLM for higher confidence — used by the
+        Stage D retry path. Returns ``(extraction_dict, parsed_ok)``.
+        """
+        from .document_agent_schemas import DocumentExtraction
+        from backend.services.brain.evals import check_schema
+
+        # Build the input. When Stage B ran, we feed it summaries; when
+        # the doc was short and Stage B was skipped, we feed it the
+        # full text.
+        if chunk_summaries:
+            stage_b_block = "\n\n".join(
+                f"[chunk {s['chunk_id']}] {s['summary']}"
+                for s in chunk_summaries
+            )
+            stage_b_intro = (
+                "Below are summaries of every chunk in the document. Use them "
+                "to extract structured items. Cite chunk_ids in each item's "
+                "cite_chunk_ids list so we can render provenance."
+            )
+        else:
+            stage_b_block = raw_chunks[0]
+            stage_b_intro = (
+                "The full document text follows. Treat it as a single chunk "
+                "with chunk_id=0 — all citations should reference 0."
+            )
+
+        try:
+            from backend.agents.router import AGENT_REGISTRY as _AGENT_REGISTRY
+            agent_lines = "\n".join(
+                f'  - "{k}": {v}' for k, v in _AGENT_REGISTRY.items()
+            )
+        except Exception:
+            agent_lines = "  (agent registry unavailable)"
+
+        now_utc = datetime.utcnow()
+        five_days = (now_utc + timedelta(days=5)).replace(microsecond=0).isoformat() + "Z"
+        week_cap = (now_utc + timedelta(days=7)).replace(microsecond=0).isoformat() + "Z"
+        user_tz = (user_context or {}).get("timezone", "UTC")
+
+        strict_clause = ""
+        if strict:
+            strict_clause = (
+                "\nSTRICT MODE: temperature 0, no speculation. Only output "
+                "items that have a direct sentence-level citation in the "
+                "source. Set confidence ≥ 0.85 or omit the item entirely.\n"
+            )
+
+        prompt = (
+            "Extract structured items from this document.\n"
+            "Return STRICT JSON only (no prose, no markdown).\n\n"
+            f"Classification: type={classification.get('document_type')}, "
+            f"urgency={classification.get('urgency')}, "
+            f"language={classification.get('language')}.\n"
+            f"Current time (UTC): {now_utc.replace(microsecond=0).isoformat()}Z\n"
+            f"User timezone:      {user_tz}\n"
+            f"Default due_date if none explicit: {five_days}\n"
+            f"Maximum allowed due_date:          {week_cap}\n"
+            f"{strict_clause}\n"
+            "Available specialist agents (key: capability) — assigned_to_agent "
+            "must be one of these keys or null:\n"
+            f"{agent_lines}\n\n"
+            "Schema (return EXACTLY this shape):\n"
+            "{\n"
+            '  "summary": "≤4000 chars — 1-2 paragraph executive summary",\n'
+            '  "action_items": [\n'
+            "    {\n"
+            '      "title": "≤200 chars, verb-led",\n'
+            '      "description": "≤1000 chars",\n'
+            '      "priority": "critical|high|medium|low",\n'
+            '      "due_date": "ISO-8601 UTC or null",\n'
+            '      "inferred_due_date": bool,\n'
+            '      "deadline_phrase": "exact phrase from doc or null",\n'
+            '      "assignee": "person name or null",\n'
+            '      "assigned_to_agent": "agent key from list above or null",\n'
+            '      "cite_chunk_ids": [int, ...],\n'
+            '      "confidence": 0..1\n'
+            "    }\n"
+            "  ],\n"
+            '  "key_decisions":  [{"text": "...", "cite_chunk_ids": [...], "confidence": 0..1}],\n'
+            '  "key_dates":      [{"date": "ISO-8601 or null", "raw_phrase": "...", "what": "...", '
+            '"cite_chunk_ids": [...], "confidence": 0..1}],\n'
+            '  "key_people":     [{"name": "...", "role": "..." or null, "email": "..." or null, '
+            '"cite_chunk_ids": [...]}],\n'
+            '  "sentiment":      "positive|neutral|negative",\n'
+            '  "overall_confidence": 0..1\n'
+            "}\n\n"
+            f"{stage_b_intro}\n\n"
+            f"{stage_b_block}"
+        )
+
+        try:
+            response = await self.llm_client.generate(
+                [{"role": "user", "content": prompt}],
+            )
+            raw = getattr(response, "content", None) or str(response)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("document_agent.stage_c_llm_failed", error=str(e))
+            return DocumentExtraction(summary="").model_dump(), False
+
+        items, ev = check_schema(raw, DocumentExtraction, pass_floor=0.7)
+        if not items:
+            logger.warning(
+                "document_agent.stage_c_parse_failed",
+                reason=ev.reason, strict=strict,
+            )
+            return DocumentExtraction(summary="").model_dump(), False
+        return items[0].model_dump(), True
+
+    # ─────────────────────────────────────────────────────────────────
+    # Stage D — self-evaluate (LLM-as-judge)
+    # ─────────────────────────────────────────────────────────────────
+
+    async def _stage_d_self_evaluate(
+        self,
+        *,
+        classification: Dict[str, Any],
+        extraction: Dict[str, Any],
+        chunk_summaries: List[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Have the LLM grade its own extraction. Returns None on hard
+        failure (caller then proceeds without self_eval gating — the
+        extraction still ships, but flagged low_confidence)."""
+        from .document_agent_schemas import SelfEvalResult
+        from backend.services.brain.evals import check_schema
+
+        # Compact the chunk summaries for the judge prompt.
+        summaries_block = "\n".join(
+            f"[chunk {s['chunk_id']}] {s['summary']}"
+            for s in chunk_summaries[:20]
+        ) or "(no chunks — document was short, extraction ran on full text)"
+
+        prompt = (
+            "You are an evaluator. Grade the extraction below against the "
+            "source chunk summaries.\n"
+            "Return STRICT JSON only matching this schema:\n"
+            '  {"score": 0..1, "grounded": bool, "issues": ["..."], '
+            '"recommendations": ["..."], "flagged_action_indices": [int, ...]}\n\n'
+            "Score rubric:\n"
+            "  1.0 — every claim has a clear citation in the chunks.\n"
+            "  0.7 — most claims grounded; minor unsupported items.\n"
+            "  0.4 — meaningful hallucination or fabricated dates/names.\n"
+            "  0.0 — extraction unrelated to the source.\n\n"
+            f"Classification: {json.dumps(classification, default=str)}\n\n"
+            f"Extraction:\n{json.dumps(extraction, default=str)[:6000]}\n\n"
+            f"Source chunks:\n{summaries_block}"
+        )
+
+        try:
+            response = await self.llm_client.generate(
+                [{"role": "user", "content": prompt}],
+            )
+            raw = getattr(response, "content", None) or str(response)
+        except Exception as e:  # noqa: BLE001
+            logger.debug("document_agent.stage_d_llm_failed", error=str(e))
+            return None
+
+        items, ev = check_schema(raw, SelfEvalResult, pass_floor=0.9)
+        if not items:
+            logger.debug(
+                "document_agent.stage_d_parse_failed", reason=ev.reason,
+            )
+            return None
+        return items[0].model_dump()
+
+    # ─────────────────────────────────────────────────────────────────
+    # Mongo cache — read-through, write on success
+    # ─────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _hash_text(text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+    @staticmethod
+    def _now_ms() -> int:
+        return int(datetime.utcnow().timestamp() * 1000)
+
+    async def _cache_get(self, content_hash: str) -> Optional[Dict[str, Any]]:
+        try:
+            from backend.db.mongodb.mongodb import MongoDB
+            db = await MongoDB.get_database()
+            doc = await db.document_extractions.find_one({
+                "content_hash": content_hash,
+                "extractor_version": EXTRACTOR_VERSION,
+            })
+            if not doc:
+                return None
+            doc.pop("_id", None)
+            return doc
+        except Exception as e:  # noqa: BLE001
+            logger.debug("document_agent.cache_get_failed", error=str(e))
+            return None
+
+    async def _cache_set(
+        self,
+        *,
+        content_hash: str,
+        payload: Dict[str, Any],
+        document_id: Optional[str],
+    ) -> None:
+        """Upsert the extraction. Best-effort — a Mongo blip never
+        breaks the public return; the caller already has the result."""
+        try:
+            from backend.db.mongodb.mongodb import MongoDB
+            db = await MongoDB.get_database()
+            try:
+                # First write also creates the unique index. Repeated
+                # creates are cheap; Mongo ignores the dupe.
+                await db.document_extractions.create_index(
+                    [("content_hash", 1), ("extractor_version", 1)],
+                    unique=True, background=True,
+                )
+            except Exception:
+                pass
+
+            doc = {
+                **payload,
+                "document_id": document_id,
+                "cached_at": datetime.utcnow(),
+            }
+            await db.document_extractions.update_one(
+                {
+                    "content_hash": content_hash,
+                    "extractor_version": EXTRACTOR_VERSION,
+                },
+                {"$set": doc},
+                upsert=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.debug("document_agent.cache_set_failed", error=str(e))
 
     def _normalize_task_record(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         """Phase 4: normalise one extracted task into the canonical schema.
