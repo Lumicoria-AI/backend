@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="x-apple-disable-message-reformatting">
+  <meta name="color-scheme" content="light only">
+  <meta name="supported-color-schemes" content="light">
+  <title>{{ subject|default('Your evening review') }}</title>
+  <style>
+    body { margin:0; padding:0; background:#F8FAFC; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; color:#1E293B; }
+    .wrap { width:100%; background:#F8FAFC; padding:32px 16px; }
+    .container { max-width:600px; margin:0 auto; background:#FFFFFF; border:1px solid #E2E8F0; border-radius:16px; overflow:hidden; }
+
+    /* Evening header — slightly cooler purple → indigo to signal "wind down" */
+    .header { padding:28px 28px 22px; background:linear-gradient(135deg, #5B3FA0 0%, #3F3A8A 100%); color:#FFFFFF; }
+    .brand { display:flex; align-items:center; gap:10px; }
+    .brand .dot { width:34px; height:34px; border-radius:9px; background:rgba(255,255,255,0.18); color:#fff; text-align:center; line-height:34px; font-weight:700; font-size:15px; }
+    .brand .name { font-size:14px; font-weight:600; color:rgba(255,255,255,0.92); letter-spacing:0.02em; }
+    .greeting { margin-top:18px; font-size:22px; font-weight:600; line-height:1.25; }
+    .summary-line { margin:6px 0 0; font-size:14px; color:rgba(255,255,255,0.85); }
+    .stats-row { margin-top:18px; display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:rgba(255,255,255,0.92); }
+    .stat { padding:6px 10px; background:rgba(255,255,255,0.16); border-radius:8px; }
+    .stat strong { font-size:13px; font-weight:600; color:#fff; }
+
+    /* Section titles */
+    .section-title { padding:22px 28px 8px; font-size:11px; text-transform:uppercase; letter-spacing:0.10em; color:#94A3B8; font-weight:700; }
+
+    /* Item rows */
+    .item { padding:14px 28px; border-top:1px solid #F1F5F9; display:flex; align-items:flex-start; gap:10px; }
+    .item:first-of-type { border-top:none; }
+    .item-mark { width:10px; height:10px; border-radius:50%; margin-top:8px; flex:0 0 10px; }
+    .mark-done { background:#10B981; }
+    .mark-slipped { background:#EF4444; }
+    .mark-tomorrow { background:#5B3FA0; }
+    .item-body { flex:1; }
+    .item-title { font-size:14px; font-weight:500; color:#0F172A; margin:0 0 2px; line-height:1.4; }
+    .item-meta { font-size:12px; color:#64748B; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:6px; font-size:11px; font-weight:500; margin-right:4px; }
+    .pill-default { background:#F1F5F9; color:#475569; }
+    .pill-done { background:#D1FAE5; color:#065F46; }
+    .pill-slip { background:#FEE2E2; color:#991B1B; }
+    .pill-agent { background:#EDE9F8; color:#5B3FA0; }
+
+    /* Focus callout — the "where to put your energy tomorrow" block */
+    .focus-box { margin:22px 28px; padding:18px 20px; background:linear-gradient(135deg, #FAF8FE 0%, #FEFCE8 100%); border:1px solid #E9DDF7; border-radius:12px; }
+    .focus-box .label { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.08em; color:#5B3FA0; margin:0 0 8px; }
+    .focus-box .body { font-size:14px; color:#1F2937; line-height:1.6; margin:0; }
+
+    /* Footer */
+    .footer { padding:22px 28px 28px; background:#F8FAFC; border-top:1px solid #E2E8F0; font-size:12px; color:#94A3B8; }
+    .footer a { color:#5B3FA0; text-decoration:none; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="container">
+
+      <!-- Header -->
+      <div class="header">
+        <div class="brand">
+          <div class="dot">L</div>
+          <div class="name">Lumicoria · Evening Review</div>
+        </div>
+        <div class="greeting">Good evening{% if user_name %}, {{ user_name }}{% endif %}.</div>
+        <p class="summary-line">{{ summary_line|default('Here is what shipped today and where to put your energy tomorrow.') }}</p>
+        <div class="stats-row">
+          {% if counts.completed is defined %}<div class="stat"><strong>{{ counts.completed }}</strong> completed</div>{% endif %}
+          {% if counts.open is defined %}<div class="stat"><strong>{{ counts.open }}</strong> still open</div>{% endif %}
+          {% if counts.tasks_created is defined %}<div class="stat"><strong>{{ counts.tasks_created }}</strong> queued for tomorrow</div>{% endif %}
+        </div>
+      </div>
+
+      <!-- Completed today -->
+      {% if completed_today %}
+      <div class="section-title">Shipped today</div>
+      {% for t in completed_today %}
+      <div class="item">
+        <div class="item-mark mark-done"></div>
+        <div class="item-body">
+          <div class="item-title">{{ t.title }}</div>
+          <div class="item-meta">
+            <span class="pill pill-done">Completed</span>
+            {% if t.priority %}<span class="pill pill-default">{{ t.priority|upper }}</span>{% endif %}
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+      {% endif %}
+
+      <!-- Slipped -->
+      {% if slipped_tasks %}
+      <div class="section-title">Slipped from today</div>
+      {% for t in slipped_tasks %}
+      <div class="item">
+        <div class="item-mark mark-slipped"></div>
+        <div class="item-body">
+          <div class="item-title">{{ t.title }}</div>
+          <div class="item-meta">
+            <span class="pill pill-slip">Slipped</span>
+            {% if t.priority %}<span class="pill pill-default">{{ t.priority|upper }}</span>{% endif %}
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+      {% endif %}
+
+      <!-- Still open -->
+      {% if open_tasks %}
+      <div class="section-title">Still open</div>
+      {% for t in open_tasks %}
+      <div class="item">
+        <div class="item-mark mark-tomorrow"></div>
+        <div class="item-body">
+          <div class="item-title">{{ t.title }}</div>
+          <div class="item-meta">
+            {% if t.priority %}<span class="pill pill-default">{{ t.priority|upper }}</span>{% endif %}
+            {% if t.due_label %}<span class="pill pill-default">{{ t.due_label }}</span>{% endif %}
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+      {% endif %}
+
+      <!-- Tomorrow's focus list -->
+      {% if top_actions %}
+      <div class="section-title">Tomorrow's focus</div>
+      {% for a in top_actions %}
+      <div class="item">
+        <div class="item-mark mark-tomorrow"></div>
+        <div class="item-body">
+          <div class="item-title">{{ a.title }}</div>
+          <div class="item-meta">
+            {% if a.priority %}<span class="pill pill-default">{{ a.priority|upper }}</span>{% endif %}
+            {% if a.assigned_to_agent %}<span class="pill pill-agent">{{ a.assigned_to_agent }}</span>{% endif %}
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+      {% endif %}
+
+      <!-- Where energy should go -->
+      {% if focus_message %}
+      <div class="focus-box">
+        <p class="label">Where to put your energy tomorrow</p>
+        <p class="body">{{ focus_message }}</p>
+      </div>
+      {% endif %}
+
+      <!-- Footer -->
+      <div class="footer">
+        Brain ran at {{ generated_at|default('22:00') }} · <a href="{{ dashboard_url|default('https://lumicoria.ai/tasks') }}">Review tomorrow's brief</a> · <a href="{{ prefs_url|default('https://lumicoria.ai/brain/preferences') }}">Adjust review</a>
+      </div>
+
+    </div>
+  </div>
+</body>
+</html>

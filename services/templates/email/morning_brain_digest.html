@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="x-apple-disable-message-reformatting">
+  <meta name="color-scheme" content="light only">
+  <meta name="supported-color-schemes" content="light">
+  <title>{{ subject|default('Your morning brief') }}</title>
+  <style>
+    body { margin:0; padding:0; background:#F8FAFC; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif; color:#1E293B; }
+    .wrap { width:100%; background:#F8FAFC; padding:32px 16px; }
+    .container { max-width:600px; margin:0 auto; background:#FFFFFF; border:1px solid #E2E8F0; border-radius:16px; overflow:hidden; }
+
+    /* Brand header */
+    .header { padding:28px 28px 22px; background:linear-gradient(135deg, #6C4AB0 0%, #5B3FA0 100%); color:#FFFFFF; }
+    .brand { display:flex; align-items:center; gap:10px; }
+    .brand .dot { width:34px; height:34px; border-radius:9px; background:rgba(255,255,255,0.18); color:#fff; text-align:center; line-height:34px; font-weight:700; font-size:15px; }
+    .brand .name { font-size:14px; font-weight:600; color:rgba(255,255,255,0.92); letter-spacing:0.02em; }
+    .greeting { margin-top:18px; font-size:22px; font-weight:600; line-height:1.25; }
+    .summary-line { margin:6px 0 0; font-size:14px; color:rgba(255,255,255,0.85); }
+    .stats-row { margin-top:18px; display:flex; gap:14px; flex-wrap:wrap; font-size:12px; color:rgba(255,255,255,0.92); }
+    .stat { padding:6px 10px; background:rgba(255,255,255,0.16); border-radius:8px; }
+    .stat strong { font-size:13px; font-weight:600; color:#fff; }
+
+    /* Section titles */
+    .section-title { padding:22px 28px 8px; font-size:11px; text-transform:uppercase; letter-spacing:0.10em; color:#94A3B8; font-weight:700; }
+
+    /* Action item card */
+    .action { padding:16px 28px; border-top:1px solid #F1F5F9; }
+    .action:first-of-type { border-top:none; }
+    .action-head { display:flex; align-items:flex-start; gap:10px; }
+    .priority-dot { width:9px; height:9px; border-radius:50%; margin-top:8px; flex:0 0 9px; }
+    .pri-critical { background:#EF4444; }
+    .pri-high { background:#F59E0B; }
+    .pri-medium { background:#6C4AB0; }
+    .pri-low { background:#94A3B8; }
+    .action-title { font-size:15px; font-weight:600; color:#0F172A; margin:0 0 2px; line-height:1.35; }
+    .action-meta { font-size:12px; color:#64748B; }
+    .action-meta .pill { display:inline-block; padding:2px 8px; border-radius:6px; background:#F1F5F9; color:#475569; font-size:11px; font-weight:500; margin-right:4px; }
+    .action-meta .pill-agent { background:#EDE9F8; color:#5B3FA0; }
+    .action-meta .pill-low-conf { background:#FEF3C7; color:#92400E; }
+    .action-desc { font-size:13px; color:#475569; margin:8px 0 0; line-height:1.5; }
+
+    /* Proposal preview */
+    .proposal { margin-top:10px; padding:10px 12px; background:#FAF8FE; border:1px solid #E9DDF7; border-radius:8px; font-size:12px; color:#5B3FA0; }
+    .proposal .label { display:inline-block; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; font-size:10px; color:#7C3AED; margin-right:6px; }
+
+    /* Buttons */
+    .buttons { margin-top:12px; }
+    .btn { display:inline-block; padding:9px 14px; margin:0 4px 4px 0; border-radius:8px; font-size:13px; font-weight:500; text-decoration:none; line-height:1; }
+    .btn-approve { background:#10B981; color:#FFFFFF; }
+    .btn-revise  { background:#FFFFFF; color:#5B3FA0; border:1px solid #E9DDF7; }
+    .btn-reject  { background:#FFFFFF; color:#94A3B8; border:1px solid #E2E8F0; }
+    .btn-view    { background:#FFFFFF; color:#475569; border:1px solid #E2E8F0; }
+
+    /* Calendar block */
+    .cal-item { padding:10px 28px; font-size:13px; color:#475569; border-top:1px solid #F1F5F9; }
+    .cal-item:first-of-type { border-top:none; }
+    .cal-item .time { display:inline-block; min-width:90px; color:#0F172A; font-weight:500; }
+    .cal-item .title { color:#1E293B; }
+
+    /* Secondary list */
+    .secondary { padding:14px 28px; font-size:13px; color:#475569; border-top:1px solid #F1F5F9; }
+    .secondary:first-of-type { border-top:none; }
+
+    /* Footer */
+    .footer { padding:22px 28px 28px; background:#F8FAFC; border-top:1px solid #E2E8F0; font-size:12px; color:#94A3B8; }
+    .footer a { color:#6C4AB0; text-decoration:none; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="container">
+
+      <!-- Header -->
+      <div class="header">
+        <div class="brand">
+          <div class="dot">L</div>
+          <div class="name">Lumicoria · Morning Brief</div>
+        </div>
+        <div class="greeting">Good morning{% if user_name %}, {{ user_name }}{% endif %}.</div>
+        <p class="summary-line">{{ summary_line|default('Here is your day, prioritised.') }}</p>
+        <div class="stats-row">
+          {% if counts.emails is defined %}<div class="stat"><strong>{{ counts.emails }}</strong> emails</div>{% endif %}
+          {% if counts.tasks_created is defined %}<div class="stat"><strong>{{ counts.tasks_created }}</strong> tasks</div>{% endif %}
+          {% if counts.drive_changes is defined %}<div class="stat"><strong>{{ counts.drive_changes }}</strong> Drive</div>{% endif %}
+          {% if counts.meetings is defined %}<div class="stat"><strong>{{ counts.meetings }}</strong> meetings</div>{% endif %}
+        </div>
+      </div>
+
+      <!-- Top actions -->
+      {% if top_actions %}
+      <div class="section-title">Today's priorities</div>
+      {% for a in top_actions %}
+      <div class="action">
+        <div class="action-head">
+          <div class="priority-dot pri-{{ a.priority|default('medium') }}"></div>
+          <div style="flex:1;">
+            <div class="action-title">{{ a.title }}</div>
+            <div class="action-meta">
+              <span class="pill">{{ a.priority|default('medium')|upper }}</span>
+              {% if a.assigned_to_agent %}<span class="pill pill-agent">{{ a.assigned_to_agent }}</span>{% endif %}
+              {% if a.due_label %}<span class="pill">{{ a.due_label }}</span>{% endif %}
+              {% if a.low_confidence %}<span class="pill pill-low-conf">review carefully</span>{% endif %}
+            </div>
+          </div>
+        </div>
+
+        {% if a.description %}<p class="action-desc">{{ a.description }}</p>{% endif %}
+
+        {% if a.proposal_preview %}
+        <div class="proposal">
+          <span class="label">Agent draft</span>{{ a.proposal_preview }}
+        </div>
+        {% endif %}
+
+        <div class="buttons">
+          {% if a.approve_url %}<a class="btn btn-approve" href="{{ a.approve_url }}">Approve</a>{% endif %}
+          {% if a.revise_url %}<a class="btn btn-revise" href="{{ a.revise_url }}">Revise</a>{% endif %}
+          {% if a.reject_url %}<a class="btn btn-reject" href="{{ a.reject_url }}">Reject</a>{% endif %}
+          {% if a.view_url %}<a class="btn btn-view" href="{{ a.view_url }}">Open</a>{% endif %}
+        </div>
+      </div>
+      {% endfor %}
+      {% endif %}
+
+      <!-- Calendar -->
+      {% if calendar_today %}
+      <div class="section-title">Coming up</div>
+      {% for ev in calendar_today %}
+      <div class="cal-item">
+        <span class="time">{{ ev.time_label }}</span>
+        <span class="title">{{ ev.summary }}</span>
+      </div>
+      {% endfor %}
+      {% endif %}
+
+      <!-- Secondary actions -->
+      {% if secondary_actions %}
+      <div class="section-title">Also today</div>
+      {% for a in secondary_actions %}
+      <div class="secondary">
+        <strong style="color:#0F172A; font-weight:500;">{{ a.title }}</strong>
+        {% if a.priority %}<span style="margin-left:6px; background:#F1F5F9; color:#475569; font-size:11px; padding:2px 6px; border-radius:5px;">{{ a.priority|upper }}</span>{% endif %}
+      </div>
+      {% endfor %}
+      {% endif %}
+
+      <!-- Open tasks -->
+      {% if open_tasks %}
+      <div class="section-title">Still open</div>
+      {% for t in open_tasks %}
+      <div class="secondary">
+        <strong style="color:#0F172A; font-weight:500;">{{ t.title }}</strong>
+        {% if t.priority %}<span style="margin-left:6px; background:#F1F5F9; color:#475569; font-size:11px; padding:2px 6px; border-radius:5px;">{{ t.priority|upper }}</span>{% endif %}
+      </div>
+      {% endfor %}
+      {% endif %}
+
+      <!-- Footer -->
+      <div class="footer">
+        Brain ran at {{ generated_at|default('06:00') }} · <a href="{{ dashboard_url|default('https://lumicoria.ai/tasks') }}">Open Lumicoria</a> · <a href="{{ prefs_url|default('https://lumicoria.ai/brain/preferences') }}">Adjust digest</a>
+      </div>
+
+    </div>
+  </div>
+</body>
+</html>

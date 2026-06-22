@@ -40,6 +40,9 @@ class TaskAction(str, Enum):
     # Phase 6 — one-tap actions on the agent-proposal push notification.
     APPROVE_PROPOSAL = "approve_proposal"
     REJECT_PROPOSAL = "reject_proposal"
+    # Brain phase 5 — third option in the digest email so a user can
+    # send the proposal back for revision without approve/reject.
+    REVISE_PROPOSAL = "revise_proposal"
 
 
 class TaskActionTokenError(Exception):
