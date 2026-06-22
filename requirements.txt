@@ -110,6 +110,12 @@ langchain
 langchain-text-splitters
 langchain-community
 
+# ── Autonomous brain orchestration ─────────────────────────────────────
+# LangGraph drives the morning + evening state machine.
+# Langfuse is the optional trace UI (off unless LANGFUSE_* env vars set).
+langgraph>=0.2.0
+langfuse>=2.50.0
+
 # ── Email Providers ────────────────────────────────────────────────────
 sendgrid>=6.10.0
 resend>=0.7.0

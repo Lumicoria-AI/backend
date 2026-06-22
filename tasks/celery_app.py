@@ -69,6 +69,14 @@ def _weekly_fri_sat_9am():
     return crontab(hour=9, minute=0, day_of_week="friday,saturday")
 
 
+def _hourly_at_minute_0():
+    """Every hour at the top of the hour. Used by brain.fanout_morning
+    and brain.fanout_evening — the per-user task gates on local TZ so
+    the fan-out itself just needs to run hourly."""
+    from celery.schedules import crontab
+    return crontab(minute=0)
+
+
 celery_app = Celery(
     "lumicoria",
     broker=_build_broker_url(),
@@ -81,6 +89,7 @@ celery_app = Celery(
         "backend.tasks.webhook_dispatcher",    # Phase E — egress worker
         "backend.tasks.agent_metrics_tasks",   # Phase B — metrics materialiser
         "backend.tasks.automation_runner",     # Phase C — scheduled automations
+        "backend.tasks.brain_tasks",           # Autonomous brain — daily digest
     ],
 )
 
@@ -193,5 +202,19 @@ celery_app.conf.beat_schedule = {
     "automations-retry-errored": {
         "task": "automations.retry_errored",
         "schedule": 300.0,
+    },
+
+    # ── Autonomous brain (Phase 2+) ─────────────────────────────────
+    # Hourly fan-outs let the per-user task gate on the user's local
+    # 06:00 / 22:00 ± 15 min without exploding the schedule.
+    # Idempotency lives in the runner's gate node (it dedupes against
+    # last_brain_morning_sent / last_brain_evening_sent on the user).
+    "brain-fanout-morning": {
+        "task": "brain.fanout_morning",
+        "schedule": _hourly_at_minute_0(),
+    },
+    "brain-fanout-evening": {
+        "task": "brain.fanout_evening",
+        "schedule": _hourly_at_minute_0(),
     },
 }

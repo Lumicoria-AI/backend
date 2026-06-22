@@ -74,6 +74,7 @@ from backend.api.v1.endpoints import (
     invites_extended,            # Phase A: bulk + CSV + Google Workspace + shareable links
     tasks_v2_extras,             # Phase A: subtasks + history + templates + snooze + imports
     org_billing_extended,        # Phase A: credits + promos + contracts + BYOK + forecasts
+    brain,                       # Autonomous brain — daily digest endpoints
 )
 from backend.api.routers.research_mentor import router as research_mentor_router
 from backend.api.routers.ethics_bias_router import router as ethics_bias_router
@@ -940,6 +941,13 @@ api_router.include_router(
     org_billing_extended.router,
     prefix="/org-billing",
     tags=["org-billing-extended"],
+)
+
+# Autonomous brain — preferences, manual trigger, run history, traces.
+api_router.include_router(
+    brain.router,
+    prefix="/brain",
+    tags=["brain"],
 )
 
 # Add response codes to all routers
