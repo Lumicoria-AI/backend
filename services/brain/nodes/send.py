@@ -38,6 +38,42 @@ async def send(state: BrainState) -> Dict[str, Any]:
             "__status": "fallback",
         }
 
+    # ── Digest quality gate — refuse to send a bad email ────────────
+    quality_passed = (state.meta or {}).get("digest_quality_passed", True)
+    quality_reason = (state.meta or {}).get("digest_quality_reason", "")
+    if not quality_passed:
+        # Still create an in-app notification so the user knows the
+        # brain ran — but never an email or push for a low-quality run.
+        try:
+            await _send_in_app(
+                user_id=state.user_id,
+                mode=state.mode,
+                render={
+                    **render,
+                    "summary_line": (
+                        "We ran your brain this morning but held the digest "
+                        "back for review — open the dashboard to see why."
+                    ),
+                },
+            )
+        except Exception:
+            pass
+        logger.warning(
+            "send.digest_quality_blocked",
+            run_id=state.run_id,
+            reason=quality_reason,
+        )
+        return {
+            "delivery_channels": [],
+            "__payload_summary": {
+                "sent": 0,
+                "blocked": True,
+                "reason": f"digest_quality_failed:{quality_reason[:100]}",
+            },
+            "__eval_score": 0.0,
+            "__status": "fallback",
+        }
+
     prefs = (state.meta or {}).get("brain_prefs") or {}
     user_email = state.user_email
     user_id = state.user_id

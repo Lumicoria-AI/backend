@@ -18,7 +18,9 @@ chooses to retry, fallback, or continue based on the eval status.
 
 from .confidence_eval import check_confidence
 from .coverage_eval import check_coverage
+from .digest_quality import evaluate_digest
 from .freshness_eval import check_freshness
+from .llm_judge import judge_proposal, judge_ranked_actions
 from .schema_eval import check_schema
 
 __all__ = [
@@ -26,4 +28,7 @@ __all__ = [
     "check_coverage",
     "check_freshness",
     "check_schema",
+    "evaluate_digest",
+    "judge_proposal",
+    "judge_ranked_actions",
 ]

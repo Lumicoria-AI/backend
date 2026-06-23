@@ -28,6 +28,7 @@ from typing import Any, Dict, Optional
 import structlog
 
 from .graph import brain_graph
+from .metrics import record_run
 from .state import BrainRunSummary, BrainState
 from .tracing import emit_to_langfuse, persist_traces
 
@@ -176,6 +177,15 @@ async def run_brain_for_user(
         digest_sent=digest_sent,
         skip_reason=skip_reason,
         error=error_str,
+    )
+
+    # Mirror to Prometheus (best-effort).
+    record_run(
+        mode=mode,
+        status=status,
+        duration_ms=duration_ms,
+        tasks_created=tasks_created,
+        emails_processed=emails_processed,
     )
 
     logger.info(

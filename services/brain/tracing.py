@@ -37,6 +37,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 import structlog
 
+from .metrics import record_node
 from .state import BrainState, TraceEvent
 
 logger = structlog.get_logger(__name__)
@@ -109,6 +110,14 @@ def traced_node(name: str) -> Callable[[NodeFn], NodeFn]:
             update.setdefault("trace_events", []).append(event)
             if status == "fallback":
                 update["fallback_count"] = state.fallback_count + 1
+
+            # Mirror to Prometheus (best-effort; never raises).
+            record_node(
+                node=name,
+                duration_ms=duration_ms,
+                status=status,
+                eval_score=eval_score,
+            )
 
             logger.info(
                 "brain.node_completed",
