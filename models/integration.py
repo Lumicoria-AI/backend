@@ -1,6 +1,6 @@
 from enum import Enum, auto
 from typing import Dict, Any, List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
 
 class IntegrationType(str, Enum):
@@ -66,7 +66,7 @@ class IntegrationUpdate(BaseModel):
 
 class Integration(BaseModel):
     """Integration model."""
-    id: str
+    id: str = Field(default="", alias="_id")
     name: str
     type: IntegrationType
     credentials: Dict[str, Any]  # Encrypted in DB, decrypted when needed
@@ -80,7 +80,47 @@ class Integration(BaseModel):
     users: Optional[List[IntegrationUser]] = None
     error_logs: Optional[List[IntegrationErrorLog]] = None
     metadata: Optional[Dict[str, Any]] = None
-    
+
     class Config:
         populate_by_name = True
         arbitrary_types_allowed = True
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def _coerce_object_id(cls, v):
+        """Mongo round-trips this field as a BSON ObjectId; the rest of the
+        app treats it as a string. Coerce defensively so we accept either
+        shape from the persistence layer."""
+        return str(v) if v is not None else ""
+
+    # ── Dict-style compatibility shims ──────────────────────────────
+    # Many existing call sites read integration data as if it were a
+    # raw Mongo dict (``integration.get("status")``, ``integration["x"]``).
+    # After we started hydrating to the Pydantic model these calls
+    # broke. Rather than rewrite every consumer, the model duck-types
+    # as a dict for read access. Writes still go through Pydantic so
+    # validation isn't bypassed.
+
+    def get(self, key: str, default: Any = None) -> Any:  # noqa: A003
+        # Map `_id` → `id` so legacy code reading either key works.
+        if key == "_id":
+            return self.id or default
+        val = getattr(self, key, default)
+        # Common chained pattern is ``integration.get("config", {}).get("type")``.
+        # If the field exists but is None and the caller supplied a non-None
+        # default, return the default so the chain doesn't crash on ``None.get``.
+        if val is None and default is not None:
+            return default
+        return val
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "_id":
+            return self.id
+        if not hasattr(self, key):
+            raise KeyError(key)
+        return getattr(self, key)
+
+    def __contains__(self, key: str) -> bool:
+        if key == "_id":
+            return bool(self.id)
+        return key in self.model_fields and getattr(self, key) is not None

@@ -154,13 +154,29 @@ class IntegrationService:
         """
         expires_at = credentials.get("expires_at")
         if expires_at:
-            # expires_at stored as ISO string or epoch
+            # expires_at may be: an epoch int/float, an ISO string, or
+            # a stringified float (the integration encrypt layer coerces
+            # numerics to str before encryption, so after decrypt every
+            # value is a string).
+            expiry = None
             if isinstance(expires_at, (int, float)):
-                expiry = datetime.utcfromtimestamp(expires_at)
+                expiry = datetime.utcfromtimestamp(float(expires_at))
             else:
-                expiry = datetime.fromisoformat(str(expires_at))
-            # Refresh if less than 5 minutes remaining
-            if datetime.utcnow() < expiry - timedelta(minutes=5):
+                s = str(expires_at).strip()
+                # Try numeric epoch first — handles "1782289517.909566".
+                try:
+                    expiry = datetime.utcfromtimestamp(float(s))
+                except (TypeError, ValueError):
+                    try:
+                        expiry = datetime.fromisoformat(s)
+                    except ValueError:
+                        logger.warning(
+                            "Could not parse Google expires_at; refreshing token "
+                            "preemptively",
+                            value_preview=s[:32],
+                        )
+            # Refresh if we couldn't parse, or less than 5 minutes remain.
+            if expiry is not None and datetime.utcnow() < expiry - timedelta(minutes=5):
                 return credentials
 
         refresh_token = credentials.get("refresh_token")

@@ -135,9 +135,29 @@ class IntegrationRepository(BaseRepository[Integration]):
         integration_id: str,
         decrypt_credentials: bool = True
     ) -> Optional[Integration]:
-        """Get integration by ID with optional credential decryption."""
+        """Get integration by ID with optional credential decryption.
+
+        ``find_one`` may return either an ``Integration`` Pydantic model
+        (after the base-repo Pydantic mapping fix) or a raw Mongo dict
+        depending on the call path. Handle both — the previous
+        ``"credentials" in integration`` check returned False on the
+        Pydantic model (its __iter__ yields (name, value) tuples) so the
+        decrypt branch silently skipped, leaving downstream callers with
+        encrypted token strings.
+        """
         integration = await self.find_one({"_id": ObjectId(integration_id)})
-        if integration and decrypt_credentials and "credentials" in integration:
+        if integration is None or not decrypt_credentials:
+            return integration
+
+        # Pydantic model path.
+        if hasattr(integration, "credentials"):
+            creds = getattr(integration, "credentials", None)
+            if isinstance(creds, dict):
+                integration.credentials = self._decrypt_credentials(creds)
+            return integration
+
+        # Raw dict path.
+        if isinstance(integration, dict) and "credentials" in integration:
             integration["credentials"] = self._decrypt_credentials(integration["credentials"])
         return integration
 
@@ -152,7 +172,13 @@ class IntegrationRepository(BaseRepository[Integration]):
         """Get all integrations for an organization with filtering."""
         filters = {"organization_id": str(organization_id)}
         if integration_type:
-            filters["config.type"] = integration_type
+            # Documents store `type` at the top level (not config.type),
+            # and the enum object must be compared against its string value.
+            filters["type"] = (
+                integration_type.value
+                if hasattr(integration_type, "value")
+                else str(integration_type)
+            )
         if status:
             filters["status"] = status
 
@@ -186,7 +212,12 @@ class IntegrationRepository(BaseRepository[Integration]):
                 ]
             }
             if integration_type:
-                filters["config.type"] = integration_type
+                # Field is stored at top level as `type`; coerce enum→value.
+                filters["type"] = (
+                    integration_type.value
+                    if hasattr(integration_type, "value")
+                    else str(integration_type)
+                )
             if status:
                 filters["status"] = status
             return await self.find_many(
@@ -229,12 +260,21 @@ class IntegrationRepository(BaseRepository[Integration]):
         sync_status: str,
         sync_details: Optional[Dict[str, Any]] = None
     ) -> Optional[Integration]:
-        """Update the last sync status of an integration."""
+        """Update the last sync status of an integration.
+
+        Writes to flat top-level fields. The previous nested path
+        (``config.last_sync``) failed when ``config`` was null because
+        Mongo can't materialise a subdocument from null. The top-level
+        ``sync_status`` Pydantic field on the Integration model is a
+        nested object — we deliberately use different keys
+        (``last_sync_at`` / ``last_sync_status``) so we don't collide
+        with that and trip validation on read.
+        """
         update_data = {
-            "config.last_sync": last_sync,
-            "sync_status": sync_status,
-            "sync_details": sync_details or {},
-            "updated_at": datetime.utcnow()
+            "last_sync_at": last_sync,
+            "last_sync_status": sync_status,
+            "last_sync_details": sync_details or {},
+            "updated_at": datetime.utcnow(),
         }
         return await self.update(integration_id, update_data)
 

@@ -100,15 +100,48 @@ OAUTH_PROVIDERS = {
         "token_url": "https://oauth2.googleapis.com/token",
         "revoke_url": "https://oauth2.googleapis.com/revoke",
         "scopes": [
-            "https://www.googleapis.com/auth/calendar",
-            "https://www.googleapis.com/auth/drive",
-            "https://www.googleapis.com/auth/drive.readonly",
-            "https://www.googleapis.com/auth/documents",
-            "https://www.googleapis.com/auth/spreadsheets",
-            # Gmail read + send (read powers the autonomous morning brain).
+            # ── Full Google Workspace ecosystem ─────────────────────────
+            # This is the long-term scope set Lumicoria uses across the
+            # agentic chat, document editor, sheets automations, and the
+            # autonomous brain. Verification on Google's side asks for the
+            # complete list; we don't gain anything by shipping narrow.
+            #
+            # Identity
+            "openid",
+            "email",
+            "profile",
+            #
+            # Gmail — read for brain ingest, modify for marking processed,
+            # send for one-click Approve replies. (drafts.readonly powers
+            # the chat's "what was I writing earlier" intent.)
             "https://www.googleapis.com/auth/gmail.readonly",
             "https://www.googleapis.com/auth/gmail.modify",
             "https://www.googleapis.com/auth/gmail.send",
+            "https://www.googleapis.com/auth/gmail.drafts.readonly",
+            #
+            # Calendar — full read/write so the chat can create events on
+            # the user's behalf and the brain can write meeting changes.
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/calendar.events",
+            #
+            # Drive — full read/write so the agentic flow can edit files
+            # the user explicitly asks it to update.
+            "https://www.googleapis.com/auth/drive",
+            "https://www.googleapis.com/auth/drive.readonly",
+            #
+            # Docs + Sheets — for the document editor + sheet automations.
+            "https://www.googleapis.com/auth/documents",
+            "https://www.googleapis.com/auth/spreadsheets",
+            #
+            # Tasks — for syncing Lumicoria tasks back into Google Tasks.
+            "https://www.googleapis.com/auth/tasks",
+            #
+            # Contacts — for "email <name>" intent resolution in chat.
+            "https://www.googleapis.com/auth/contacts.readonly",
+            #
+            # NOTE — every scope above must also be listed on Cloud Console
+            # → OAuth consent screen → Scopes. Google rejects requests for
+            # any scope the consent screen doesn't declare.
         ],
     },
     "slack": {
@@ -299,10 +332,18 @@ async def get_integration_catalog(
         organization_id=str(current_user.id),
     )
 
-    user_integration_map: Dict[str, Dict] = {}
+    # `user_integrations` is List[Integration] (Pydantic); use attribute
+    # access. We tolerate either a string `type` (e.g. "google_workspace")
+    # or the enum form on the Integration model.
+    user_integration_map: Dict[str, Any] = {}
     for integ in user_integrations:
-        integ_type = integ.get("config", {}).get("type") or integ.get("type", "")
-        user_integration_map[integ_type] = integ
+        integ_type_val = getattr(integ, "type", None)
+        if hasattr(integ_type_val, "value"):
+            integ_type = integ_type_val.value
+        else:
+            integ_type = str(integ_type_val) if integ_type_val else ""
+        if integ_type:
+            user_integration_map[integ_type] = integ
 
     result = []
     for type_key, info in INTEGRATION_CATALOG.items():
@@ -310,7 +351,7 @@ async def get_integration_catalog(
         user_integ = user_integration_map.get(type_key)
         integ_status = "not_connected"
         if user_integ:
-            integ_status = user_integ.get("status", "active")
+            integ_status = getattr(user_integ, "status", None) or "active"
         elif server_configured:
             integ_status = "available"
 

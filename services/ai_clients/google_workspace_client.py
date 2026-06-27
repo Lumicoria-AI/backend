@@ -213,17 +213,33 @@ class GoogleWorkspaceClient:
                 "calendar", "v3", ["https://www.googleapis.com/auth/calendar"]
             )
             
-            # Default time range is today to two weeks from now if not specified
+            # Default time range is today to two weeks from now if not specified.
             if not time_min:
                 time_min = datetime.utcnow()
             if not time_max:
-                time_max = time_min + timedelta(days=14)
-            
+                time_max = (
+                    time_min + timedelta(days=14)
+                    if isinstance(time_min, datetime)
+                    else datetime.utcnow() + timedelta(days=14)
+                )
+
+            # Callers pass either a ``datetime`` or a pre-formatted
+            # RFC-3339 string (e.g. the brain's fetch_calendar appends
+            # the trailing 'Z' itself). Normalise both shapes — never
+            # double-append the zone marker.
+            def _to_rfc3339(val) -> str:
+                if isinstance(val, str):
+                    return val if val.endswith("Z") or "+" in val[-6:] else val + "Z"
+                return val.isoformat() + "Z"
+
+            tmin_str = _to_rfc3339(time_min)
+            tmax_str = _to_rfc3339(time_max)
+
             def _get_events():
                 return calendar_service.events().list(
                     calendarId=calendar_id,
-                    timeMin=time_min.isoformat() + 'Z',
-                    timeMax=time_max.isoformat() + 'Z',
+                    timeMin=tmin_str,
+                    timeMax=tmax_str,
                     maxResults=max_results,
                     singleEvents=True,
                     orderBy='startTime'

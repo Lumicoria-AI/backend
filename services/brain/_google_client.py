@@ -65,15 +65,19 @@ async def resolve_google_client(user_id: str) -> Optional[object]:
     if not integrations:
         return None
 
+    # integrations is List[Integration] (Pydantic). Use attribute access
+    # — dict-style .get() raises AttributeError on the new model and that
+    # error gets swallowed by the gate's try/except → false-positive
+    # "no_google_integration" skip.
     active = next(
-        (i for i in integrations if (i.get("status") or "").lower() == "active"),
+        (i for i in integrations if (getattr(i, "status", "") or "").lower() == "active"),
         None,
     )
     if active is None:
         # No active record — frontend will show "Reconnect required."
         return None
 
-    integration_id = str(active.get("_id") or active.get("id") or "")
+    integration_id = getattr(active, "id", "") or ""
     if not integration_id:
         return None
 
@@ -89,10 +93,16 @@ async def resolve_google_client(user_id: str) -> Optional[object]:
         )
         return None
 
-    if not decrypted or not decrypted.get("credentials"):
+    # `get_integration_by_id` returns Integration | dict depending on the
+    # repository implementation — handle both defensively.
+    if not decrypted:
         return None
-
-    credentials = decrypted["credentials"]
+    credentials = (
+        decrypted.credentials if hasattr(decrypted, "credentials")
+        else decrypted.get("credentials")
+    )
+    if not credentials:
+        return None
     try:
         if credentials.get("access_token"):
             credentials = await integration_service._ensure_google_token_fresh(
