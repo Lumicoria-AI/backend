@@ -42,6 +42,12 @@ def to_dict(row: OrgBrandingSQL) -> Dict[str, Any]:
         "sla_response_minutes": row.sla_response_minutes,
         "captcha_enabled": row.captcha_enabled,
         "public_categories": list(row.public_categories or []),
+        # Meeting (Jitsi) branding — see OrgBrandingSQL for fallback rules.
+        "meeting_app_name": getattr(row, "meeting_app_name", None),
+        "meeting_logo_url": getattr(row, "meeting_logo_url", None),
+        "meeting_favicon_url": getattr(row, "meeting_favicon_url", None),
+        "meeting_watermark_link": getattr(row, "meeting_watermark_link", None),
+        "meeting_welcome_message": getattr(row, "meeting_welcome_message", None),
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
     }
@@ -140,6 +146,24 @@ def _validate_and_clean(payload: Dict[str, Any]) -> Dict[str, Any]:
     if "public_categories" in payload:
         out["public_categories"] = sanitize_string_list(
             payload["public_categories"] or [], max_each=64
+        )
+
+    # ── Meeting (Jitsi) branding overrides ─────────────────────────────
+    if "meeting_app_name" in payload:
+        v = (payload["meeting_app_name"] or "").strip()
+        out["meeting_app_name"] = (v[:120] if v else None)
+    if "meeting_logo_url" in payload:
+        v = (payload["meeting_logo_url"] or "").strip()
+        out["meeting_logo_url"] = (v[:1000] if v else None)
+    if "meeting_favicon_url" in payload:
+        v = (payload["meeting_favicon_url"] or "").strip()
+        out["meeting_favicon_url"] = (v[:1000] if v else None)
+    if "meeting_watermark_link" in payload:
+        v = (payload["meeting_watermark_link"] or "").strip()
+        out["meeting_watermark_link"] = (v[:512] if v else None)
+    if "meeting_welcome_message" in payload:
+        out["meeting_welcome_message"] = (
+            clean_rich_text(payload["meeting_welcome_message"] or "", max_len=2000) or None
         )
 
     return out

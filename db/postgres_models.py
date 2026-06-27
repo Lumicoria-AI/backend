@@ -473,6 +473,18 @@ class OrgBrandingSQL(Base):
 
     public_categories = Column(JSONB, nullable=False, default=list)        # ["technical_support", "billing", ...]
 
+    # ── Meeting (Jitsi) branding overrides ─────────────────────────────
+    # All nullable; null falls back to the corresponding `logo_url` /
+    # `display_name` / `primary_color` field above so an org that only
+    # configured the general brand kit still gets sensible meeting branding.
+    # When set, these values are plumbed through `_enrich_with_jitsi` →
+    # `huddle.jitsi_branding` → JitsiEmbed's interfaceConfigOverwrite.
+    meeting_app_name = Column(String(120), nullable=True)            # "Acme Meeting Room"
+    meeting_logo_url = Column(String(1000), nullable=True)            # corner watermark (square, ≤1024px)
+    meeting_favicon_url = Column(String(1000), nullable=True)          # tab icon (32×32 to 256×256)
+    meeting_watermark_link = Column(String(512), nullable=True)          # where the logo click lands
+    meeting_welcome_message = Column(Text, nullable=True)              # shown on the pre-join screen
+
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 

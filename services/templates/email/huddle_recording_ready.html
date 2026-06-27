@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="x-apple-disable-message-reformatting">
+  <title>Your Lumicoria Meet recording is ready</title>
+  <style>
+    body { margin:0; padding:0; background:#EDE9FE; font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Inter','Segoe UI',Helvetica,Arial,sans-serif; color:#0F172A; }
+    a { color:#6C4AB0; text-decoration:none; }
+    .wrap { padding:40px 16px; background:linear-gradient(180deg,#EDE9FE 0%,#F5F3FF 35%,#FFFFFF 100%); }
+    .container { max-width:600px; margin:0 auto; background:#FFFFFF; border-radius:22px; overflow:hidden; box-shadow:0 24px 60px -24px rgba(76,29,149,0.28); }
+    .hero { padding:36px 36px 32px; background:linear-gradient(135deg,#7C3AED 0%,#6C4AB0 45%,#4C1D95 100%); color:#FFFFFF; }
+    .brand-name { color:#FFFFFF; font-size:17px; font-weight:600; letter-spacing:-0.01em; }
+    .brand-tag { color:#E9DEFA; font-size:11px; text-transform:uppercase; letter-spacing:0.14em; font-weight:500; margin-top:3px; }
+    .hero-headline { margin:24px 0 0; color:#FFFFFF; font-size:26px; line-height:1.25; font-weight:600; letter-spacing:-0.02em; }
+    .hero-sub { margin:12px 0 0; color:#E9DEFA; font-size:15px; line-height:1.55; }
+    .body { padding:32px 36px 8px; }
+    .lede { font-size:15px; line-height:1.65; color:#475569; margin:0 0 20px; }
+    .meeting-card { background:linear-gradient(180deg,#F8FAFF 0%,#F1EEFB 100%); border:1px solid rgba(124,58,237,0.12); border-radius:16px; padding:20px 22px; margin:0 0 24px; }
+    .meeting-card .label { font-size:11px; text-transform:uppercase; letter-spacing:0.12em; color:#8B5CF6; font-weight:600; margin:0 0 6px; }
+    .meeting-card h2 { font-size:18px; font-weight:600; color:#0F172A; margin:0 0 4px; letter-spacing:-0.01em; }
+    .meeting-card .meta { font-size:13px; color:#64748B; margin:6px 0 0; }
+    .cta-wrap { text-align:center; padding:8px 0 16px; }
+    .cta { display:inline-block; padding:14px 30px; border-radius:12px; background:linear-gradient(135deg,#7C3AED 0%,#4C1D95 100%); color:#FFFFFF !important; font-weight:600; font-size:15px; letter-spacing:-0.01em; box-shadow:0 12px 28px -8px rgba(76,29,149,0.45); }
+    .alt-link { padding:18px 36px 24px; font-size:12px; color:#64748B; line-height:1.55; }
+    .alt-link a { color:#6C4AB0; word-break:break-all; }
+    .footer { padding:20px 36px 36px; border-top:1px solid #F1F5F9; }
+    .footer p { font-size:12px; color:#94A3B8; line-height:1.55; margin:0; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+      <tr><td align="center">
+        <table class="container" role="presentation" width="600" cellspacing="0" cellpadding="0" border="0">
+          <tr>
+            <td class="hero">
+              <div class="brand-name">Lumicoria</div>
+              <div class="brand-tag">Meet · Recording ready</div>
+              <h1 class="hero-headline">{% if user_name %}Hi {{ user_name }}, your{% else %}Your{% endif %} recording is ready.</h1>
+              <p class="hero-sub">The recording from "{{ huddle_title }}" has been processed and is now available for playback in Lumicoria.</p>
+            </td>
+          </tr>
+          <tr>
+            <td class="body">
+              <p class="lede">Click below to watch, download, or share the recording. Recordings are retained according to your organisation's retention policy; you can delete them earlier from inside the playback page.</p>
+              <div class="meeting-card">
+                <p class="label">Meeting</p>
+                <h2>{{ huddle_title }}</h2>
+                <p class="meta">
+                  {% if duration_sec %}{{ (duration_sec / 60) | round | int }} min{% endif %}
+                  {% if size_bytes and duration_sec %} · {% endif %}
+                  {% if size_bytes %}{{ (size_bytes / 1048576) | round(1) }} MB{% endif %}
+                </p>
+              </div>
+              <div class="cta-wrap">
+                <a href="{{ playback_url }}" class="cta">Watch recording</a>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td class="alt-link">
+              Playback link:<br>
+              <a href="{{ playback_url }}">{{ playback_url }}</a>
+            </td>
+          </tr>
+          <tr>
+            <td class="footer">
+              <p>You received this email because you hosted the meeting. Adjust delivery preferences in <a href="https://lumicoria.ai/settings/notifications">your notification settings</a>.</p>
+            </td>
+          </tr>
+        </table>
+      </td></tr>
+    </table>
+  </div>
+</body>
+</html>

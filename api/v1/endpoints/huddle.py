@@ -30,7 +30,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import structlog
-from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from pydantic import BaseModel, EmailStr, Field
 
 from backend.api.deps import get_current_active_user
@@ -158,9 +158,14 @@ def _resolve_org_id(current_user: User) -> str:
     return str(org_id)
 
 
-def _enrich_with_jitsi(huddle: Dict[str, Any], user: Optional[User]) -> Dict[str, Any]:
-    """Attach jitsi_domain + jitsi_jwt to the response so the frontend
-    can embed self-hosted Jitsi (when configured) without an extra call."""
+async def _enrich_with_jitsi(huddle: Dict[str, Any], user: Optional[User]) -> Dict[str, Any]:
+    """Attach jitsi_domain, jitsi_jwt, and jitsi_branding to the response
+    so the frontend can embed self-hosted Jitsi (when configured) without
+    an extra round-trip per huddle.
+
+    Branding lookup is cached in Redis with a 5-min TTL keyed by org_id so
+    we don't slam Postgres on every huddle GET. Branding rarely changes.
+    """
     if not huddle:
         return huddle
     huddle["jitsi_domain"] = jitsi_domain()
@@ -173,7 +178,87 @@ def _enrich_with_jitsi(huddle: Dict[str, Any], user: Optional[User]) -> Dict[str
         moderator=is_host,
         allow_recording=bool(huddle.get("recording_enabled")),
     )
+    # Surface the moderator flag explicitly so the frontend can hide
+    # host-only controls without re-parsing the JWT.
+    huddle["jitsi_is_host"] = is_host
+    huddle["jitsi_branding"] = await _resolve_jitsi_branding(huddle.get("organization_id"))
     return huddle
+
+
+# ── Branding cache (Redis, 5-min TTL) ──────────────────────────────────
+
+
+_BRANDING_CACHE_TTL_SEC = 300
+_FRONTEND_URL_DEFAULT = "https://lumicoria.ai"
+
+
+async def _resolve_jitsi_branding(organization_id: Optional[str]) -> Dict[str, Any]:
+    """Return the `jitsi_branding` block for the embed. Falls back to
+    Lumicoria defaults when an org has no branding row or no
+    organization_id (personal huddles). Cached in Redis so it's
+    effectively free per huddle request."""
+    org_id = (organization_id or "").strip()
+    if not org_id:
+        return _default_jitsi_branding()
+
+    # Try Redis first.
+    cache_key = f"huddle:branding:{org_id}"
+    try:
+        from backend.db.redis import get_redis
+        redis = await get_redis()
+        cached = await redis.get(cache_key)
+        if cached:
+            import json
+            return json.loads(cached)
+    except Exception:
+        redis = None
+
+    # Pull from Postgres via the existing branding service.
+    try:
+        from backend.services.customer_service import branding as branding_svc
+        row = await branding_svc.get_for_org(org_id)
+    except Exception:
+        return _default_jitsi_branding()
+
+    from backend.core.config import settings as _settings
+    fallback_link = (
+        getattr(_settings, "FRONTEND_URL", None) or _FRONTEND_URL_DEFAULT
+    )
+    block = {
+        "app_name": (row.get("meeting_app_name") or "Lumicoria Meet"),
+        "logo_url": (row.get("meeting_logo_url") or row.get("logo_url")),
+        "favicon_url": row.get("meeting_favicon_url"),
+        "primary_color": row.get("primary_color") or "#6C4AB0",
+        "accent_color": row.get("accent_color") or "#5B3FA0",
+        "watermark_link": (
+            row.get("meeting_watermark_link") or fallback_link
+        ),
+        "welcome_message": row.get("meeting_welcome_message"),
+    }
+
+    if redis is not None:
+        try:
+            import json
+            await redis.setex(cache_key, _BRANDING_CACHE_TTL_SEC, json.dumps(block))
+        except Exception:
+            pass
+    return block
+
+
+def _default_jitsi_branding() -> Dict[str, Any]:
+    """Lumicoria-branded defaults for huddles without a configured org."""
+    from backend.core.config import settings as _settings
+    return {
+        "app_name": "Lumicoria Meet",
+        "logo_url": None,
+        "favicon_url": None,
+        "primary_color": "#6C4AB0",
+        "accent_color": "#5B3FA0",
+        "watermark_link": (
+            getattr(_settings, "FRONTEND_URL", None) or _FRONTEND_URL_DEFAULT
+        ),
+        "welcome_message": None,
+    }
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────
@@ -217,7 +302,7 @@ async def create_huddle_endpoint(
         data_residency=payload.data_residency,
         metadata=payload.metadata,
     )
-    return _enrich_with_jitsi(result, current_user)
+    return await _enrich_with_jitsi(result, current_user)
 
 
 @router.get("/")
@@ -249,7 +334,7 @@ async def get_huddle_endpoint(
     )
     if not result:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Huddle not found")
-    return _enrich_with_jitsi(result, current_user)
+    return await _enrich_with_jitsi(result, current_user)
 
 
 @router.get("/share/{share_token}")
@@ -289,7 +374,7 @@ async def patch_huddle_endpoint(
     )
     if not result:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Not found or forbidden")
-    return _enrich_with_jitsi(result, current_user)
+    return await _enrich_with_jitsi(result, current_user)
 
 
 @router.post("/{huddle_id}/start")
@@ -300,7 +385,7 @@ async def start_huddle_endpoint(
     result = await svc.start_huddle(huddle_id, requesting_user_id=str(current_user.id))
     if not result:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Not found or forbidden")
-    return _enrich_with_jitsi(result, current_user)
+    return await _enrich_with_jitsi(result, current_user)
 
 
 @router.post("/{huddle_id}/end")
@@ -543,19 +628,54 @@ class JibriWebhookRequest(BaseModel):
 
 
 @router.post("/jibri/webhook")
-async def jibri_webhook_endpoint(payload: JibriWebhookRequest = Body(...)) -> Dict[str, Any]:
+async def jibri_webhook_endpoint(
+    request: Request,
+    payload: JibriWebhookRequest = Body(...),
+) -> Dict[str, Any]:
     """Called by Jibri after server-side recording finalises. We verify
     the HMAC and stamp the recording_url onto the HuddleSQL row.
 
-    HMAC: `hmac.sha256(JITSI_APP_SECRET, f"{huddle_id}.{object_key}")`.
+    Hardening:
+      1. HMAC: `hmac.sha256(JITSI_APP_SECRET, f"{huddle_id}.{object_key}")`.
+      2. Origin IP check against settings.JITSI_JIBRI_ALLOWED_CIDR (CSV).
+         Empty list = no IP check (dev). Production should set this to the
+         /32 of the Jibri host(s).
+      3. Replay protection: (huddle_id, object_key) cached in Redis for
+         24 h; duplicates return 200 + {status: "duplicate"} without a
+         second DB write or webhook fan-out.
     """
-    import hmac, hashlib
+    import hmac, hashlib, ipaddress
     from datetime import timedelta
     from sqlalchemy import select, update as sa_update
     from backend.db.postgres import get_async_sessionmaker
     from backend.db.postgres_models import HuddleSQL
     from backend.core.config import settings as _settings
 
+    # ── 2. Origin IP allowlist ─────────────────────────────────────────
+    allowed_cidr = (getattr(_settings, "JITSI_JIBRI_ALLOWED_CIDR", "") or "").strip()
+    if allowed_cidr and request is not None:
+        try:
+            client_ip = (
+                request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+                or (request.client.host if request.client else "")
+            )
+            client_addr = ipaddress.ip_address(client_ip)
+            if not any(
+                client_addr in ipaddress.ip_network(net.strip(), strict=False)
+                for net in allowed_cidr.split(",") if net.strip()
+            ):
+                raise HTTPException(
+                    status.HTTP_403_FORBIDDEN,
+                    detail=f"Jibri webhook from disallowed IP: {client_ip}",
+                )
+        except ValueError:
+            # Malformed CIDR or IP — fail closed.
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                detail="Could not validate Jibri webhook origin",
+            )
+
+    # ── 1. HMAC ────────────────────────────────────────────────────────
     if payload.signature and _settings.JITSI_APP_SECRET:
         expected = hmac.new(
             _settings.JITSI_APP_SECRET.encode("utf-8"),
@@ -564,6 +684,21 @@ async def jibri_webhook_endpoint(payload: JibriWebhookRequest = Body(...)) -> Di
         ).hexdigest()
         if not hmac.compare_digest(expected, payload.signature):
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="Invalid signature")
+
+    # ── 3. Replay protection ───────────────────────────────────────────
+    dedupe_key = f"jibri:webhook:{payload.huddle_id}:{payload.object_key}"
+    try:
+        from backend.db.redis import get_redis
+        redis = await get_redis()
+        # set NX — only succeeds if the key is new.
+        first_seen = await redis.set(dedupe_key, "1", ex=24 * 60 * 60, nx=True)
+        if not first_seen:
+            return {"ok": True, "status": "duplicate"}
+    except Exception:
+        # If Redis is unavailable, we lose replay protection but the
+        # update is idempotent (recording_object_key just gets the same
+        # value again). Carry on.
+        pass
 
     factory = get_async_sessionmaker()
     async with factory() as session:
@@ -587,6 +722,8 @@ async def jibri_webhook_endpoint(payload: JibriWebhookRequest = Body(...)) -> Di
         )
         await session.commit()
         org_id = row.organization_id
+        host_user_id = row.host_user_id
+        huddle_title = row.title or "your meeting"
 
     # Fire huddle.recording_ready webhook
     try:
@@ -602,7 +739,78 @@ async def jibri_webhook_endpoint(payload: JibriWebhookRequest = Body(...)) -> Di
     except Exception:
         pass
 
+    # Email the host with a playback link.
+    try:
+        from backend.services.notification_service import notification_service
+        from backend.db.mongodb.models.notification import NotificationPriority
+        from backend.db.mongodb.mongodb import MongoDB
+        from bson import ObjectId
+        db = await MongoDB.get_database()
+        try:
+            uid_oid: Any = ObjectId(host_user_id)
+        except Exception:
+            uid_oid = host_user_id
+        host = await db.users.find_one(
+            {"_id": uid_oid},
+            projection={"email": 1, "first_name": 1, "full_name": 1},
+        ) or {}
+        if host.get("email"):
+            from backend.core.config import settings as _settings
+            web_base = (getattr(_settings, "FRONTEND_URL", None) or "").rstrip("/")
+            playback_url = (
+                f"{web_base}/huddles/{payload.huddle_id}/recording"
+                if web_base
+                else f"https://lumicoria.ai/huddles/{payload.huddle_id}/recording"
+            )
+            await notification_service.send_email_notification(
+                to_email=host["email"],
+                template_name="huddle_recording_ready",
+                template_data={
+                    "user_name": host.get("first_name") or host.get("full_name", "").split(" ")[0] or None,
+                    "huddle_title": huddle_title,
+                    "playback_url": playback_url,
+                    "size_bytes": payload.size_bytes,
+                    "duration_sec": payload.duration_sec,
+                },
+                priority=NotificationPriority.NORMAL,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("huddle.recording_email_failed", error=str(exc), huddle_id=payload.huddle_id)
+
     return {"ok": True}
+
+
+# ── JWT refresh (for long-running calls) ───────────────────────────────
+
+
+@router.post("/{huddle_id}/refresh-jwt")
+async def refresh_huddle_jwt_endpoint(
+    huddle_id: str,
+    current_user: User = Depends(get_current_active_user),
+) -> Dict[str, Any]:
+    """Issue a fresh Jitsi JWT for the same room — frontend calls this
+    on receipt of Jitsi's ``EXPIRED_TOKEN`` event so the call doesn't
+    drop on long meetings. JWT TTL stays short (1 h) so a leaked token
+    has limited blast radius."""
+    huddle = await svc.get_huddle(huddle_id, requesting_user_id=str(current_user.id))
+    if not huddle:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Not found or forbidden")
+
+    is_host = str(current_user.id) == huddle.get("host_user_id")
+    new_jwt = sign_room_jwt(
+        room=huddle.get("room_name") or "*",
+        user_id=str(current_user.id),
+        display_name=getattr(current_user, "full_name", None) or getattr(current_user, "email", None),
+        email=getattr(current_user, "email", None),
+        moderator=is_host,
+        allow_recording=bool(huddle.get("recording_enabled")),
+    )
+    return {
+        "jitsi_jwt": new_jwt,
+        "jitsi_domain": jitsi_domain(),
+        "is_host": is_host,
+        "issued_at": int(datetime.utcnow().timestamp()),
+    }
 
 
 # ── Phase 3 — TTS / analytics / calendar back-sync / ICS ───────────────

@@ -279,7 +279,10 @@ class Settings(BaseSettings):
     )
     CELERY_RAG_WORKER_CONCURRENCY: int = Field(
         default=1,
-        description="Prefork workers for the heavy RAG ingest queue.",
+        description=(
+            "Worker slots for the heavy RAG ingest queue. Keep at 1 with the "
+            "solo pool; scale celery-rag-worker replicas for more throughput."
+        ),
     )
     LLM_FALLBACK_PROVIDER: Optional[str] = Field(
         default=None,
@@ -661,15 +664,24 @@ class Settings(BaseSettings):
     SLACK_CLIENT_ID: Optional[str] = None
     SLACK_CLIENT_SECRET: Optional[str] = None
 
-    # ── Lumicoria Huddle (Jitsi) ──────────────────────────────────────
-    # Public Jitsi (`meet.jit.si`) needs nothing. Self-hosted at
-    # meet.lumicoria.ai needs JITSI_APP_ID + JITSI_APP_SECRET (passed to
-    # prosody's mod_auth_token) and the domain.
-    JITSI_DOMAIN: str = "meet.jit.si"
+    # ── Lumicoria Meet (self-hosted Jitsi) ────────────────────────────
+    # Production self-hosts at meet.lumicoria.ai with JWT auth
+    # (JITSI_APP_ID + JITSI_APP_SECRET match the docker/jitsi/.env values
+    # so prosody's mod_auth_token can verify tokens we sign).
+    JITSI_DOMAIN: str = "meet.lumicoria.ai"
     JITSI_APP_ID: Optional[str] = None
     JITSI_APP_SECRET: Optional[str] = None
-    JITSI_JWT_TTL_SECONDS: int = 60 * 60 * 4  # 4 hours per token
-    JITSI_ENABLE_RECORDING_API: bool = False  # toggle to True when Jibri is wired
+    # Short TTL so a leaked token has limited blast radius; the frontend
+    # silently refreshes via /huddles/{id}/refresh-jwt before expiry.
+    JITSI_JWT_TTL_SECONDS: int = 60 * 60          # 1 hour per token
+    JITSI_ENABLE_RECORDING_API: bool = True
+    # Comma-separated CIDRs allowed to POST /huddles/jibri/webhook.
+    # Empty = no IP allowlist (dev only). In production set to the /32
+    # of each Jibri host.
+    JITSI_JIBRI_ALLOWED_CIDR: str = ""
+    # Per-org branding upload size caps.
+    JITSI_LOGO_MAX_BYTES: int = 1 * 1024 * 1024
+    JITSI_FAVICON_MAX_BYTES: int = 200 * 1024
 
     # Notion OAuth
     NOTION_OAUTH_CLIENT_ID: Optional[str] = None
