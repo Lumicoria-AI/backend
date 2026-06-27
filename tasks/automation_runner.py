@@ -18,7 +18,6 @@ durability of action retries.
 
 from __future__ import annotations
 
-import asyncio
 import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -26,6 +25,7 @@ from typing import Any, Dict, List, Optional
 import structlog
 
 from backend.tasks.celery_app import celery_app
+from backend.tasks.async_utils import run_worker_coro
 
 logger = structlog.get_logger(__name__)
 
@@ -189,19 +189,8 @@ async def _retry_errored_runs(batch_size: int = 50) -> Dict[str, int]:
 
 
 def _run_async(coro):
-    """Run a coroutine in a fresh event loop per Celery task.
-
-    Motor binds Futures to the loop that ran the connection's first I/O;
-    reusing a loop across prefork workers causes 'Future attached to a
-    different loop' errors. asyncio.run() creates and tears down a new
-    loop, isolating each task.
-    """
-    try:
-        from backend.db.mongodb.mongodb import MongoDB
-        MongoDB.reset_for_new_loop()  # type: ignore[attr-defined]
-    except Exception:
-        pass
-    return asyncio.run(coro)
+    """Run automation work on the shared Celery worker loop."""
+    return run_worker_coro(coro)
 
 
 @celery_app.task(name="automations.tick_scheduled", bind=True, max_retries=3)

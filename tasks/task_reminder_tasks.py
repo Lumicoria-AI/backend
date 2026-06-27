@@ -20,13 +20,13 @@ for the weekly) and skips when stamped.  Safe to over-schedule.
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, time, timedelta
 from typing import Any, Dict, List, Optional
 
 import structlog
 from celery import shared_task
 
+from backend.tasks.async_utils import run_worker_coro
 from backend.tasks.celery_app import celery_app  # registers our app
 
 logger = structlog.get_logger(__name__)
@@ -36,24 +36,8 @@ logger = structlog.get_logger(__name__)
 
 
 def _run(coro):
-    """Run an async coroutine inside a Celery task.
-
-    Reuses the per-worker event loop pattern from document_tasks.py — one
-    long-lived loop per worker process, NOT a fresh loop per task (that
-    breaks the Motor + asyncpg async clients).
-    """
-    try:
-        from backend.tasks.document_tasks import _get_loop  # type: ignore
-        loop = _get_loop()
-    except Exception:
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                raise RuntimeError("closed")
-        except Exception:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+    """Run an async coroutine on the worker's persistent event loop."""
+    return run_worker_coro(coro)
 
 
 # ── Per-user worker tasks ────────────────────────────────────────────────

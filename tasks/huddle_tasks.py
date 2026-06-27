@@ -10,9 +10,9 @@ Celery tasks for Lumicoria Huddle.
 
 from __future__ import annotations
 
-import asyncio
 import structlog
 
+from backend.tasks.async_utils import run_worker_coro
 from backend.tasks.celery_app import celery_app
 
 logger = structlog.get_logger(__name__)
@@ -23,7 +23,7 @@ def delete_expired_recording(self, huddle_id: str) -> dict:
     """Delete recording chunks + manifest from object storage."""
     try:
         from backend.services.huddle_recording_service import expire_recording
-        result = asyncio.run(expire_recording(huddle_id))
+        result = run_worker_coro(expire_recording(huddle_id))
         logger.info("huddle_recording_expired", huddle_id=huddle_id, result=result)
         return result
     except Exception as e:
@@ -36,9 +36,9 @@ def generate_post_meeting_summary(self, huddle_id: str) -> dict:
     """Re-run MeetingAgent post-call summary (retry surface)."""
     try:
         from backend.services.huddle_service import _run_post_call_summary, get_huddle
-        huddle = asyncio.run(get_huddle(huddle_id, requesting_user_id=None))
+        huddle = run_worker_coro(get_huddle(huddle_id, requesting_user_id=None))
         if huddle:
-            asyncio.run(_run_post_call_summary(huddle_id, huddle))
+            run_worker_coro(_run_post_call_summary(huddle_id, huddle))
         return {"ok": True}
     except Exception as e:
         logger.warning("huddle_summary_failed", huddle_id=huddle_id, error=str(e))
@@ -65,7 +65,7 @@ def sweep_expired_recordings() -> dict:
                 )
                 return [r[0] for r in (await session.execute(q)).all()]
 
-        ids = asyncio.run(_find())
+        ids = run_worker_coro(_find())
         for h_id in ids:
             delete_expired_recording.delay(h_id)
         return {"swept": len(ids)}

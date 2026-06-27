@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Optional
 
 from celery import Celery
+from kombu import Queue
 
 from backend.core.config import settings
 
@@ -90,11 +91,30 @@ celery_app = Celery(
         "backend.tasks.agent_metrics_tasks",   # Phase B — metrics materialiser
         "backend.tasks.automation_runner",     # Phase C — scheduled automations
         "backend.tasks.brain_tasks",           # Autonomous brain — daily digest
+        "backend.tasks.huddle_tasks",          # Huddle retention + summaries
     ],
 )
 
 
 celery_app.conf.update(
+    task_default_queue="platform",
+    task_queues=(
+        Queue("platform"),
+        Queue("rag"),
+        Queue("default"),
+    ),
+    task_routes={
+        "backend.tasks.document_tasks.ingest_file": {"queue": "rag"},
+        "backend.tasks.document_tasks.ingest_url": {"queue": "rag"},
+        "backend.tasks.document_tasks.ingest_text": {"queue": "rag"},
+        "tasks.*": {"queue": "platform"},
+        "wellbeing.*": {"queue": "platform"},
+        "webhooks.*": {"queue": "platform"},
+        "agent_metrics.*": {"queue": "platform"},
+        "automations.*": {"queue": "platform"},
+        "brain.*": {"queue": "platform"},
+        "huddle.*": {"queue": "platform"},
+    },
     task_serializer="json",
     accept_content=["json"],
     result_serializer="json",

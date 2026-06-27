@@ -9,10 +9,12 @@ This module provides background task processing for:
 """
 
 from celery import Celery, shared_task
+from kombu import Queue
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 import structlog
-import asyncio
+
+from backend.tasks.async_utils import run_worker_coro
 
 logger = structlog.get_logger()
 
@@ -29,6 +31,9 @@ celery_app = Celery(
 
 # Celery configuration
 celery_app.conf.update(
+    task_default_queue="platform",
+    task_queues=(Queue("platform"),),
+    task_routes={"backend.tasks.notification_tasks.*": {"queue": "platform"}},
     task_serializer="json",
     accept_content=["json"],
     result_serializer="json",
@@ -58,13 +63,8 @@ celery_app.conf.beat_schedule = {
 
 
 def run_async(coro):
-    """Helper to run async functions in Celery tasks."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+    """Helper to run async functions on the worker's persistent loop."""
+    return run_worker_coro(coro)
 
 
 @celery_app.task(

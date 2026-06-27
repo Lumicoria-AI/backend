@@ -273,6 +273,14 @@ class Settings(BaseSettings):
         default=4,
         description="Prefork workers per Celery process.",
     )
+    CELERY_PLATFORM_WORKER_CONCURRENCY: int = Field(
+        default=2,
+        description="Prefork workers for lightweight platform/background queues.",
+    )
+    CELERY_RAG_WORKER_CONCURRENCY: int = Field(
+        default=1,
+        description="Prefork workers for the heavy RAG ingest queue.",
+    )
     LLM_FALLBACK_PROVIDER: Optional[str] = Field(
         default=None,
         description=(

@@ -9,26 +9,14 @@ pre-aggregated table instead of computing on every request.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Dict
 
 import structlog
 
+from backend.tasks.async_utils import run_worker_coro
 from backend.tasks.celery_app import celery_app
 
 logger = structlog.get_logger(__name__)
-
-
-def _get_loop():
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            raise RuntimeError("event loop closed")
-        return loop
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        return loop
 
 
 async def _rebuild_all_windows() -> Dict[str, int]:
@@ -52,8 +40,7 @@ async def _rebuild_all_windows() -> Dict[str, int]:
 def materialise_agent_metrics(self) -> Dict[str, Any]:
     """Rebuild agent_metrics for day/week/month windows."""
     try:
-        loop = _get_loop()
-        result = loop.run_until_complete(_rebuild_all_windows())
+        result = run_worker_coro(_rebuild_all_windows())
         logger.info("agent_metrics.materialised", **result)
         return result
     except Exception as exc:  # noqa: BLE001

@@ -25,37 +25,27 @@ against ``last_brain_*_sent``), so re-queuing a fan-out is safe.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Dict, List, Optional
 
 import structlog
 from celery import shared_task  # noqa: F401  (kept for parity with siblings)
 
+from backend.tasks.async_utils import run_worker_coro
 from backend.tasks.celery_app import celery_app
 
 logger = structlog.get_logger(__name__)
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Async runner — fresh loop per task. Matches the pattern we settled
-# on after the asyncio loop bug fixes in webhook_dispatcher / automation_runner.
+# Async runner — one persistent loop per Celery worker process. Keeping
+# all background async work on the same loop prevents stale Motor clients
+# from pointing at loops closed by asyncio.run().
 # ─────────────────────────────────────────────────────────────────────
 
 
 def _run(coro):
-    """Run an async coroutine inside a Celery task in a fresh loop.
-
-    See webhook_dispatcher._run_async — Motor binds Futures to the loop
-    that ran the first I/O; reusing a loop across Celery prefork workers
-    causes "Future attached to a different loop" errors. asyncio.run()
-    creates and tears down a new loop, isolating each task.
-    """
-    try:
-        from backend.db.mongodb.mongodb import MongoDB
-        MongoDB.reset_for_new_loop()  # type: ignore[attr-defined]
-    except Exception:
-        pass
-    return asyncio.run(coro)
+    """Run an async coroutine on the worker's persistent event loop."""
+    return run_worker_coro(coro)
 
 
 # ─────────────────────────────────────────────────────────────────────

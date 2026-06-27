@@ -15,7 +15,6 @@ tasks directly and they run synchronously inside the API process.
 
 from __future__ import annotations
 
-import asyncio
 import random
 import time
 from datetime import datetime, timedelta
@@ -23,33 +22,15 @@ from typing import Any, Dict, List
 
 import structlog
 
+from backend.tasks.async_utils import run_worker_coro
 from backend.tasks.celery_app import celery_app
 
 logger = structlog.get_logger(__name__)
 
 
 def _run_async(coro):
-    """Sync entry to drive async code from inside a Celery task.
-
-    Reuses the per-worker persistent event loop from document_tasks so
-    Motor / Redis / HTTP pools stay bound to a single loop across
-    successive task invocations.  Creating a fresh loop each call would
-    invalidate Motor's cached `AsyncIOMotorClient` (futures attached to
-    a different loop) — that was the source of the
-    `wellbeing_iter_users_failed` warnings.
-    """
-    try:
-        from backend.tasks.document_tasks import _get_loop  # type: ignore
-        loop = _get_loop()
-    except Exception:
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                raise RuntimeError("closed")
-        except Exception:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+    """Sync entry to drive async code on the worker's persistent loop."""
+    return run_worker_coro(coro)
 
 
 # ── Helper: iterate users with wellbeing enabled ──────────────────

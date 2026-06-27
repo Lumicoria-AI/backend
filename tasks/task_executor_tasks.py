@@ -10,11 +10,11 @@ Beat schedule lives in `backend/tasks/celery_app.py`.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Dict
 
 import structlog
 
+from backend.tasks.async_utils import run_worker_coro
 from backend.tasks.celery_app import celery_app
 
 logger = structlog.get_logger(__name__)
@@ -26,18 +26,7 @@ def _run(coro):
     Same pattern as task_reminder_tasks: one loop per worker so Motor's
     connection pool stays valid across invocations.
     """
-    try:
-        from backend.tasks.document_tasks import _get_loop  # type: ignore
-        loop = _get_loop()
-    except Exception:
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                raise RuntimeError("closed")
-        except Exception:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+    return run_worker_coro(coro)
 
 
 @celery_app.task(name="tasks.run_pending_agent_proposals", bind=True, max_retries=1)

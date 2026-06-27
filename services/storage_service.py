@@ -231,6 +231,9 @@ class DualWriteStorageService:
 
     async def initialize(self) -> None:
         """Create clients and ensure buckets exist."""
+        if self._initialized and self._primary is not None:
+            return
+
         cfg = settings.s3
 
         self._primary = S3Client(

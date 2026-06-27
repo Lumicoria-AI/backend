@@ -18,12 +18,13 @@ document stuck in "processing".
 
 from __future__ import annotations
 
-import asyncio
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import structlog
+
+from backend.tasks.async_utils import get_worker_loop, run_worker_coro
 
 from .celery_app import celery_app
 
@@ -43,68 +44,13 @@ logger = structlog.get_logger(__name__)
 # invocations), and initialize services lazily on first task in that
 # process.  The event loop is torn down on worker_process_shutdown.
 
-_loop: Optional[asyncio.AbstractEventLoop] = None
-_services_initialized = False
-
-
-def _get_loop() -> asyncio.AbstractEventLoop:
-    """Return this worker process's persistent event loop, creating it
-    on first use.  Reusing the same loop keeps DB + HTTP connection pools
-    valid across successive tasks."""
-    global _loop
-    if _loop is None or _loop.is_closed():
-        _loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(_loop)
-    return _loop
-
-
-async def _ensure_services() -> None:
-    """Run the one-time async initialization that FastAPI's lifespan
-    normally performs.  Idempotent — safe to call at the start of every
-    task."""
-    global _services_initialized
-    if _services_initialized:
-        return
-    try:
-        from backend.services.storage_service import storage_service
-        await storage_service.initialize()
-    except Exception as e:
-        logger.warning("worker_storage_init_failed", error=str(e))
-    _services_initialized = True
+_get_loop = get_worker_loop
 
 
 def _run_async(coro):
     """Run an async coroutine from a sync Celery task on the worker's
     persistent event loop, after ensuring singletons are initialized."""
-    async def _wrapped():
-        await _ensure_services()
-        return await coro
-    return _get_loop().run_until_complete(_wrapped())
-
-
-# Tear down the event loop cleanly when the worker process exits.
-# Registered via Celery signal so it runs in the child process.
-try:
-    from celery.signals import worker_process_shutdown
-
-    @worker_process_shutdown.connect
-    def _close_worker_loop(**_kwargs):
-        global _loop, _services_initialized
-        if _loop is not None and not _loop.is_closed():
-            try:
-                _loop.run_until_complete(_loop.shutdown_asyncgens())
-            except Exception:
-                pass
-            try:
-                _loop.close()
-            except Exception:
-                pass
-        _loop = None
-        _services_initialized = False
-except ImportError:
-    # celery not importable at module load (e.g. running as a plain script) —
-    # signal registration is best-effort.
-    pass
+    return run_worker_coro(coro, ensure_services=True)
 
 
 async def _mark_error(

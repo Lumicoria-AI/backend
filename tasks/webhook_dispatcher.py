@@ -11,14 +11,12 @@ is bumped.
 Wiring:
     backend.tasks.celery_app.beat_schedule['webhook-deliver'] runs every 60s.
 
-The actual HTTP POST runs inside an `asyncio.run()` inside the Celery
-task to stay compatible with the synchronous Celery worker model — the
-codebase already uses this pattern in document_tasks.py.
+The actual HTTP POST runs on the shared Celery worker event loop to stay
+compatible with loop-bound async clients such as Motor.
 """
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import json
@@ -28,6 +26,7 @@ from typing import Any, Dict, List, Optional
 
 import structlog
 
+from backend.tasks.async_utils import run_worker_coro
 from backend.tasks.celery_app import celery_app
 
 logger = structlog.get_logger(__name__)
@@ -190,22 +189,8 @@ async def _drain_due_deliveries(batch_size: int = 50) -> int:
 
 
 def _run_async(coro):
-    """Run a coroutine to completion in a fresh, isolated event loop.
-
-    Motor (the async MongoDB driver) binds Futures to the loop that was
-    current when the connection's first I/O ran. Reusing a loop across
-    Celery prefork workers causes "Future attached to a different loop"
-    errors. A fresh loop per task closes that hole; the cost is one new
-    Motor client per invocation, which is fine for beat-scheduled jobs.
-    """
-    # Reset any module-level Motor client cached against an old loop so
-    # the next coroutine recreates it on this fresh one.
-    try:
-        from backend.db.mongodb.mongodb import MongoDB
-        MongoDB.reset_for_new_loop()  # type: ignore[attr-defined]
-    except Exception:
-        pass
-    return asyncio.run(coro)
+    """Run a coroutine on the worker's persistent event loop."""
+    return run_worker_coro(coro)
 
 
 @celery_app.task(name="webhooks.deliver_due", bind=True, max_retries=3)

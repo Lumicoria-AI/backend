@@ -23,8 +23,8 @@ Key production guarantees
   thread via `asyncio.to_thread`, so the event loop stays responsive under
   high concurrency.
 * **Optional process-level parallelism** — for large reindex jobs, pass
-  `LOCAL_EMBEDDING_PARALLEL>0` to fan out across CPU cores using FastEmbed's
-  multiprocessing pool.
+  `LOCAL_EMBEDDING_PARALLEL=0` to use all CPU cores or a positive integer
+  to cap FastEmbed's multiprocessing pool.
 * **Warm-up hook** — `warmup()` preloads the ONNX session and runs one
   dummy inference so the first real request does not pay the cold-start
   penalty (~2-5 s on CPU).
@@ -34,8 +34,8 @@ Env variables
 LOCAL_EMBEDDING_MODEL       — HF model id (default: BAAI/bge-base-en-v1.5)
 LOCAL_EMBEDDING_CACHE_DIR   — ONNX model cache on disk (default: ./models/fastembed)
 LOCAL_EMBEDDING_BATCH_SIZE  — texts per inference batch (default: 64)
-LOCAL_EMBEDDING_PARALLEL    — 0 = single-process, N = fan-out across N
-                              workers for large batches (default: 0)
+LOCAL_EMBEDDING_PARALLEL    — none = single-process, 0 = all cores,
+                              N = fan-out across N workers (default: 0)
 
 Registered as provider name: "local"
 """
@@ -83,7 +83,26 @@ _SUPPORTED_MODELS: dict[str, int] = {
 _DEFAULT_MODEL = "BAAI/bge-base-en-v1.5"
 _DEFAULT_CACHE_DIR = "./models/fastembed"
 _DEFAULT_BATCH_SIZE = 64
-_DEFAULT_PARALLEL = 0  # 0 = single-process (safe for Uvicorn workers)
+_DEFAULT_PARALLEL = 0  # 0 = FastEmbed chooses all available CPU cores
+
+
+def _configured_value(name: str) -> Any:
+    """Read a value from central settings without making import-time config fatal."""
+    try:
+        from backend.core.config import settings
+
+        return getattr(settings, name, None)
+    except Exception:
+        return None
+
+
+def _coerce_optional_int(value: Any, *, default: Optional[int]) -> Optional[int]:
+    """Parse ints while preserving the provider's historical 'none' escape hatch."""
+    if value is None:
+        return default
+    if isinstance(value, str) and value.lower() == "none":
+        return None
+    return int(value)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -145,13 +164,20 @@ class LocalEmbeddingProvider(LLMClient):
         parallel: Optional[int] = None,
         **_kwargs: Any,
     ) -> None:
+        configured_model = _configured_value("LOCAL_EMBEDDING_MODEL")
+        configured_cache_dir = _configured_value("LOCAL_EMBEDDING_CACHE_DIR")
+        configured_batch_size = _configured_value("LOCAL_EMBEDDING_BATCH_SIZE")
+        configured_parallel = _configured_value("LOCAL_EMBEDDING_PARALLEL")
+
         self._model_name = (
             model
+            or configured_model
             or os.getenv("LOCAL_EMBEDDING_MODEL")
             or _DEFAULT_MODEL
         )
         self._cache_dir = (
             cache_dir
+            or configured_cache_dir
             or os.getenv("LOCAL_EMBEDDING_CACHE_DIR")
             or _DEFAULT_CACHE_DIR
         )
@@ -159,13 +185,19 @@ class LocalEmbeddingProvider(LLMClient):
         self._batch_size = (
             batch_size
             if batch_size is not None
-            else (int(batch_env) if batch_env else _DEFAULT_BATCH_SIZE)
+            else int(
+                configured_batch_size
+                if configured_batch_size is not None
+                else (batch_env if batch_env else _DEFAULT_BATCH_SIZE)
+            )
         )
         parallel_env = os.getenv("LOCAL_EMBEDDING_PARALLEL")
         if parallel is not None:
             self._parallel: Optional[int] = parallel
+        elif configured_parallel is not None:
+            self._parallel = _coerce_optional_int(configured_parallel, default=_DEFAULT_PARALLEL)
         elif parallel_env is not None:
-            self._parallel = None if parallel_env.lower() == "none" else int(parallel_env)
+            self._parallel = _coerce_optional_int(parallel_env, default=_DEFAULT_PARALLEL)
         else:
             self._parallel = _DEFAULT_PARALLEL
 
