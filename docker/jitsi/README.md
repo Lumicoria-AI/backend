@@ -44,26 +44,23 @@ cd /opt/lumicoria/docker && ln -sf ../.env .env
 
 ## Boot commands
 
-Same `docker compose` patterns as everywhere else in this repo:
+Meet services are part of the default compose set — `docker compose up -d`
+boots them alongside backend/celery/databases/etc. No special flag.
 
 ```bash
 cd /opt/lumicoria/docker
 
-# Everything (platform + meet)
-docker compose --profile meet up -d
-
-# Just meet (without booting the rest of the platform)
-docker compose --profile meet up -d \
-  jitsi-web jitsi-prosody jitsi-jicofo jitsi-jvb jitsi-jibri coturn
-
-# Platform only (default — meet stays down)
+# Everything — platform + meet
 docker compose up -d
 
-# Logs / restart / down — same shape
-docker compose --profile meet logs -f jitsi-jibri
-docker compose --profile meet restart jitsi-jvb
-docker compose --profile meet down       # stops meet; keeps volumes
-docker compose --profile meet down -v    # nukes volumes too
+# Just the meet services (when the platform is already running)
+docker compose up -d jitsi-web jitsi-prosody jitsi-jicofo jitsi-jvb jitsi-jibri coturn
+
+# Logs / restart / down — same shape as any other service
+docker compose logs -f jitsi-jibri
+docker compose restart jitsi-jvb
+docker compose down       # stops everything; keeps volumes
+docker compose down -v    # nukes volumes too
 ```
 
 ## Prerequisites
