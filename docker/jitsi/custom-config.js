@@ -1,28 +1,37 @@
 /**
  * Lumicoria Meet — config.js overrides.
  *
- * Mounted into jitsi/web at /config/custom-config.js. Overrides Jitsi's
- * defaults for room behaviour. Applies to every access path.
+ * Mounted at /config/custom-config.js. IMPORTANT: this file runs AFTER
+ * the container's generated config.js. It must MERGE properties into
+ * the existing `config` object, NOT replace it — replacing wipes out
+ * hosts.domain / bosh / websocket / etc. which the meeting depends on.
+ *
+ * Ref: https://github.com/jitsi/docker-jitsi-meet/blob/master/web/rootfs/defaults/config.js
  */
 
-// eslint-disable-next-line no-unused-vars
-var config = {
-    // Neutral defaults — Lumicoria's own lobby handles pre-join UX.
-    prejoinPageEnabled:      false,
-    prejoinConfig:           { enabled: false },
-    enableWelcomePage:       false,
-    disableInviteFunctions:  true,
-    disableProfile:          false,
-    disableShortcuts:        false,
-    defaultLanguage:         'en',
-    // No "Feedback" prompt after a call — we have our own NPS.
-    disableFeedbackMeeting:  true,
-    // Kill Jitsi's mobile app upsell banners on mobile web.
-    disableThirdPartyRequests: true,
-    disableDeepLinking:        true,
-    // Analytics + telemetry OFF (we handle our own via Prometheus).
-    analytics: {
-        rtcstatsEnabled:    false,
-        disabled:           true,
-    },
-};
+/* global config */
+
+// Show the prejoin screen so users can preview camera/mic + name themselves
+// before entering. The Lumicoria embed can still override this per-huddle
+// via configOverwrite if we want to skip it inside the app iframe.
+config.prejoinPageEnabled     = true;
+config.prejoinConfig          = { enabled: true };
+config.enableWelcomePage      = false;
+config.disableInviteFunctions = true;
+config.disableProfile         = false;
+config.disableShortcuts       = false;
+config.defaultLanguage        = 'en';
+
+// No "Feedback" prompt after a call — we have our own NPS.
+config.disableFeedbackMeeting = true;
+
+// Kill deep-linking to the Jitsi mobile app on mobile web.
+config.disableDeepLinking = true;
+
+// Camera + mic behaviour.
+config.startWithAudioMuted = false;
+config.startWithVideoMuted = false;
+
+// Enable P2P for direct-URL calls with only two users (avoids relaying
+// through JVB when both peers can talk directly).
+config.p2p = Object.assign({}, config.p2p || {}, { enabled: true });
