@@ -669,6 +669,13 @@ class Settings(BaseSettings):
     # (JITSI_APP_ID + JITSI_APP_SECRET match the docker/jitsi/.env values
     # so prosody's mod_auth_token can verify tokens we sign).
     JITSI_DOMAIN: str = "meet.lumicoria.ai"
+    # XMPP domain used in the JWT `sub` claim. Prosody validates this
+    # against its own XMPP_DOMAIN.  In production both are the same
+    # public domain; locally JITSI_DOMAIN is "localhost:8800" (for the
+    # iframe) but the XMPP backbone uses "meet.jitsi".  Reads
+    # XMPP_DOMAIN from the env first, since that's already set by the
+    # Jitsi docker stack.
+    JITSI_XMPP_DOMAIN: Optional[str] = None
     JITSI_APP_ID: Optional[str] = None
     JITSI_APP_SECRET: Optional[str] = None
     # Short TTL so a leaked token has limited blast radius; the frontend

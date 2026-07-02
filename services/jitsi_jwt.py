@@ -32,6 +32,7 @@ Claim shape (Jitsi-standard):
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Any, Dict, Optional
 
@@ -65,13 +66,23 @@ def sign_room_jwt(
     if not is_self_hosted():
         return None
 
+    # The JWT `sub` must match what Prosody considers its XMPP_DOMAIN.
+    # In production JITSI_DOMAIN == XMPP_DOMAIN; locally JITSI_DOMAIN is
+    # "localhost:8800" (for the iframe) but XMPP_DOMAIN is "meet.jitsi".
+
+    xmpp_domain = (
+        settings.JITSI_XMPP_DOMAIN
+        or os.environ.get("XMPP_DOMAIN")
+        or settings.JITSI_DOMAIN
+    )
+
     now = int(time.time())
     exp = now + (ttl_seconds or settings.JITSI_JWT_TTL_SECONDS)
 
     payload: Dict[str, Any] = {
         "iss": settings.JITSI_APP_ID,
         "aud": "jitsi",
-        "sub": settings.JITSI_DOMAIN,
+        "sub": xmpp_domain,
         "room": room,
         "iat": now,
         "nbf": now - 5,
